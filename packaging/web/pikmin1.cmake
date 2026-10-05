@@ -1,0 +1,2 @@
+set(NECTAR_WEB_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}")
+include("${CMAKE_CURRENT_LIST_DIR}/web.cmake")

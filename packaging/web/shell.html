@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <title>open nectar</title>
+    <link rel="icon" type="image/png" href="nectar-icon.png">
+    <link rel="stylesheet" href="nectar.css">
+</head>
+<body>
+    <main id="viewport">
+        <canvas id="canvas" width="1280" height="720" tabindex="0" aria-label="open nectar game"></canvas>
+    </main>
+    <section id="loading" aria-live="polite">
+        <p id="status">loading open nectar...</p>
+        <progress id="progress" aria-label="game loading"></progress>
+        <div id="source-chooser" hidden>
+            <div class="source-buttons">
+                <button id="source-own" type="button">upload rom</button>
+                <button id="source-cached" type="button" hidden>play saved rom</button>
+                <button id="source-packaged" type="button" hidden>play included copy</button>
+                <button id="source-cancel" type="button" hidden>cancel import</button>
+            </div>
+            <p class="source-formats">gamecube · iso/gcm, rvz, wia, gcz, ciso, tgc, wbfs · usa rev. 1 or europe</p>
+            <p id="source-error" role="alert"></p>
+        </div>
+        <button id="report" type="button" hidden>save error report</button>
+    </section>
+    <input id="file-picker" type="file" accept=".zip,application/zip" hidden>
+    <input id="game-source-file" type="file" accept=".iso,.gcm,.rvz,.wia,.gcz,.ciso,.tgc,.wbfs" hidden>
+    <template id="runtime-script">{{{ SCRIPT }}}</template>
+    <script src="nectar-packs.js"></script>
+    <script src="nectar-actions.js"></script>
+    <script src="nectar-disc-files.js"></script>
+    <script src="nectar-disc-store.js"></script>
+    <script src="nectar-discs.js"></script>
+    <script src="nectar-loader.js"></script>
+</body>
+</html>

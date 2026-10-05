@@ -1,0 +1,17 @@
+set(NECTAR_GAME pikmin2_pc)
+set(NECTAR_LEGACY pikmin2_legacy)
+if(PIKMIN2_GAME_VERSION STREQUAL "VERSION_GPVP01")
+    set(NECTAR_OUTPUT_NAME nectar-pal)
+    set(NECTAR_WEB_DISC_KEY "GPVP01:0")
+else()
+    set(NECTAR_OUTPUT_NAME nectar)
+    set(NECTAR_WEB_DISC_KEY "GPVE01:0")
+endif()
+set(NECTAR_WEB_GAME "pikmin2")
+set(NECTAR_WEB_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}")
+set_target_properties(pikmin2_pc PROPERTIES OUTPUT_NAME ${NECTAR_OUTPUT_NAME}
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+include("${CMAKE_CURRENT_LIST_DIR}/web.cmake")
+target_link_options(pikmin2_pc PRIVATE "SHELL:-sASYNCIFY=1" "SHELL:-sASYNCIFY_STACK_SIZE=262144")
+
+target_link_options(pikmin2_pc PRIVATE --emit-symbol-map)

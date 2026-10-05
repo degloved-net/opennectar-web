@@ -1,0 +1,13 @@
+[package]
+name = "nectar-disc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+nod = { git = "https://github.com/encounter/nod", rev = "ebd80cac99b48a323200d84365e07a58cc27412d", default-features = false, features = ["compress-bzip2-vendored", "compress-lzma-vendored", "compress-zlib", "compress-zstd-vendored"] }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true

@@ -16,8 +16,8 @@ This project builds upon the decompilation by [projectPiki/pikmin](https://githu
 - TEV specialization for optimal performance
 - Controller, keyboard and mouse support, touch controls
 - **Both retail discs**: Pikmin USA Rev 1 and Pikmin Europe. The European disc
-  carries five languages — English, French, German, Spanish and Italian — and
-  the installer asks which one you want to play in
+  carries five languages — English, French, German, Spanish and Italian —
+  switchable from the launcher, F1 or the game's own options
 - **Pre-rendered movies**: the attract movies play, with sound
 - **Widescreen**: the HUD is laid out for 16:9 rather than stretched, and the
   3D view culls to the same shape, so nothing pops in and out at the sides
@@ -29,6 +29,8 @@ This project builds upon the decompilation by [projectPiki/pikmin](https://githu
 - HD character models from Pikmin 3 rips
 - Per-pixel lighting and real-time shadow maps (Off/Soft/Normal/Strong),
   both optional
+- **Launcher**: installs, updates itself from GitHub releases, and exposes every
+  F1 setting, texture packs and HD models outside the game
 
 **In development:**
 - Some minor graphical differences
@@ -39,31 +41,25 @@ Grab the package for your system from [Releases](../../releases).
 
 ### Linux
 
-```sh
-tar -xzf nectar-linux.tar.gz
-cd nectar-linux
-```
+Two downloads with the same content; pick one:
 
-Install only the OpenGL dependencies:
+- **`Open_Nectar-x86_64.AppImage`** — one file. Make it executable
+  (`chmod +x Open_Nectar-x86_64.AppImage`, or *Allow executing as program* in
+  its properties) and open it.
+- **`nectar-linux.tar.gz`** — a folder: `tar -xzf nectar-linux.tar.gz`, then
+  open `nectar-linux/nectar-launcher`.
 
-```sh
-# Debian/Ubuntu
-sudo apt install libopengl0 libglvnd0 libgbm1 libgl1-mesa-dri
+It runs on any x86-64 distribution with glibc 2.29 or newer — Ubuntu 20.04+,
+Mint 20+, Debian 11+, Fedora, openSUSE Leap 15.3+/Tumbleweed, Arch, Manjaro,
+SteamOS. SDL2 and the C++ runtime are built into the executables; the system
+only has to provide an OpenGL driver (any Intel/AMD/NVIDIA one) and, for the
+file pickers, `zenity` or `kdialog`, which GNOME and KDE already have.
 
-# Arch Linux
-sudo pacman -S libglvnd mesa
-
-# Fedora
-sudo dnf install libglvnd mesa-dri-drivers
-```
-
-Run the launcher:
-
-```sh
-./nectar-launcher
-```
-
-Everything else — glibc, SDL2, audio libraries — travels inside the package, so it runs on any x86-64 distribution without installing anything further.
+Press **Install** under the Pikmin cover, choose your disc image and a folder.
+That folder ends up with the game data, your saves and settings, and two
+programs: `nectar` (the game, for your disc's region) and `nectar-launcher`.
+Open that launcher to play from then on. `packaging/linux/README.txt` in the
+download covers troubleshooting.
 
 ### Windows
 
@@ -114,8 +110,8 @@ Once the game starts, **F1** opens graphics, controls and gameplay settings.
 
 **Playing afterwards**
 
-Go to the folder you installed into and run `nectar-launcher.exe` again. It sees
-the game is already installed and starts it straight away.
+Go to the folder you installed into and run `nectar-launcher.exe` again, then
+click the Pikmin cover.
 
 You can also run `nectar.exe` directly, but only from inside that folder: the
 game looks for its `assets` folder relative to the current directory.
@@ -153,13 +149,14 @@ Everything stays in the installation folder:
 - `pikmin_settings.conf` — the F1 menu settings
 - `assets\` — the extracted game data
 
-To move the installation elsewhere, copy the folder. To remove it, delete it.
+To move the installation elsewhere, use **Move Install** in the launcher (or
+copy the folder). To remove it, delete it.
 
 **If something goes wrong**
 
 | Symptom | Cause |
 |---|---|
-| Closes instantly, no window | `SDL2.dll` is missing from the folder, or Windows blocked it |
+| SmartScreen warns about the launcher | The .exe files are not signed: *More info* → *Run anyway* |
 | "Could not initialize window/OpenGL" | Graphics drivers too old, or the generic Windows display driver |
 | Starts but finds no data | Run it from the installation folder, not from elsewhere |
 | The image is rejected | It must be Pikmin USA Rev 1 or Pikmin Europe. RVZ/WIA/GCZ also needs the Dolphin converter; ISO/GCM does not |
@@ -208,9 +205,25 @@ Supported discs:
 
 Each release needs its own executable — the game's code is compiled here, and it
 differs between releases — so the package carries both and the installer picks
-the one your disc needs. With the European disc it also asks which language to
-play in; all five are installed either way, so **F1 → Language** changes it
-later without reinstalling.
+the one your disc needs. The European disc installs all five languages and
+starts in English; change it in the launcher's **Settings**, in **F1 → Language**
+or in the game's own options, without reinstalling.
+
+### The launcher
+
+After installing, the launcher in the game's folder is the way in:
+
+- **Games** — click the cover to play. The button underneath updates the game.
+- **Settings** — every option of the in-game F1 menu, plus texture packs, HD
+  models and language, saved straight to `pikmin_settings.conf`.
+- **Move Install** — moves the whole installation, saves included, to another
+  folder or drive.
+
+When a new release is published, the launcher says so and **Update** downloads
+and installs it by itself: saves, settings, texture packs and the extracted
+game data stay as they are. A newly downloaded package can also update an
+existing installation: open its launcher, press **Update** and choose the
+installed folder. The disc image is not needed either way.
 
 ### Launcher options
 
@@ -255,11 +268,11 @@ cmake -S . -B build-pal -DPIKMIN_GAME_VERSION=VERSION_GPIP01_00
 cmake --build build-pal -j"$(nproc)"
 ```
 
-The release packages carry both, and the installer copies whichever the disc
-asks for. `packaging/linux/package-standalone.sh` and
-`packaging/windows/package-standalone.sh` each build both executables. The
-Windows zip must include `nectar-pal.exe` next to `nectar.exe`; without it a
-European disc extracts cleanly and then fails to start.
+The release packages carry both, and the launcher installs whichever the disc
+asks for, named `nectar`. `packaging/linux/build-release.sh` and
+`packaging/windows/package-standalone.sh` each build both executables; see
+[docs/COMPILAR_RELEASES.md](docs/COMPILAR_RELEASES.md) for every release
+package (Linux tar.gz and AppImage, Windows zip, Android APK).
 
 ### Windows (cross-compiled from Linux)
 
@@ -269,7 +282,7 @@ SDL2 for MinGW is expected in `third_party/SDL2-mingw64`. It is not committed to
 the repository; download `SDL2-devel-<version>-mingw.tar.gz` from the
 [SDL releases](https://github.com/libsdl-org/SDL/releases) and extract its
 `x86_64-w64-mingw32` directory there, so that
-`third_party/SDL2-mingw64/lib/libSDL2.dll.a` exists.
+`third_party/SDL2-mingw64/lib/libSDL2.a` exists.
 
 ```sh
 sudo apt install g++-mingw-w64-x86-64
@@ -280,7 +293,9 @@ cmake -S . -B build-windows \
 cmake --build build-windows -j"$(nproc)"
 ```
 
-The result is `build-windows/bin/nectar.exe`, which needs `SDL2.dll` beside it.
+The result is `build-windows/bin/nectar.exe`. SDL2 and the MinGW runtime are
+linked into it (`PIKMIN_STATIC_RUNTIME`, on by default for Windows), so it
+needs no DLLs beside it.
 
 To ship a folder with both USA and PAL builds:
 
@@ -289,7 +304,8 @@ packaging/windows/package-standalone.sh
 ```
 
 That writes `packaging/windows/out/nectar-windows/` with `nectar.exe`,
-`nectar-pal.exe`, `nectar-launcher.exe` and `SDL2.dll`.
+`nectar-pal.exe` and `nectar-launcher.exe`, and zips it as
+`packaging/windows/out/nectar-windows.zip`.
 
 ### Run after building
 
@@ -453,6 +469,8 @@ disc. It takes effect the next time you start the game.
 - **Mouse sensitivity**: 0.1x to 5.0x
 - **Stick dead zone**: 0-127
 - **Invert sticks**: Options for main stick and C-stick
+- **Hold to Pluck / Whistle Pluck**: keep the button held, or hold the whistle
+  over sprouts, to pluck them one after another (both optional)
 
 ### Control modes
 
@@ -483,6 +501,7 @@ The port supports any SDL2-compatible controller:
 - **60 and 120 FPS**: The original ran gameplay at 30
 - **Mouse control**: Precision impossible on GameCube, including wheel shortcuts
 - **Improved Pikmin AI**: Chain tasks automatically (optional)
+- **Faster plucking**: hold the button or the whistle over sprouts (optional)
 - **Superior performance**: TEV specialization generates optimal shaders per material
 - **No emulation**: Native x86-64 code, no Dolphin overhead
 - **Instant saves**: Save files are accessible on disk
@@ -500,7 +519,13 @@ around 600 MB.
 **Laptops with switchable graphics**: the game asks for the dedicated GPU on
 both platforms, and only where that hardware is present. The log line
 `[PC Port] GPU:` reports which one it got. `NECTAR_NO_PRIME=1` turns the request
-off.
+off. Desktops with only an NVIDIA card are left alone: there is nothing to
+offload to.
+
+**`GPU: ... llvmpipe`** means OpenGL is running in software. On Linux with
+NVIDIA this is almost always the system, not the game: after a driver update
+the kernel module and the libraries no longer match until you **reboot**.
+`glxinfo -B` failing or also showing llvmpipe confirms it.
 
 ## Debug and environment variables
 
@@ -569,3 +594,7 @@ The code is offered under [CC0 1.0](LICENSE.MD). This license does not grant rig
 
 - [LEGAL.md](LEGAL.md) - Legal notice
 - [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guide
+
+## browser builds
+
+the source layout follows upstream fusion: `games/pikmin1` and `games/pikmin2`. shared browser tooling is in `packaging/web`. see the [web build instructions](packaging/web/readme.md) for threaded, single-threaded, and single-file cdn builds.

@@ -34,6 +34,10 @@ int main()
 	pc_render_begin_presentation(4.0);
 	check(pc_render_interpolation_alpha() == 1.0, "presentation alpha must clamp at one");
 
+	pc_render_end_presentation();
+	check(pc_render_is_authoritative() && pc_render_tick_serial() == 1,
+	      "ending presentation must restore authoritative without advancing serial");
+
 	pc_render_begin_authoritative_tick();
 	check(pc_render_is_authoritative() && pc_render_tick_serial() == 2,
 	      "next authoritative tick must restore phase and increment serial");

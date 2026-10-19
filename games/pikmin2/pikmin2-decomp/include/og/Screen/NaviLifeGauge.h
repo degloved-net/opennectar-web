@@ -20,6 +20,7 @@ struct NaviLifeGauge : public P2DScreen::Mgr_tuning {
 
 	void setCallBack(DataNavi*, CallBack_LifeGauge::LifeGaugeType);
 	void setType(CallBack_LifeGauge::LifeGaugeType);
+	void pcSetCharacter(int character, int naviIndex);
 
 	// _00      = VTBL
 	// _00-_148 = P2DScreen::Mgr_tuning

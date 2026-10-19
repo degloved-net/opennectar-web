@@ -2,12 +2,14 @@
 #include "port/jaudio_host.h"
 #endif
 #include "pc_window.h"
+#include "timing/pc_frame_scheduler.h"
 #include "pc_speedrun.h"
 #include "pc_gyro.h"
 #include "pc_icon.h"
 #ifdef __EMSCRIPTEN__
 #include "web/pc_web_runtime.h"
 #endif
+#include "netplay/pc_netplay_det.h"
 #if PIKI_PC_TOUCH
 #include "gl/pc_gfx.h"
 #include "touch/pc_touch.h"
@@ -59,6 +61,27 @@ static SDL_JoystickID sAutoPadId[2] = { -1, -1 };
 // próximo mando que se conecte es suyo.
 static bool sPlayerPadLost[2] = { false, false };
 static int  sKeyboardOwner = 0; // jugador que recibe teclado (0 salvo asignación)
+
+// Netplay session: strong-defined by pc_netplay_session.cpp in netplay builds
+// only, null otherwise.
+bool pc_netplay_session_active(void);
+#if PIKI_NETPLAY_BUILD
+// Netplay input ownership (--netplay-input). A `keyboard` peer samples only
+// keys and mouse; a `gamepad` peer samples only its pad (keys and mouse are
+// ignored). `auto` keeps the normal behaviour (both flags false).
+static bool sNetplayIgnoreKeyboard = false;
+static bool sNetplayIgnoreGamepads = false;
+// --netplay-input gamepad:N: the player it feeds and N, re-resolved on every
+// controller hotplug until the Nth pad is open.
+static int sNetplayPadPlayer = -1;
+static int sNetplayPadIndex  = -1;
+static void netplayResolvePendingPad();
+#define PC_NETPLAY_IGNORE_KEYBOARD sNetplayIgnoreKeyboard
+#define PC_NETPLAY_IGNORE_GAMEPADS sNetplayIgnoreGamepads
+#else
+#define PC_NETPLAY_IGNORE_KEYBOARD false
+#define PC_NETPLAY_IGNORE_GAMEPADS false
+#endif
 
 // Última pulsación vista en el bucle de eventos, para el menú "pulsa un botón".
 static int            sLastPressKind   = PC_INPUT_DEV_NONE;
@@ -156,6 +179,9 @@ static bool pc_controller_open_slot(int index)
 	printf("[PC Port] Opened Game Controller #%d (id %d): %s\n", (int)sOpenPads.size(), (int)id, SDL_GameControllerName(ctl));
 	fflush(stdout);
 	resolvePlayerPads();
+#if PIKI_NETPLAY_BUILD
+	netplayResolvePendingPad();
+#endif
 	return true;
 }
 
@@ -179,9 +205,15 @@ static void pc_controller_close_instance(SDL_JoystickID which)
 		break;
 	}
 	resolvePlayerPads();
+#if PIKI_NETPLAY_BUILD
+	netplayResolvePendingPad();
+#endif
 }
 static int sWindowWidth = 1280;
 static int sWindowHeight = 720;
+// Size last passed to SDL_SetWindowSize (see pc_window_set_window_size).
+static int sRequestedWidth = 1280;
+static int sRequestedHeight = 720;
 static int sLogicalRetraceInterval = 1;
 
 // Mouse wheel notches accumulated since the last consumer read them. The wheel
@@ -190,6 +222,9 @@ static int sLogicalRetraceInterval = 1;
 // like the pad's edge-shaped buttons.
 static Uint32 sMousePressedMask = 0; // buttons pressed since the last take
 static int sMouseWheelSteps = 0;
+// Steps that nothing consumes (title, pause, menus) must not pile up. Otherwise a
+// long scroll there changes the captain or the camera zoom once play resumes.
+constexpr int kMaxPendingWheelSteps = 8;
 static float sTouchZoomDelta = 0.0f;
 static float sTouchCameraDrag = 0.0f;
 static float sCameraPitchDrag = 0.0f;
@@ -199,6 +234,9 @@ static std::chrono::steady_clock::time_point sNextPresentDeadline;
 // Settings-menu video state (PC only).
 static int sDisplayMode = PC_WINDOW_FULLSCREEN_WINDOWED;
 static bool sVsyncEnabled = true;   // presentation pacing on/off
+// Actual interval requested from the GL driver. This is separate from the
+// GameCube-style logical interval (0=monitor/high rate, 1=60, 2=30).
+static int sDriverSwapInterval = 0;
 static char sLastVideoError[256] = { 0 };
 
 // Keyboard remapping state (PC only).
@@ -207,6 +245,8 @@ static SDL_Scancode sKeyBindings[PC_KEY_ACT_COUNT];
 // el código (izquierdo = A, derecho = B, central = Z) son sus valores por defecto.
 static SDL_Scancode sKeyBindings2[PC_KEY_ACT_COUNT];
 static bool sSwarmHeld = false; // PC_KEY_ACT_SWARM sampled by the last poll
+// D-pad Down of each player's pad, which is also the swarm button.
+static bool sPadDpadDownHeld[2] = { false, false };
 
 // Lock-On y Charge se consumen como flanco: el bucle sondea el mando muchas
 // veces entre ticks lógicos, así que la pulsación se guarda hasta que alguien
@@ -214,12 +254,16 @@ static bool sSwarmHeld = false; // PC_KEY_ACT_SWARM sampled by the last poll
 static bool sLockOnWasDown = false;
 static bool sFirstPersonWasDown = false;
 static bool sGyroRecenterWasDown = false;
-static bool sSwarmWasDown  = false;
-static bool sLockOnPending = false;
-static bool sBombPending[2] = { false, false }; // mod "Bomb Control", por jugador
-static bool sSwarmPending  = false;
+static bool sSwarmWasDown[2]  = { false, false };
+// Pulsaciones encoladas por jugador (0/1): en cooperativo cada capitán tiene
+// sus mods Lock-On, Charge y Bomb Control.
+static bool sLockOnPending[2] = { false, false };
+static bool sBombPending[2]   = { false, false };
+static bool sSwarmPending[2]  = { false, false };
 
 bool pc_window_swarm_held(void) { return sSwarmHeld; }
+
+bool pc_window_pad_dpad_down_held(int player) { return sPadDpadDownHeld[player & 1]; }
 static bool sKeyBindingsInitialized = false;
 
 // Gamepad remapping state.
@@ -285,6 +329,7 @@ const SDL_Scancode kDefaultKeyBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_FIRSTPERSON */ SDL_SCANCODE_V,
     /* PC_KEY_ACT_GYRO_RECENTER */ SDL_SCANCODE_UNKNOWN, // el giroscopio va en el mando
     /* PC_KEY_ACT_BOMB        */ SDL_SCANCODE_B, // B solo es "atrás" dentro de los menús
+    /* PC_KEY_ACT_SPEEDRUN_RESET */ SDL_SCANCODE_F5,
 };
 
 SDL_Scancode pc_window_default_key_binding2(int action) {
@@ -323,6 +368,7 @@ const int kDefaultGamepadBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_FIRSTPERSON */ SDL_CONTROLLER_BUTTON_LEFTSTICK,
     /* PC_KEY_ACT_GYRO_RECENTER */ -1, // sin botón libre por defecto; se asigna en Controls
     /* PC_KEY_ACT_BOMB        */ -1, // ídem
+    /* PC_KEY_ACT_SPEEDRUN_RESET */ -1, // Back abre los ajustes; se asigna en Controls o en el menú Speedrun
 };
 
 // Action names for UI display.
@@ -333,6 +379,7 @@ static const char* kKeyActionNames[PC_KEY_ACT_COUNT] = {
     "C-Stick Up", "C-Stick Down", "C-Stick Left", "C-Stick Right",
     "Swarm to cursor",
     "Lock-On", "First Person", "Gyro Recenter", "Bomb",
+    "Speedrun Reset",
 };
 
 static void initKeyBindings() {
@@ -755,6 +802,8 @@ bool pc_window_init(const char* title, int width, int height) {
 
     sWindowWidth = width;
     sWindowHeight = height;
+    sRequestedWidth = width;
+    sRequestedHeight = height;
     sShouldClose = false;
 
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -774,10 +823,12 @@ bool pc_window_init(const char* title, int width, int height) {
 #endif
     pc_gyro_init();
 
-    // The current GX translation backend intentionally uses compatibility
-    // features (GLSL 1.20 attribute/varying syntax and GL_QUADS). A Core
-    // profile accepts the context but rejects every draw, producing a black
-    // window without an SDL error.
+    // Linux and Windows request a GL 3.3 compatibility profile. macOS offers no
+    // compatibility profile above GL 2.1, and the 2.1 fallback cannot run the
+    // renderer, so macOS requests a 4.1 core context. Some renderer programs are
+    // #version 330 core (pc_gfx.cpp, pc_postprocess.cpp), which needs GL 3.3, so
+    // the context must be at least 3.3. Core profiles also need a named VAO for
+    // each attribute layout (see pc_gfx_init).
     //
     // GLES mode (PIKI_USE_GLES) requests an ES 3.0 context instead, which has
     // no compatibility/core distinction.
@@ -786,6 +837,11 @@ bool pc_window_init(const char* title, int width, int height) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#elif defined(__APPLE__)
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
 #else
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
@@ -841,12 +897,15 @@ bool pc_window_init(const char* title, int width, int height) {
     pc_icon_apply(sWindow);
     sGLContext = SDL_GL_CreateContext(sWindow);
     if (!sGLContext) {
-#if !PIKI_USE_GLES
+#if !PIKI_USE_GLES && !defined(__APPLE__)
         printf("[PC Port Warning] SDL_GL_CreateContext Compatibility Profile failed: %s. Retrying with default profile...\n", SDL_GetError());
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, 0);
         sGLContext = SDL_GL_CreateContext(sWindow);
+#elif defined(__APPLE__) && !PIKI_USE_GLES
+        // The GL 2.1 fallback cannot run the renderer, so macOS does not retry.
+        printf("[PC Port Error] SDL_GL_CreateContext GL 4.1 core failed: %s\n", SDL_GetError());
 #else
         printf("[PC Port Error] SDL_GL_CreateContext ES 3.0 failed: %s\n", SDL_GetError());
 #endif
@@ -866,6 +925,7 @@ bool pc_window_init(const char* title, int width, int height) {
     // driver VSync with that limiter caused some compositor/Mesa paths to wait
     // two or three refreshes (the world map spent ~51 ms in swap alone).
     SDL_GL_SetSwapInterval(0);
+    sDriverSwapInterval = 0;
     
     // Enable relative mouse mode for cursor control
     // We'll toggle this with a key press (e.g., Tab) or when the game starts
@@ -910,6 +970,11 @@ bool pc_window_init(const char* title, int width, int height) {
 
 // Vuelca el estado de un mando SDL sobre un pad GC. Devuelve true si el mando
 // se está usando (para decidir entre iconos de teclado y de mando).
+// Free Camera se queda el stick derecho, pero el radar lo necesita para el
+// zoom (issue #76): se guarda aquí el eje vertical aunque no llegue al pad.
+static float sFreeCamSubY[2] = { 0.0f, 0.0f };
+float pc_window_free_camera_sub_y(void) { return sFreeCamSubY[0]; }
+
 static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& stickX, s8& stickY,
                                    s8& substickX, s8& substickY, u8& triggerL, u8& triggerR, bool& swarmHeld, int player = 0)
 {
@@ -965,14 +1030,22 @@ static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& sti
     if (sCStickInvert & 1) rx = -rx;
     if (sCStickInvert & 2) ry = -ry;
     // Mod "Free Camera": the right stick orbits instead of pushing the squad,
-    // the way Pikmin 3 rearranged it. The squad moves to the Swarm button,
-    // which defaults to D-pad Down here because the mod frees it up.
+    // the way Pikmin 3 rearranged it. The squad moves to the Swarm button.
+    // D-pad Down is the pad's swarm button with or without the mod (issue
+    // #76): the right stick alone makes the original C-stick column, never a
+    // group at the cursor.
+    sFreeCamSubY[player & 1] = 0.0f;
+    sPadDpadDownHeld[player & 1] = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+    // Con A pulsado y la selección de Pikmin 2, la cruceta abajo solo cambia
+    // el color del Pikmin agarrado: no hace swarm.
+    const bool kindChange = (button & PAD_BUTTON_A) && pc_settings_get_p2_selection();
+    if (sPadDpadDownHeld[player & 1] && !kindChange) swarmHeld = true;
     if (pc_settings_get_free_camera()) {
+        if (abs(ry) > axisDeadZone) sFreeCamSubY[player & 1] = pc_pad_axis_from_sdl(-ry) / 74.0f;
         if (abs(rx) > axisDeadZone) {
             // Cada mando gira la cámara de su jugador (en cooperativo, J2 la suya).
             pc_window_add_camera_drag_player(player, -(float)rx / 32767.0f * 0.02f * pc_settings_get_free_camera_pad_scale());
         }
-        if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) swarmHeld = true;
     } else {
         if (abs(rx) > axisDeadZone) substickX = pc_pad_axis_from_sdl(rx);
         if (abs(ry) > axisDeadZone) substickY = pc_pad_axis_from_sdl(-ry);
@@ -1000,6 +1073,10 @@ static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& sti
         const bool bombDown = boundButtonPressed(PC_KEY_ACT_BOMB);
         if (bombDown && !sBombPadWasDown[pi]) sBombPending[pi] = true;
         sBombPadWasDown[pi] = bombDown;
+        static bool sLockPadWasDown[2] = { false, false };
+        const bool lockDown = boundButtonPressed(PC_KEY_ACT_LOCKON);
+        if (lockDown && !sLockPadWasDown[pi]) sLockOnPending[pi] = true;
+        sLockPadWasDown[pi] = lockDown;
     }
 
     const int noticeZone = axisDeadZone < 16384 ? 16384 : axisDeadZone;
@@ -1101,7 +1178,7 @@ void pc_window_poll_events(PADStatus* pad) {
                 if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
                     steps = -steps;
                 }
-                sMouseWheelSteps += steps;
+                sMouseWheelSteps = std::clamp(sMouseWheelSteps + steps, -kMaxPendingWheelSteps, kMaxPendingWheelSteps);
                 break;
             }
             case SDL_WINDOWEVENT:
@@ -1121,6 +1198,9 @@ void pc_window_poll_events(PADStatus* pad) {
                 if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED && !sSettingsMenuOpen) {
                     SDL_SetRelativeMouseMode(sMouseRelativeMode ? SDL_TRUE : SDL_FALSE);
                 }
+                break;
+            case SDL_TEXTINPUT:
+                pc_settings_text_input(event.text.text);
                 break;
             case SDL_CONTROLLERDEVICEADDED:
                 pc_controller_open_slot(event.cdevice.which);
@@ -1170,7 +1250,7 @@ void pc_window_poll_events(PADStatus* pad) {
                     printf("[PC Port] Mouse relative mode: OFF (Escape)\n");
                 }
                 // Cycle control modes with F2 key
-                if (event.key.keysym.scancode == SDL_SCANCODE_F2 && !sSettingsMenuOpen) {
+                if (event.key.keysym.scancode == SDL_SCANCODE_F2 && !event.key.repeat && !sSettingsMenuOpen) {
                     pc_window_set_control_mode((sControlMode + 1) % 2);
                     const char* modeNames[] = {"Classic", "Mouse Cursor"};
                     printf("[PC Port] Control mode: %s\n", modeNames[sControlMode]);
@@ -1217,22 +1297,16 @@ void pc_window_poll_events(PADStatus* pad) {
     initKeyBindings();
 
     // ── Keyboard Mapping (configurable) ──
-    // Mod "Free Camera": while the B key is held the mouse orbits instead of
-    // aiming, so that key stops sending B for as long as it is down. The
-    // whistle is unaffected in practice -- right click is wired to B on its
-    // own, below -- and with the mod off nothing changes.
-    // Solo mientras se juega, y solo las teclas: en menús, pausa y pantallas B
-    // vuelve a ser B, y un clic asignado a B siempre manda B (antes del #68 el
-    // clic derecho iba aparte y no se anulaba).
+    // Mod "Free Camera": con ratón la cámara gira empujando el cursor más
+    // allá de su límite (Navi), así que B ya no se reserva para girar.
     const int bindB1 = sKeyBindings[PC_KEY_ACT_B], bindB2 = sKeyBindings2[PC_KEY_ACT_B];
     const bool bKeyHeld = (!pc_bind_is_mouse(bindB1) && pc_window_binding_held(bindB1, state, boundMouse))
                        || (!pc_bind_is_mouse(bindB2) && pc_window_binding_held(bindB2, state, boundMouse));
-    const bool freeCamHeld = pc_settings_get_free_camera() && pc_settings_in_gameplay() && bKeyHeld;
 
     if (held(PC_KEY_ACT_A))        button |= PAD_BUTTON_A;
     const bool bMouseHeld = (pc_bind_is_mouse(bindB1) && pc_window_binding_held(bindB1, state, boundMouse))
                          || (pc_bind_is_mouse(bindB2) && mouseSecondOk && pc_window_binding_held(bindB2, state, boundMouse));
-    if (bMouseHeld || (bKeyHeld && !freeCamHeld)) button |= PAD_BUTTON_B;
+    if (bMouseHeld || bKeyHeld) button |= PAD_BUTTON_B;
     if (held(PC_KEY_ACT_X))        button |= PAD_BUTTON_X;
     if (held(PC_KEY_ACT_Y))        button |= PAD_BUTTON_Y;
     if (held(PC_KEY_ACT_Z))        button |= PAD_TRIGGER_Z;
@@ -1276,16 +1350,22 @@ void pc_window_poll_events(PADStatus* pad) {
     substickX = (s8)(cdirX * 127);
     substickY = (s8)(cdirY * 127);
 
-    const bool usedKeyboard = button != 0 || dirX != 0 || dirY != 0 || cdirX != 0 || cdirY != 0;
+    bool usedKeyboard = button != 0 || dirX != 0 || dirY != 0 || cdirX != 0 || cdirY != 0;
     bool usedGamepad = false;
     sSwarmHeld = held(PC_KEY_ACT_SWARM);
+    // Netplay input ownership: a `gamepad` peer ignores every key.
+    if (PC_NETPLAY_IGNORE_KEYBOARD) {
+        button = 0;
+        stickX = stickY = substickX = substickY = 0;
+        triggerL = triggerR = 0;
+        sSwarmHeld   = false;
+        usedKeyboard = false;
+    }
 
     {
         const bool lockDown = held(PC_KEY_ACT_LOCKON);
-        if (lockDown && !sLockOnWasDown) sLockOnPending = true;
+        if (lockDown && !sLockOnWasDown) sLockOnPending[sKeyboardOwner == 1 ? 1 : 0] = true;
         sLockOnWasDown = lockDown;
-        if (sSwarmHeld && !sSwarmWasDown) sSwarmPending = true;
-        sSwarmWasDown = sSwarmHeld;
         // Este no se encola: entra y sale de la vista en el acto.
         const bool fpDown = held(PC_KEY_ACT_FIRSTPERSON);
         if (fpDown && !sFirstPersonWasDown) pc_first_person_toggle_for(sKeyboardOwner);
@@ -1307,10 +1387,14 @@ void pc_window_poll_events(PADStatus* pad) {
     }
 
     // ── Gamepad Mapping (overrides / merges if controller connected) ──
-    if (sController) {
+    // Netplay input ownership: a `keyboard` peer ignores every gamepad.
+    if (sController && !PC_NETPLAY_IGNORE_GAMEPADS) {
         usedGamepad = pc_window_read_gamepad(sController, button, stickX, stickY, substickX, substickY,
                                              triggerL, triggerR, sSwarmHeld);
     }
+    // Flanco del swarm de P1 una vez juntos teclado y mando (Charge).
+    if (sSwarmHeld && !sSwarmWasDown[0]) sSwarmPending[0] = true;
+    sSwarmWasDown[0] = sSwarmHeld;
     if (usedGamepad)
         sLastInputIsGamepad = true;
     else if (usedKeyboard)
@@ -1355,12 +1439,10 @@ void pc_window_poll_events(PADStatus* pad) {
 
             const float sensitivity = sMouseSensitivity;
 
-            // Mod "Free Camera": while held, the motion orbits and the cursor
-            // stays where it was, so aiming resumes from the same spot.
             // Mod "First Person": the mouse always looks around (yaw and
             // pitch); the cursor is pinned in front of the view by Navi.
             const bool firstPerson = pc_first_person_active_for(sKeyboardOwner) != 0;
-            if (freeCamHeld || firstPerson) {
+            if (firstPerson) {
                 int winW = sWindowWidth;
                 int winH = sWindowHeight;
                 SDL_GetWindowSize(sWindow, &winW, &winH);
@@ -1439,7 +1521,7 @@ void pc_window_poll_events(PADStatus* pad) {
     sSwarmHeldP2 = kbSwarm2;
     if (sControllers[1] || sKeyboardOwner == 1) {
         u16 b2 = kbButton2; s8 sx2 = kbStickX2, sy2 = kbStickY2, cx2 = kbSubX2, cy2 = kbSubY2; u8 tl2 = kbTrigL2, tr2 = kbTrigR2;
-        if (sControllers[1])
+        if (sControllers[1] && !PC_NETPLAY_IGNORE_GAMEPADS)
             pc_window_read_gamepad(sControllers[1], b2, sx2, sy2, cx2, cy2, tl2, tr2, sSwarmHeldP2, 1);
         pad[1].err          = PAD_ERR_NONE;
         pad[1].button       = b2;
@@ -1450,6 +1532,8 @@ void pc_window_poll_events(PADStatus* pad) {
         pad[1].triggerLeft  = tl2;
         pad[1].triggerRight = tr2;
     }
+    if (sSwarmHeldP2 && !sSwarmWasDown[1]) sSwarmPending[1] = true;
+    sSwarmWasDown[1] = sSwarmHeldP2;
 #if defined(PIKI_PC_PORT) && defined(PIKI_PC_SETTINGS_MENU)
     // While the settings menu is open, consume the pad so the game underneath
     // does not react to the same input.
@@ -1467,20 +1551,36 @@ void pc_window_poll_events(PADStatus* pad) {
 #endif
 }
 
+unsigned int pc_gfx_begin_swap_framebuffer(void);
+void pc_gfx_end_swap_framebuffer(unsigned int bound);
+
 void pc_window_swap_buffers(void) {
     if (sWindow) {
+#if defined(__APPLE__)
+        // macOS shows the frame only when the default framebuffer is bound here.
+        const unsigned int renderTarget = pc_gfx_begin_swap_framebuffer();
+#endif
         SDL_GL_SwapWindow(sWindow);
+#if defined(__APPLE__)
+        pc_gfx_end_swap_framebuffer(renderTarget);
+#endif
         // VSync Off must not retain the software presentation limiter. Game
-        // simulation uses the fixed-step scheduler independently.
 #ifndef __EMSCRIPTEN__
-        if (sVsyncEnabled) {
+        // simulation uses the fixed-step scheduler independently. Netplay's
+        // unthrottled replay bypasses it too, and a netplay session owns the
+        // single 30 Hz schedule (two stacked pacers would lose slots).
+        const bool netplayOwnsPacing = pc_netplay_session_active != nullptr && pc_netplay_session_active();
+        // Monitor mode's vsync lock: the swap itself paces one tick per refresh;
+        // a software deadline on top would only make it miss refreshes.
+        const bool vsyncLocked = sLogicalRetraceInterval == 0 && pc_frame_vsync_lock();
+        if (sVsyncEnabled && !pc_netplay_unthrottled() && !netplayOwnsPacing && !vsyncLocked) {
             // The interval is the game's setFrameClamp: retraces per logical
             // frame against a 60 Hz base, so 1 is 60 Hz and 2 is 30 Hz. The
-            // port adds 0 for 120 Hz, which has no 60 Hz divisor. Mirror
+            // port adds 0 for 120 Hz (or the monitor's rate), which has no 60 Hz divisor. Mirror
             // PcFrameScheduler::deltaForClamp, or the 120 FPS mode simulates
             // at 120 and then presents at 60.
             const auto targetDuration = std::chrono::duration<double>(
-                sLogicalRetraceInterval == 0 ? (1.0 / 120.0)
+                sLogicalRetraceInterval == 0 ? (1.0 / pc_frame_high_rate())
                                              : (sLogicalRetraceInterval / 60.0));
             const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(targetDuration);
             auto now = std::chrono::steady_clock::now();
@@ -1512,10 +1612,24 @@ void pc_window_set_swap_interval(int interval) {
     // 0 is meaningful here: it is the port's 120 Hz mode. Only negatives are
     // nonsense.
     if (interval < 0) interval = 1;
-    if (sLogicalRetraceInterval == interval) return;
-    // Use one pacing mechanism only. SDL_GL_SwapWindow must not add a second,
-    // driver-controlled wait on top of the emulated 60 Hz VI interval.
-    SDL_GL_SetSwapInterval(0);
+    // The monitor-rate mode is the one case where the display itself is the
+    // clock: swap interval 1 gives us phase-aligned frames instead of a timer
+    // which merely averages the same number of frames per second. Fixed 30/60
+    // modes keep the driver wait off and use the existing VI/software pacing.
+    const int driverInterval = (interval == 0 && pc_frame_vsync_lock() && sVsyncEnabled) ? 1 : 0;
+    if (sLogicalRetraceInterval == interval && sDriverSwapInterval == driverInterval) return;
+    if (SDL_GL_SetSwapInterval(driverInterval) == 0) {
+        sDriverSwapInterval = driverInterval;
+    } else {
+        // Some compositors/drivers reject swap control. Leave the real state
+        // at zero; the lock watchdog will disable monitor-vsync mode and the
+        // software deadline below will take over.
+        sDriverSwapInterval = 0;
+        if (driverInterval != 0) {
+            printf("[PC Port] Driver VSync unavailable: %s; using software monitor pacing\n", SDL_GetError());
+            pc_frame_set_vsync_lock(false);
+        }
+    }
     sLogicalRetraceInterval = interval;
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
 }
@@ -1627,7 +1741,39 @@ void pc_window_set_window_size(int w, int h) {
         sWindowHeight = h;
         return;
     }
+    // Compare with the size asked for last time, not with SDL's size: a display
+    // shorter than the window makes the OS shorten it, and SDL then reports the
+    // shorter size, which would look like a change on every settings apply.
+    const bool sizeChanged = w != sRequestedWidth || h != sRequestedHeight;
+    // Read the display before resizing: on Windows and X11, SDL picks it from
+    // the window's center, which the resize moves.
+    const int display = sizeChanged ? SDL_GetWindowDisplayIndex(sWindow) : -1;
     SDL_SetWindowSize(sWindow, w, h);
+    sRequestedWidth = w;
+    sRequestedHeight = h;
+    if (sizeChanged && display >= 0) {
+        // SDL keeps the top-left corner when a window grows, so a window created
+        // centered at 1280x720 ends up off-center and past the right edge at a
+        // larger size. Re-center it on its own display, inside the usable area
+        // (the display minus taskbars, docks and menu bars). SDL_WINDOWPOS_CENTERED
+        // would move it to the primary display instead.
+        // X11 can report an empty usable area; use the whole display then.
+        SDL_Rect area {};
+        const bool haveUsable = SDL_GetDisplayUsableBounds(display, &area) == 0 && area.w > 0 && area.h > 0;
+        if (haveUsable || SDL_GetDisplayBounds(display, &area) == 0) {
+            // SDL_SetWindowPosition places the client area, so center the whole
+            // frame and keep the title bar on the usable area. A window larger than
+            // the area keeps the frame's top-left corner on it. Backends without
+            // border sizes (macOS) count as zero.
+            int top = 0, left = 0, bottom = 0, right = 0;
+            if (SDL_GetWindowBordersSize(sWindow, &top, &left, &bottom, &right) != 0) {
+                top = left = bottom = right = 0;
+            }
+            SDL_SetWindowPosition(sWindow,
+                area.x + left + std::max(0, (area.w - (w + left + right)) / 2),
+                area.y + top + std::max(0, (area.h - (h + top + bottom)) / 2));
+        }
+    }
     sWindowWidth = w;
     sWindowHeight = h;
 }
@@ -1642,6 +1788,18 @@ double pc_window_get_refresh_rate(void) {
 
 void pc_window_set_vsync_enabled(bool enabled) {
     sVsyncEnabled = enabled;
+    // Re-evaluate the driver interval even if the logical clamp did not
+    // change. This also turns real VSync off immediately when the user does.
+    const int wanted = (sLogicalRetraceInterval == 0 && pc_frame_vsync_lock() && sVsyncEnabled) ? 1 : 0;
+    if (wanted != sDriverSwapInterval) {
+        if (SDL_GL_SetSwapInterval(wanted) == 0) {
+            sDriverSwapInterval = wanted;
+        } else if (wanted != 0) {
+            sDriverSwapInterval = 0;
+            pc_frame_set_vsync_lock(false);
+            printf("[PC Port] Driver VSync unavailable: %s; using software monitor pacing\n", SDL_GetError());
+        }
+    }
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
 }
 
@@ -1694,6 +1852,43 @@ int pc_window_input_get_assignment(int player, int* gamepadId) {
     return sPlayerDevice[player].kind;
 }
 
+#if PIKI_NETPLAY_BUILD
+void pc_window_set_netplay_input_filter(bool ignoreKeyboard, bool ignoreGamepads) {
+    sNetplayIgnoreKeyboard = ignoreKeyboard;
+    sNetplayIgnoreGamepads = ignoreGamepads;
+}
+
+static void netplayResolvePendingPad() {
+    if (sNetplayPadPlayer < 0 || sNetplayPadIndex < 0) return;
+    const PcPlayerDevice& dev = sPlayerDevice[sNetplayPadPlayer];
+    if (dev.kind == PC_INPUT_DEV_GAMEPAD && pc_find_open_pad(dev.id) != nullptr) return; // bound and open
+    if (sNetplayPadIndex >= (int)sOpenPads.size()) return; // keep waiting for pad N
+    const PcOpenPad& pad = sOpenPads[(size_t)sNetplayPadIndex];
+    sPlayerDeviceExplicit = true;
+    sPlayerDevice[sNetplayPadPlayer].kind = PC_INPUT_DEV_GAMEPAD;
+    sPlayerDevice[sNetplayPadPlayer].id   = pad.id;
+    sPlayerPadLost[sNetplayPadPlayer]     = false;
+    resolvePlayerPads();
+    printf("[netplay] input: gamepad #%d (id %d, %s) feeds %s\n", sNetplayPadIndex, (int)pad.id,
+           SDL_GameControllerName(pad.ctl), sNetplayPadPlayer == 0 ? "host/P1" : "joiner/P2");
+    fflush(stdout);
+}
+
+void pc_window_set_netplay_gamepad(int player, int index) {
+    if (player < 0 || player > 1 || index < 0) return;
+    sNetplayPadPlayer = player;
+    sNetplayPadIndex  = index;
+    // Owned by a pad even before it is open: the slot stays neutral (never
+    // the keyboard) until pad N connects, then resolves on the hotplug.
+    sPlayerDeviceExplicit = true;
+    sPlayerDevice[player].kind = PC_INPUT_DEV_GAMEPAD;
+    sPlayerDevice[player].id   = -1;
+    sPlayerPadLost[player]     = false;
+    resolvePlayerPads();
+    netplayResolvePendingPad();
+}
+#endif
+
 const char* pc_window_gamepad_name(int gamepadId) {
     SDL_GameController* ctl = pc_find_open_pad(gamepadId);
     const char* name = ctl ? SDL_GameControllerName(ctl) : nullptr;
@@ -1712,10 +1907,22 @@ void pc_window_discard_button_presses(void) { sLastPressTaken = sLastPressSerial
 
 bool pc_window_swarm_held_p2(void) { return sSwarmHeldP2; }
 
-bool pc_window_take_lockon_press(void) { const bool v = sLockOnPending; sLockOnPending = false; return v; }
-bool pc_window_take_swarm_press(void) { const bool v = sSwarmPending; sSwarmPending = false; return v; }
+bool pc_window_take_lockon_press(int player)
+{
+    const int pi = player == 1 ? 1 : 0;
+    const bool v = sLockOnPending[pi];
+    sLockOnPending[pi] = false;
+    return v;
+}
+bool pc_window_take_swarm_press(int player)
+{
+    const int pi = player == 1 ? 1 : 0;
+    const bool v = sSwarmPending[pi];
+    sSwarmPending[pi] = false;
+    return v;
+}
 
-void pc_window_request_lockon_press(void) { sLockOnPending = true; }
+void pc_window_request_lockon_press(int player) { sLockOnPending[player == 1 ? 1 : 0] = true; }
 bool pc_window_take_bomb_press(int player)
 {
     const int pi = player == 1 ? 1 : 0;
@@ -1724,7 +1931,8 @@ bool pc_window_take_bomb_press(int player)
     return v;
 }
 void pc_window_request_firstperson_press(void) { pc_first_person_toggle(); }
-void pc_window_request_charge_press(void) { sSwarmPending = true; }
+void pc_window_request_charge_press(int player) { sSwarmPending[player == 1 ? 1 : 0] = true; }
+void pc_window_request_bomb_press(int player) { sBombPending[player == 1 ? 1 : 0] = true; }
 
 // Control mode functions
 void pc_window_set_control_mode(int mode) {

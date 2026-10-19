@@ -7,6 +7,13 @@
 #include "gameflow.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_permadeath.h"
+#include "pc_day_history.h"
+#include "randomizer/pc_randomizer.h"
+#include "netplay/pc_netplay_loadguard.h"
+// Netplay keep-alive (pc_netplay_loadguard.h): a save waits here for the card
+// thread inside one netplay tick. Strong-defined by pc_netplay_session.cpp in
+// netplay builds only, null otherwise.
+void pc_netplay_load_keepalive(int site);
 #endif
 #include "system.h"
 #include <string.h>
@@ -538,6 +545,7 @@ void MemoryCard::waitPolling()
 	// sin ceder deja el núcleo saturado durante todo el guardado. Cedemos la
 	// CPU igual que `CardUtilIdleWhileBusy()`.
 	while (!hasCardFinished()) {
+		if (pc_netplay_load_keepalive != nullptr) pc_netplay_load_keepalive(pc_netplay_loadguard::kSiteSave);
 		OSYieldThread();
 	}
 #else
@@ -937,12 +945,19 @@ void MemoryCard::saveCurrentGame()
 #if defined(PIKI_PC_PORT)
 	// After the padding and before the checksum: the block lands in bytes the
 	// game zero-fills, and is covered by the sum computed just below.
-	pc_permadeath_write_block(*stream, pc_permadeath_active(), pc_hardmode_active());
+	pc_permadeath_write_block(*stream, pc_permadeath_active(), pc_hardmode_active(), pc_randomizer_rules());
 #endif
 
 	u32 sum = calcChecksum(getGameFilePtr(gameflow.mGamePrefs.mSpareMemCardSaveIndex - 1), 0x7FF8);
 	stream->writeInt(gameflow.mGamePrefs.mMostRecentSaveIndex);
 	stream->writeInt(sum);
+#if defined(PIKI_PC_PORT)
+	// Selector de días: copia de este día en el historial de la ranura.
+	if (pc_days_enabled() && !pc_permadeath_active() && !gameflow.mIsChallengeMode) {
+		pc_days_store(gameflow.mPlayState.mSaveSlot, gameflow.mPlayState.mSavedDay,
+		              getGameFilePtr(gameflow.mGamePrefs.mSpareMemCardSaveIndex - 1), 0x8000);
+	}
+#endif
 
 	writeOneGameFile(gameflow.mGamePrefs.mSpareMemCardSaveIndex - 1);
 	waitPolling();
@@ -1002,6 +1017,7 @@ void MemoryCard::readCurrentGame(RandomAccessStream* data)
 	// position, and doing it first means a corrupt tail cannot be mistaken for
 	// game data that has already been consumed.
 	pc_permadeath_read_block(*data);
+	pc_randomizer_adopt_loaded(pc_randomizer_peek_block(*data));
 #endif
 	gameflow.mPlayState.read(*data);
 	if (gameflow.mPlayState.mSaveStatus == PlayState::ReadyToSave && playerState) {
@@ -1176,6 +1192,9 @@ void MemoryCard::copyFile(CardQuickInfo& from, CardQuickInfo& to)
 	stream->writeInt(sum);
 	writeOneGameFile(gameflow.mGamePrefs.mSpareMemCardSaveIndex - 1);
 	gsys->mIsCardSaving = FALSE;
+#if defined(PIKI_PC_PORT)
+	pc_days_copy_slot(from.mGameSaveSlot, to.mGameSaveSlot);
+#endif
 
 	STACK_PAD_VAR(10);
 }
@@ -1205,9 +1224,65 @@ void MemoryCard::delFile(CardQuickInfo& target)
 	stream->writeInt(sum);
 	writeOneGameFile(gameflow.mGamePrefs.mSpareMemCardSaveIndex - 1);
 	gsys->mIsCardSaving = FALSE;
+#if defined(PIKI_PC_PORT)
+	pc_days_delete_slot(target.mGameSaveSlot);
+#endif
 
 	STACK_PAD_VAR(7);
 }
+
+#if defined(PIKI_PC_PORT)
+// Selector de días: el archivo de un día se lee aquí entero (32 KB).
+static u8 sPcDayFile[0x8000];
+
+static bool pcReadDayFile(int slot, int day, PlayState& state)
+{
+	if (!pc_days_read(slot, day, sPcDayFile, sizeof(sPcDayFile))) {
+		return false;
+	}
+	RamStream stream(sPcDayFile, sizeof(sPcDayFile));
+	state.read(stream);
+	// Solo un guardado de esa ranura y ese día.
+	return state.mSaveStatus == PlayState::ReadyToSave && state.mSaveSlot == slot && state.mSavedDay == day;
+}
+
+bool MemoryCard::pcDayQuickInfo(int slot, int day, CardQuickInfo& out)
+{
+	PlayState state;
+	if (!pcReadDayFile(slot, day, state)) {
+		return false;
+	}
+	out.mCurrentDay        = state.mSavedDay;
+	out.mCurrentPartsCount = state.mShipPartsCount;
+	out.mRedPikiCount      = state.mRedPikiCount;
+	out.mYellowPikiCount   = state.mYellowPikiCount;
+	out.mBluePikiCount     = state.mBluePikiCount;
+	return true;
+}
+
+// Como copyFile: el bloque libre recibe el archivo del día con el contador de
+// guardados más nuevo, así que getQuickInfos lo elige para la ranura.
+bool MemoryCard::pcRestoreDay(int slot, int day)
+{
+	PlayState state;
+	const int spare = gameflow.mGamePrefs.mSpareMemCardSaveIndex - 1;
+	if (spare < 0 || spare > 3 || !pcReadDayFile(slot, day, state)) {
+		return false;
+	}
+	mDidSaveFail        = false;
+	gsys->mIsCardSaving = TRUE;
+	memcpy(getGameFilePtr(spare), sPcDayFile, 0x8000);
+	RamStream* stream = getGameFileStream(spare);
+	stream->setPosition(0x7FF8);
+	u32 sum = calcChecksum(getGameFilePtr(spare), 0x7FF8);
+	stream->writeInt(gameflow.mGamePrefs.mMostRecentSaveIndex);
+	stream->writeInt(sum);
+	writeOneGameFile(spare);
+	gsys->mIsCardSaving = FALSE;
+	gameflow.mGamePrefs.mMostRecentSaveIndex++;
+	return true;
+}
+#endif
 
 /**
  * @todo: Documentation
@@ -1438,6 +1513,7 @@ void MemoryCard::getQuickInfos(CardQuickInfo* infos)
 	// Re-derived below from whichever card file wins each slot, so start clean:
 	// a slot that has since been deleted must not keep yesterday's mark.
 	pc_permadeath_clear_slots();
+	pc_randomizer_clear_slots();
 #endif
 	for (i = 0; i < 4; i++) {
 		RamStream* stream = getGameFileStream(i);
@@ -1476,6 +1552,7 @@ void MemoryCard::getQuickInfos(CardQuickInfo* infos)
 					// whichever one happens to be read last.
 					pc_permadeath_note_slot(slot, pc_permadeath_peek_block(*stream));
 					pc_hardmode_note_slot(slot, pc_hardmode_peek_block(*stream));
+					pc_randomizer_note_slot(slot, pc_randomizer_peek_block(*stream));
 #endif
 				}
 			} else {

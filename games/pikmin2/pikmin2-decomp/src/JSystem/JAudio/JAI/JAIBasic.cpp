@@ -5,6 +5,7 @@
 #include "Dolphin/vec.h"
 #include "JSystem/JAudio/JAI/JAIBasic.h"
 #ifdef PIKI_PC_PORT
+#include "audio/pc_audio_drops.h"
 #include <stdlib.h>
 #include <stdio.h>
 // Audio is enabled by default. This opt-out is useful for diagnostics and
@@ -442,8 +443,13 @@ void JAIBasic::startSoundBasic(u32 id, JAISe** handlePtr, JAInter::Actor* actor,
 #endif
 	if (JAInter::SeMgr::seEntryCancel[id >> 0xC] == 0) {
 		JAInter::SeMgr::storeSeBuffer(handlePtr, actor, id, fadeTime, camId, info);
-	} else if (handlePtr) {
-		*handlePtr = nullptr;
+	} else {
+#ifdef PIKI_PC_PORT
+		pc_audio_drop(PCAD_SeCancelled);
+#endif
+		if (handlePtr) {
+			*handlePtr = nullptr;
+		}
 	}
 }
 

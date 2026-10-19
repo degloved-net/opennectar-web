@@ -204,6 +204,18 @@ void JKRDecomp::decodeSZP(u8* src, u8* dst, u32 srcLength, u32 dstLength)
 void JKRDecomp::decodeSZS(u8* src_buffer, u8* dst_buffer, u32 srcSize, u32 dstSize)
 {
 
+#ifdef PIKI_PC_PORT
+	// La cabecera Yaz0 está en big-endian: leída tal cual en PC el tamaño salía
+	// mal, y el límite se comparaba con la firma "Yaz0" en vez de con el tamaño.
+	const u32 decodedSize = JKRDecompExpandSize(src_buffer);
+	if (srcSize == 0 || dstSize >= decodedSize)
+		return;
+	u8* decompEnd = dst_buffer + (decodedSize - dstSize);
+	u8* copyStart;
+	s32 copyByteCount;
+	s32 chunkBitsLeft = 0;
+	s32 chunkBits;
+#else
 	u8* decompEnd = dst_buffer + *(int*)(src_buffer + 4) - dstSize;
 	u8* copyStart;
 	s32 copyByteCount;
@@ -214,6 +226,7 @@ void JKRDecomp::decodeSZS(u8* src_buffer, u8* dst_buffer, u32 srcSize, u32 dstSi
 		return;
 	if (dstSize > *(u32*)src_buffer)
 		return;
+#endif
 
 	u8* curSrcPos = src_buffer + 0x10;
 	do {

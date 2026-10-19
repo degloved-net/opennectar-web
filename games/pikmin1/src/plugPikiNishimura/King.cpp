@@ -122,8 +122,16 @@ void King::draw(Graphics& gfx)
 		centre.y += yDiff * 3.0f;
 	}
 
+#if defined(PIKI_PC_PORT)
+	// The shadow light camera feeds KingBody's sim-visible joint cache, so
+	// only the authoritative pass may move it.
+	if (pc_render_is_authoritative()) {
+#endif
 	mShadowCaster.mSourcePosition.set(centre.x + lightDirection.x, centre.y + 1000.0f, centre.z + lightDirection.z);
 	mShadowCaster.mTargetPosition.set(mSRT.t.x, mSRT.t.y + 50.0f, mSRT.t.z);
+#if defined(PIKI_PC_PORT)
+	}
+#endif
 
 	Matrix4f viewMatrix;
 	mWorldMtx.makeSRT(mSRT.s, mSRT.r, mSRT.t);

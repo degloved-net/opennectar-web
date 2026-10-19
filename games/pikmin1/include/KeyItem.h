@@ -6,6 +6,9 @@
 #include "types.h"
 
 class Shape;
+namespace zen {
+class particleGenerator;
+}
 
 /**
  * @brief TODO
@@ -56,6 +59,10 @@ protected:
 	KeyState::Type mState; // _2B8
 	SearchData mSearch[3]; // _2BC
 	Shape* mModel;         // _2E0
+#if defined(PIKI_PC_PORT)
+	zen::particleGenerator* mGlow; ///< luz amarilla bajo la llave
+	Vector3f mGlowPos;
+#endif
 };
 
 #endif

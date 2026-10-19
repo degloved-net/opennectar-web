@@ -10,9 +10,185 @@
 #include "JSystem/J3D/J3DModel.h"
 #include "JSystem/JUtility/JUTNameTab.h"
 #include "types.h"
+#ifdef PIKI_PC_PORT
+#include "JSystem/J3D/J3DMtxCalc.h"
+#include "JSystem/JMath.h"
+#include "timing/pc_anim_timing.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#endif
 
 template <class T>
 f32 J3DGetKeyFrameInterpolation(f32, J3DAnmKeyTableBase*, T*);
+
+#ifdef PIKI_PC_PORT
+namespace {
+Quaternion pcJ3DQuatSlerp(Quaternion a, Quaternion b, f32 t)
+{
+	f32 dot = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+	if (dot < 0.0f) {
+		b.x = -b.x; b.y = -b.y; b.z = -b.z; b.w = -b.w;
+		dot = -dot;
+	}
+	Quaternion out;
+	if (dot > 0.9995f) {
+		out.x = a.x + (b.x - a.x) * t;
+		out.y = a.y + (b.y - a.y) * t;
+		out.z = a.z + (b.z - a.z) * t;
+		out.w = a.w + (b.w - a.w) * t;
+	} else {
+		const f32 angle = acosf(std::max(-1.0f, std::min(1.0f, dot)));
+		const f32 invSin = 1.0f / sinf(angle);
+		const f32 wa = sinf((1.0f - t) * angle) * invSin;
+		const f32 wb = sinf(t * angle) * invSin;
+		out.x = a.x * wa + b.x * wb;
+		out.y = a.y * wa + b.y * wb;
+		out.z = a.z * wa + b.z * wb;
+		out.w = a.w * wa + b.w * wb;
+	}
+	const f32 length2 = out.x * out.x + out.y * out.y + out.z * out.z + out.w * out.w;
+	if (length2 > 0.0000001f) {
+		const f32 invLength = 1.0f / sqrtf(length2);
+		out.x *= invLength; out.y *= invLength; out.z *= invLength; out.w *= invLength;
+	}
+	return out;
+}
+
+void pcJ3DQuatToEuler(const Quaternion& q, SVec* rotation)
+{
+	// q = qz * qy * qx, the exact order used by JMAEulerToQuat and J3D.
+	const f32 m00 = 1.0f - 2.0f * (q.y * q.y + q.z * q.z);
+	const f32 m10 = 2.0f * (q.x * q.y + q.w * q.z);
+	const f32 m20 = 2.0f * (q.x * q.z - q.w * q.y);
+	const f32 m21 = 2.0f * (q.y * q.z + q.w * q.x);
+	const f32 m22 = 1.0f - 2.0f * (q.x * q.x + q.y * q.y);
+	const f32 m01 = 2.0f * (q.x * q.y - q.w * q.z);
+	const f32 m11 = 1.0f - 2.0f * (q.x * q.x + q.z * q.z);
+	const f32 ry  = asinf(std::max(-1.0f, std::min(1.0f, -m20)));
+	f32 rx, rz;
+	if (fabsf(cosf(ry)) > 0.0001f) {
+		rx = atan2f(m21, m22);
+		rz = atan2f(m10, m00);
+	} else {
+		rx = atan2f(ry >= 0.0f ? m01 : -m01, m11);
+		rz = 0.0f;
+	}
+	const f32 shortPerRad = 32768.0f / 3.14159265358979323846f;
+	rotation->x = (s16)lrintf(rx * shortPerRad);
+	rotation->y = (s16)lrintf(ry * shortPerRad);
+	rotation->z = (s16)lrintf(rz * shortPerRad);
+}
+
+void pcJ3DBlendTransform(const J3DTransformInfo& from, const J3DTransformInfo& to, f32 t, J3DTransformInfo* out)
+{
+	out->mScale.x = from.mScale.x + (to.mScale.x - from.mScale.x) * t;
+	out->mScale.y = from.mScale.y + (to.mScale.y - from.mScale.y) * t;
+	out->mScale.z = from.mScale.z + (to.mScale.z - from.mScale.z) * t;
+	out->mTranslation.x = from.mTranslation.x + (to.mTranslation.x - from.mTranslation.x) * t;
+	out->mTranslation.y = from.mTranslation.y + (to.mTranslation.y - from.mTranslation.y) * t;
+	out->mTranslation.z = from.mTranslation.z + (to.mTranslation.z - from.mTranslation.z) * t;
+	Quaternion a, b;
+	JMAEulerToQuat(from.mRotation.x, from.mRotation.y, from.mRotation.z, &a);
+	JMAEulerToQuat(to.mRotation.x, to.mRotation.y, to.mRotation.z, &b);
+	const Quaternion q = pcJ3DQuatSlerp(a, b, t);
+	pcJ3DQuatToEuler(q, &out->mRotation);
+}
+
+struct PcJ3DPoseState {
+	const J3DAnmTransform* animation = nullptr;
+	f32 frame = 0.0f;
+	double time = 0.0;
+	f32 blend = 1.0f;
+	bool initialized = false;
+	J3DTransformInfo from;
+	J3DTransformInfo displayed;
+};
+struct PcJ3DPoseSlot {
+	const J3DMtxBuffer* buffer = nullptr;
+	u16 joint = 0;
+	double lastSeen = 0.0;
+	PcJ3DPoseState state;
+};
+
+constexpr size_t kPcJ3DPoseSlotCount = 8192; // power of two, enough for all visible model joints
+} // namespace
+
+void pcJ3DSmoothTransform(const J3DAnmTransform* animation, u16 joint, J3DTransformInfo* pose)
+{
+	PcP2AnimClock& clock = pc_p2_anim_clock();
+	// DvdThread invokes J3DModel::calc while precomputing enemy caches. It must
+	// receive the raw sampled pose and never touch presentation history owned by
+	// the main section thread.
+	if (!clock.active) return;
+	const double now = clock.time;
+	J3DMtxBuffer* buffer = J3DMtxCalc::getMtxBuffer();
+	if (!buffer) return;
+
+	// Do not allocate here: global new is backed by JKR's current heap, and
+	// section transitions free that heap wholesale. A fixed open-addressed
+	// table stays valid across title/game/cave heap changes and is main-thread
+	// only because of the active-clock guard above.
+	static PcJ3DPoseSlot slots[kPcJ3DPoseSlotCount];
+	const size_t mask = kPcJ3DPoseSlotCount - 1;
+	size_t at = ((reinterpret_cast<uintptr_t>(buffer) >> 4) ^ ((size_t)joint * 0x9e3779b1u)) & mask;
+	PcJ3DPoseSlot* slot = nullptr;
+	PcJ3DPoseSlot* stale = nullptr;
+	for (size_t probe = 0; probe < kPcJ3DPoseSlotCount; ++probe) {
+		PcJ3DPoseSlot& candidate = slots[(at + probe) & mask];
+		if (candidate.buffer == buffer && candidate.joint == joint) {
+			slot = &candidate;
+			break;
+		}
+		if (!candidate.buffer) {
+			slot = stale ? stale : &candidate;
+			break;
+		}
+		if (!stale && now - candidate.lastSeen > 30.0) stale = &candidate;
+	}
+	if (!slot) slot = stale;
+	if (!slot) return; // pathological overflow: raw sampled pose is always safe
+	if (slot->buffer != buffer || slot->joint != joint) {
+		slot->buffer = buffer;
+		slot->joint = joint;
+		slot->state.animation = nullptr;
+		slot->state.frame = 0.0f;
+		slot->state.time = now;
+		slot->state.blend = 1.0f;
+		slot->state.initialized = false;
+	}
+	slot->lastSeen = now;
+	PcJ3DPoseState& state = slot->state;
+	const f32 frame = animation->getFrame();
+	if (!state.initialized) {
+		state.animation = animation;
+		state.frame = frame;
+		state.time = now;
+		state.displayed = *pose;
+		state.initialized = true;
+		return;
+	}
+
+	// A different clip, or a real loop/restart (small sub-frame jitter is not
+	// one), starts an 80 ms presentation crossfade from the last visible pose.
+	if (animation != state.animation || frame < state.frame - 0.5f) {
+		state.from  = state.displayed;
+		state.blend = 0.0f;
+		state.time  = now;
+	}
+	if (state.blend < 1.0f) {
+		const f32 elapsed = (f32)std::max(0.0, now - state.time);
+		state.blend = std::min(1.0f, state.blend + elapsed / 0.080f);
+		state.time = now;
+		const f32 smooth = state.blend * state.blend * (3.0f - 2.0f * state.blend);
+		J3DTransformInfo target = *pose;
+		pcJ3DBlendTransform(state.from, target, smooth, pose);
+	}
+	state.animation = animation;
+	state.frame = frame;
+	state.displayed = *pose;
+}
+#endif
 
 /**
  * @note Address: 0x80067678
@@ -128,6 +304,57 @@ void J3DAnmTransformFull::getTransform(u16 idx, J3DTransformInfo* info) const
 		info->mTranslation.z = mTranslationVals[zTable->mTranslationOffset];
 
 	} else {
+#ifdef PIKI_PC_PORT
+		// Full animations contain one sample per original 30 Hz frame. The
+		// console rounded to a sample, which is visibly stepped on a 60-360 Hz
+		// display. Translation and scale use a local monotone Hermite curve (no
+		// overshoot); rotation uses shortest-path quaternion slerp. Converting the
+		// final quaternion back to Euler preserves J3D's Rz * Ry * Rx hierarchy.
+		const f32 frame = getFrame();
+		const int i1    = (int)floorf(frame);
+		const f32 t     = frame - (f32)i1;
+
+		auto sample = [](const f32* values, u16 offset, u16 count, int at, f32 neutral) -> f32 {
+			if (!values || count == 0) return neutral;
+			at = std::max(0, std::min(at, (int)count - 1));
+			return values[offset + at];
+		};
+		auto pchip = [&](const f32* values, u16 offset, u16 count, f32 neutral) -> f32 {
+			if (!values || count == 0) return neutral;
+			if (count == 1 || t <= 0.0f) return sample(values, offset, count, i1, neutral);
+			const f32 p0 = sample(values, offset, count, i1 - 1, neutral);
+			const f32 p1 = sample(values, offset, count, i1, neutral);
+			const f32 p2 = sample(values, offset, count, i1 + 1, neutral);
+			const f32 p3 = sample(values, offset, count, i1 + 2, neutral);
+			const f32 d0 = p1 - p0, d1 = p2 - p1, d2 = p3 - p2;
+			auto tangent = [](f32 a, f32 b) -> f32 {
+				return a * b <= 0.0f ? 0.0f : (2.0f * a * b) / (a + b);
+			};
+			const f32 m1 = tangent(d0, d1), m2 = tangent(d1, d2);
+			const f32 t2 = t * t, t3 = t2 * t;
+			return (2.0f * t3 - 3.0f * t2 + 1.0f) * p1 + (t3 - 2.0f * t2 + t) * m1
+			     + (-2.0f * t3 + 3.0f * t2) * p2 + (t3 - t2) * m2;
+		};
+
+		info->mScale.x       = pchip(mScaleVals, xTable->mScaleOffset, xTable->mScaleMaxFrame, 1.0f);
+		info->mScale.y       = pchip(mScaleVals, yTable->mScaleOffset, yTable->mScaleMaxFrame, 1.0f);
+		info->mScale.z       = pchip(mScaleVals, zTable->mScaleOffset, zTable->mScaleMaxFrame, 1.0f);
+		info->mTranslation.x = pchip(mTranslationVals, xTable->mTranslationOffset, xTable->mTranslationMaxFrame, 0.0f);
+		info->mTranslation.y = pchip(mTranslationVals, yTable->mTranslationOffset, yTable->mTranslationMaxFrame, 0.0f);
+		info->mTranslation.z = pchip(mTranslationVals, zTable->mTranslationOffset, zTable->mTranslationMaxFrame, 0.0f);
+
+		auto rotSample = [&](J3DAnmTransformFullTable* table, int at) -> s16 {
+			if (!mRotationVals || table->mRotationMaxFrame == 0) return 0;
+			at = std::max(0, std::min(at, (int)table->mRotationMaxFrame - 1));
+			return mRotationVals[table->mRotationOffset + at];
+		};
+		Quaternion q0, q1;
+		JMAEulerToQuat(rotSample(xTable, i1), rotSample(yTable, i1), rotSample(zTable, i1), &q0);
+		JMAEulerToQuat(rotSample(xTable, i1 + 1), rotSample(yTable, i1 + 1), rotSample(zTable, i1 + 1), &q1);
+		const Quaternion q = pcJ3DQuatSlerp(q0, q1, t);
+		pcJ3DQuatToEuler(q, &info->mRotation);
+		return;
+#else
 		u32 maxFrame = (int)(getFrame() + 0.5f);
 
 		// X VALUES
@@ -186,6 +413,7 @@ void J3DAnmTransformFull::getTransform(u16 idx, J3DTransformInfo* info) const
 		} else {
 			info->mTranslation.z = mTranslationVals[zTable->mTranslationOffset + maxFrame];
 		}
+#endif
 	}
 }
 

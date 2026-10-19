@@ -2,6 +2,33 @@
 #include "PSMath.h"
 #include "Iterator.h"
 #include "Game/Navi.h"
+#ifdef PIKI_PC_PORT
+#include "pc_p2_coop.h"
+// Co-op a pantalla partida: como en el 2P del juego, cada sonido se oye desde
+// la cámara del capitán que lo tiene más cerca (o la de la vista que ve al
+// objeto). Con una sola cámara de escucha (la de Olimar), lo que pasaba junto
+// a Louie sonaba lejísimos.
+static bool pcCoopListeners() { return pc_p2_coop_active() && pc_p2_coop_split(); }
+
+static u8 pcNearestNaviNo(Vec& pos, u8 fallback)
+{
+	f32 best = -1.0f;
+	u8 no    = fallback;
+	for (int i = 0; i < 2; i++) {
+		Game::Navi* navi = Game::naviMgr ? Game::naviMgr->getAt(i) : nullptr;
+		if (!navi || !navi->isAlive()) {
+			continue;
+		}
+		Vector3f npos  = navi->getPosition();
+		const f32 dist = PSMath::calcSquareDistance(pos, npos);
+		if (best < 0.0f || dist < best) {
+			best = dist;
+			no   = (u8)i;
+		}
+	}
+	return no;
+}
+#endif
 
 namespace PSM {
 
@@ -18,8 +45,13 @@ void ObjCalc_SingleGame::newInstance_SingleGame()
  * @note Address: 0x80472904
  * @note Size: 0x8
  */
-u8 ObjCalc_SingleGame::getPlayerNo(PSM::Creature*)
+u8 ObjCalc_SingleGame::getPlayerNo(PSM::Creature* obj)
 {
+#ifdef PIKI_PC_PORT
+	if (obj && obj->mGameObj && pcCoopListeners()) {
+		return obj->mGameObj->getSound_AILOD()->mSoundVPID;
+	}
+#endif
 	return mPlayerNum;
 }
 
@@ -27,8 +59,13 @@ u8 ObjCalc_SingleGame::getPlayerNo(PSM::Creature*)
  * @note Address: 0x8047290C
  * @note Size: 0x8
  */
-u8 ObjCalc_SingleGame::getPlayerNo(Vec&)
+u8 ObjCalc_SingleGame::getPlayerNo(Vec& pos)
 {
+#ifdef PIKI_PC_PORT
+	if (pcCoopListeners()) {
+		return pcNearestNaviNo(pos, mPlayerNum);
+	}
+#endif
 	return mPlayerNum;
 }
 

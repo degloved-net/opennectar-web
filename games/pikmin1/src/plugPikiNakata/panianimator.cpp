@@ -4,6 +4,7 @@
 #include "sysNew.h"
 #if defined(PIKI_PC_PORT)
 #include "timing/pc_render_phase.h"
+#include "timing/pc_anim_timing.h"
 #endif
 
 /**
@@ -211,7 +212,11 @@ void PaniAnimator::animate(f32 speed)
 		return;
 	}
 
+#if defined(PIKI_PC_PORT)
+	speed *= pc_anim_dt(NSystem::getFrameTime()); // steady clock at high refresh rates
+#else
 	speed *= NSystem::getFrameTime();
+#endif
 	mAnimationCounter += speed;
 
 	checkConstantKeys();

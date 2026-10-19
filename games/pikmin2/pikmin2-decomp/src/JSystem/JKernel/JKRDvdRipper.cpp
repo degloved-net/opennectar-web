@@ -371,7 +371,20 @@ static int decompSZS_subroutine(u8* src, u8* dest)
 	}
 
 	SYaz0Header* header = (SYaz0Header*)src;
+#ifdef PIKI_PC_PORT
+	// La cabecera Yaz0 está en big-endian: leída tal cual en PC, un tamaño como
+	// 0x00010000 daba 0x100 y el archivo quedaba casi todo a ceros.
+	// Un desplazamiento más allá del final (o una salida vacía) desbordaba el
+	// puntero de fin; se corta antes de decodificar.
+	const u32 pcDecodedSize = JKRDecompExpandSize(src);
+	if (fileOffset > pcDecodedSize)
+		return -1;
+	if (pcDecodedSize == fileOffset || maxDest == 0)
+		return 0;
+	endPtr = dest + (pcDecodedSize - fileOffset);
+#else
 	endPtr              = dest + (header->mLength - fileOffset);
+#endif
 
 	if (endPtr > dest + maxDest) {
 		endPtr = dest + maxDest;

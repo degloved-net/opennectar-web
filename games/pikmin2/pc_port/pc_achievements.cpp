@@ -23,23 +23,23 @@ struct HostAlloc {
 };
 
 const PcAchievementInfo kInfo[PC_ACH_COUNT] = {
-	{ "Red Pikmin", "Meet the Red Pikmin.", 5 },
-	{ "Yellow Pikmin", "Meet the Yellow Pikmin.", 10 },
-	{ "Blue Pikmin", "Meet the Blue Pikmin.", 10 },
-	{ "Purple Pikmin", "Meet the Purple Pikmin.", 10 },
-	{ "White Pikmin", "Meet the White Pikmin.", 10 },
-	{ "Awakening Wood", "Open the Awakening Wood.", 5 },
-	{ "Perplexing Pool", "Open the Perplexing Pool.", 10 },
-	{ "Wistful Wild", "Open the Wistful Wild.", 10 },
-	{ "First Repayment", "Pay back 1,000 Pokos of the debt.", 5 },
-	{ "Halfway There", "Pay back 5,000 Pokos of the debt.", 10 },
-	{ "Debt Free", "Pay back all 10,100 Pokos and save Hocotate Freight.", 25 },
-	{ "Treasure Hunter", "Collect 10 treasures.", 5 },
-	{ "Hoarder", "Collect 50 treasures.", 10 },
-	{ "Collector", "Collect 100 treasures.", 25 },
-	{ "Every Last One", "Collect all 201 treasures.", 50 },
-	{ "Ultra-Spicy", "Get your first Ultra-Spicy Spray.", 5 },
-	{ "Ultra-Bitter", "Get your first Ultra-Bitter Spray.", 5 },
+	{ "Red Pikmin", "Meet the Red Pikmin." },
+	{ "Yellow Pikmin", "Meet the Yellow Pikmin." },
+	{ "Blue Pikmin", "Meet the Blue Pikmin." },
+	{ "Purple Pikmin", "Meet the Purple Pikmin." },
+	{ "White Pikmin", "Meet the White Pikmin." },
+	{ "Awakening Wood", "Open the Awakening Wood." },
+	{ "Perplexing Pool", "Open the Perplexing Pool." },
+	{ "Wistful Wild", "Open the Wistful Wild." },
+	{ "First Repayment", "Pay back 1,000 Pokos of the debt." },
+	{ "Halfway There", "Pay back 5,000 Pokos of the debt." },
+	{ "Debt Free", "Pay back all 10,100 Pokos and save Hocotate Freight." },
+	{ "Treasure Hunter", "Collect 10 treasures." },
+	{ "Hoarder", "Collect 50 treasures." },
+	{ "Collector", "Collect 100 treasures." },
+	{ "Every Last One", "Collect all 201 treasures." },
+	{ "Ultra-Spicy", "Get your first Ultra-Spicy Spray." },
+	{ "Ultra-Bitter", "Get your first Ultra-Bitter Spray." },
 };
 
 constexpr const char* kFilename = "pikmin2_achievements.txt";
@@ -116,23 +116,6 @@ int pc_achievements_unlocked_count(void)
 	pc_achievements_load();
 	int n = 0;
 	for (bool u : sUnlocked) n += u;
-	return n;
-}
-
-int pc_achievements_points(void)
-{
-	pc_achievements_load();
-	int n = 0;
-	for (int i = 0; i < PC_ACH_COUNT; i++) {
-		if (sUnlocked[i]) n += kInfo[i].points;
-	}
-	return n;
-}
-
-int pc_achievements_total_points(void)
-{
-	int n = 0;
-	for (const PcAchievementInfo& a : kInfo) n += a.points;
 	return n;
 }
 

@@ -332,7 +332,21 @@ void pc_settings_p2d_plate(int x, int y, int w, int h, int style)
     }
 }
 
+void pc_settings_p2d_tinted_plate(int x, int y, int w, int h, Colour top, Colour bottom)
+{
+    if (!ensureAtlas() || w <= 0 || h <= 0)
+        return;
+    const PcGlassRect& gra = sAtlas->tex[PCG_Gradient];
+    if (gra.w > 0)
+        nineSlice(gra, x, y, w, h, 10.0f, std::min(8, std::min(w, h) / 2), top, bottom);
+}
+
 void pc_settings_p2d_cursor(int cx, int cy, int size, float angle)
+{
+    pc_settings_p2d_cursor_tinted(cx, cy, size, angle, Colour(255, 255, 255, 255));
+}
+
+void pc_settings_p2d_cursor_tinted(int cx, int cy, int size, float angle, Colour tint)
 {
     if (!ensureAtlas())
         return;
@@ -346,7 +360,7 @@ void pc_settings_p2d_cursor(int cx, int cy, int size, float angle)
         const u8 alpha = i == 0 ? 255 : u8((1.0f - float(i) / kTrail) * 100.0f);
         const bool back = c < 0.0f;
         image(dot, cx - w / 2, cy - size / 2, w, size, back ? 1.0f : 0.0f, back ? 0.0f : 1.0f,
-              Colour(255, 255, 255, alpha));
+              Colour(tint.r, tint.g, tint.b, u8(alpha * tint.a / 255)));
     }
 }
 
@@ -396,6 +410,9 @@ void pc_settings_p2_flush(void)
         sVertCount += sGlassCount;
     }
     sGlassCount = 0;
+    // La zona de contenido es de la placa de este frame: si se arrastra, el
+    // texto suelto del siguiente (contador IDLE) se estrecha hasta no leerse.
+    sContentLeft = sContentRight = 0;
     if (sVertCount > 0)
         pc_gfx_ui_draw(sVerts, sVertCount, sGfx.mScreenWidth, sGfx.mScreenHeight, kPcUiFont, kPcUiFontW, kPcUiFontH);
     sVertCount = 0;

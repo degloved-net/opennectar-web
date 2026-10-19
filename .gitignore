@@ -24,6 +24,10 @@ games/*/vs_positions*.txt
 games/pikmin2/pikmin2-decomp/aoi.exe
 /discord_icons/
 
+# Salida de los scripts de release
+build-release/
+release-out/
+
 /build-*/
 /dist/
 /open-nectar-web-v3-patches/

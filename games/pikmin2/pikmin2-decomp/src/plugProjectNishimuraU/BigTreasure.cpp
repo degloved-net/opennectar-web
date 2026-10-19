@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "Game/Entities/BigTreasure.h"
 #include "Game/EnemyAnimKeyEvent.h"
 #include "Game/EnemyFunc.h"
@@ -713,6 +716,11 @@ void Obj::setupTreasure()
 		mTreasureCollParts[i]  = mCollTree->getCollPart(collTags[i]);
 
 		PelletInitArg weaponArg;
+#ifdef PIKI_PC_PORT
+		// Randomizer: el arma lleva el tesoro del manifiesto; el ataque depende
+		// de la posición (i), no del nombre.
+		pelletNames[i] = const_cast<char*>(pc_p2_rnd_big_treasure_name(i, pelletNames[i]));
+#endif
 		if (pelletMgr->makePelletInitArg(weaponArg, pelletNames[i])) {
 			mTreasures[i] = pelletMgr->birth(&weaponArg);
 

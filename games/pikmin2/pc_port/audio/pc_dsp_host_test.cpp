@@ -74,6 +74,7 @@ int main()
 {
 	check(pc_aram_init(), "ARAM init");
 	pc_dsp_host_init();
+	pc_dsp_host_set_mixer_level(2.0f);
 	check(pc_dsp_host_ready(), "renderer reports ready");
 
 	// A ramp is easy to reason about under resampling. It has to outlast the
@@ -292,18 +293,18 @@ int main()
 		channel.dolbyVolumeTarget  = 0x3FFF;
 
 		std::memset(out.data(), 0, out.size() * sizeof(s16));
-		pc_dsp_host_render_frame(&channel, 1, out.data(), kFrame);
+		pc_dsp_host_render_frame(&channel, 1, out.data(), PC_DSP_SUBFRAME_SAMPLES);
 		check(out[0] == 0, "auto mixer starts silent from a zero mixer value");
 		bool fadesIn = false;
-		for (u32 i = kFrame / 2; i < kFrame; ++i) {
+		for (u32 i = 1; i < PC_DSP_SUBFRAME_SAMPLES; ++i) {
 			if (out[i * 2] != 0) {
 				fadesIn = true;
 			}
 		}
 		check(fadesIn, "auto mixer fades in toward the mixer level");
 		check(channel.dolbyVolumeCurrent > 0, "mixer value advanced from zero");
-		check(channel.dolbyVolumeCurrent < 0x3FFF,
-		      "mixer value ramps exponentially instead of jumping to the target");
+		check(channel.dolbyVolumeCurrent == channel.dolbyVolumeTarget,
+		      "short sounds reach the requested volume within one subframe");
 		check(out[0] == out[1], "auto mixer center pan feeds both buses equally");
 
 		// A finish request retargets the ramp to zero and the voice only

@@ -229,7 +229,7 @@ void test_uniform_names_are_a_subset_of_the_ubershader()
 		"uTevKonst", "uAlphaRef0", "uAlphaRef1",
 		// Iluminación GX compartida (pc_gx_lighting_glsl.h) y su selector.
 		"uNumLights", "uLightPos", "uLightColor", "uLightK", "uAmbColor",
-		"uChan0En", "uChan1En", "uChan0AttnFn", "uChan1AttnFn",
+		"uChan0En", "uChan1En", "uChan0AttnFn", "uChan1AttnFn", "uChan0AlphaEn", "uChan0AlphaDiff",
 		"uNumLights1", "uLightPos1", "uLightColor1", "uLightK1", "uAmbColor1",
 		"uSpecHalf1", "uSpecAttn1", "uPerPixel", "uOutTint",
 	};

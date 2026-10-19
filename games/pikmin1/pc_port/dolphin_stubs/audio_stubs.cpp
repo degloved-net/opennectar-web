@@ -19,6 +19,7 @@
 #include "jaudio/pikiinter.h"
 #include "jaudio/verysimple.h"
 #include "MoviePlayer.h"
+#include "audio/pc_audio_source.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -66,7 +67,10 @@ bool sMenuActive = false;
 bool sPauseActive = false;
 bool sDVDPauseActive = false;
 u8 sEventResumeFrames = 0;
-bool sPikiFlyReady = false;
+// One latch per source (indexed like the whistle voices below): the ready
+// sound is raised for the captain holding the Pikmin and the fly sound inside
+// that captain's throw. The latch moves with every call, audible here or not.
+bool sPikiFlyReady[3] = {};
 u16 sPulledVoiceHistory[3] = { 4, 5, 6 };
 u32 sVoiceRandom = 0x6D2B79F5u;
 u32 sPikiGayaTimer = 0;
@@ -182,7 +186,24 @@ void apply_native_bgm_layers(u32 fadeFrames) {
 }
 int sSystemSounds[64];
 int sOrimaSounds[64];
-int sWhistleVoice = -1;
+// One whistle voice per source: 0 and 1 are the captains, 2 is anything
+// raised outside a captain scope, so one captain's whistle never replaces or
+// releases the other's.
+constexpr int kAudioSources = 3;
+int sWhistleVoice[kAudioSources] = { -1, -1, -1 };
+int audio_source_slot() {
+    // Outside a netplay session every source shares slot 2, as before.
+    if (!pc_audio_in_netplay_session()) return 2;
+    const int source = pc_audio_source_captain_slot();
+    return (source == 0 || source == 1) ? source : 2;
+}
+void release_whistle_voices(bool allSources) {
+    for (int slot = 0; slot < kAudioSources; ++slot) {
+        if (!allSources && slot != audio_source_slot()) continue;
+        if (sWhistleVoice[slot] >= 0) pc_audio_release_wave(sWhistleVoice[slot], 1600, 30);
+        sWhistleVoice[slot] = -1;
+    }
+}
 
 struct NativeEvent {
     bool active = false;
@@ -610,23 +631,38 @@ void Jac_StopSystemSe(s32 id) {
     }
 }
 void Jac_PlayOrimaSe(u32 id) {
-    if ((id & JACORIMA_PIKISOUND) == 0 && id == JACORIMA_Gather) {
+    // Netplay: a captain's own sounds reach only the PC that plays that
+    // captain (pc_audio_source.h). Everyone else's are always audible.
+    const bool audible = pc_audio_source_audible();
+    if (id & JACORIMA_PIKISOUND) {
+        const int flySlot = audio_source_slot();
+        if (audio_demo_active()
+            || (sPikiFlyReady[flySlot] && id == JACORIMA_PikiFlyReady))
+            return;
+        if (id == JACORIMA_PikiFly) sPikiFlyReady[flySlot] = sPikiFlyReady[2] = false;
+        else if (id == JACORIMA_PikiFlyReady) sPikiFlyReady[flySlot] = true;
+        if (audible) pc_audio_send_orima_se(static_cast<u16>(id & 0x7FFF), false, true);
+        return;
+    }
+    if (!audible) {
+        // The captain going down is game information, not that captain's own
+        // sound: the partner hears the cue and the music change too.
+        if (id == JACORIMA_PlayerDown) {
+            pc_audio_fade_sequence_track(0, 0.0f, 100);
+            pc_audio_fade_sequence_track(1, 0.0f, 100);
+            Jac_PlaySystemSe(JACSYS_Unk40);
+        }
+        return;
+    }
+    if (id == JACORIMA_Gather) {
         if (sMenuOrPauseActive || audio_demo_active()) return;
-        if (sWhistleVoice >= 0) pc_audio_stop_wave(sWhistleVoice);
+        const int slot = audio_source_slot();
+        if (sWhistleVoice[slot] >= 0) pc_audio_stop_wave(sWhistleVoice[slot]);
         // pikise.jam resolves Gather to this sustained note. Playing it
         // directly removes the frame-order race between its queued play/stop
         // ports while retaining the original IBNK/WSYS sample and envelope.
-        sWhistleVoice = pc_audio_play_note(0, 0, 17, 127, 0, 1.0f, 0.0f,
-                                           PC_AUDIO_BUS_SE, 112, 1.0f);
-        return;
-    }
-    if (id & JACORIMA_PIKISOUND) {
-        if (audio_demo_active()
-            || (sPikiFlyReady && id == JACORIMA_PikiFlyReady))
-            return;
-        pc_audio_send_orima_se(static_cast<u16>(id & 0x7FFF), false, true);
-        if (id == JACORIMA_PikiFly) sPikiFlyReady = false;
-        else if (id == JACORIMA_PikiFlyReady) sPikiFlyReady = true;
+        sWhistleVoice[slot] = pc_audio_play_note(0, 0, 17, 127, 0, 1.0f, 0.0f,
+                                                 PC_AUDIO_BUS_SE, 112, 1.0f);
         return;
     }
     pc_audio_send_orima_se(static_cast<u16>(id), false, false);
@@ -652,9 +688,11 @@ void Jac_PlayOrimaSe(u32 id) {
     }
 }
 void Jac_StopOrimaSe(s32 id) {
+    if (!pc_audio_source_audible()) return;
     if ((id & JACORIMA_PIKISOUND) == 0 && id == JACORIMA_Gather) {
-        if (sWhistleVoice >= 0) pc_audio_release_wave(sWhistleVoice, 1600, 30);
-        sWhistleVoice = -1;
+        // A stop from a captain ends that captain's whistle; one raised
+        // outside a captain scope (a pause, a scene change) ends every one.
+        release_whistle_voices(pc_audio_source_captain_slot() < 0);
         return;
     }
     if ((id & JACORIMA_PIKISOUND) == 0) {
@@ -850,6 +888,7 @@ void Jac_Freeze_Precall() {
 }
 void Jac_Freeze() { pc_audio_stop_dma(); }
 void Jac_Orima_Walk(s32 groundSoundID, u32) {
+    if (!pc_audio_source_audible()) return;
     // Original handle 0x10008: alternate writes are intentional; the JAM
     // track selects the correct left/right foot variation itself.
     sPikiGayaTimer = 0;
@@ -858,21 +897,37 @@ void Jac_Orima_Walk(s32 groundSoundID, u32) {
         pc_audio_write_se_port(8, 0, static_cast<u16>(groundSoundID));
 }
 void Jac_Orima_Formation(s32 stickX, s32 stickY) {
-    static bool active = false;
+    // The charge sound is one sound on one track, driven by whichever
+    // captains push their C-stick. Each source keeps its own stick, so an idle
+    // captain does not stop the sound the other one just started.
+    struct FormationStick { int x = 0; int y = 0; int magnitude = 0; };
+    static FormationStick sticks[kAudioSources];
+    static bool soundActive = false;
+    if (!pc_audio_source_audible()) return;
     if (audio_demo_active() || sMenuOrPauseActive) stickX = stickY = 0;
     stickX = std::clamp(stickX, -127, 127);
     stickY = std::clamp(stickY, -127, 127);
     const int magnitude = static_cast<int>(
         std::sqrt(static_cast<float>(stickX * stickX + stickY * stickY)));
-    pc_audio_write_se_port(7, 2, static_cast<u16>(stickX));
-    pc_audio_write_se_port(7, 3, static_cast<u16>(magnitude));
-    if (!active && magnitude != 0) {
+    if (pc_audio_source_captain_slot() < 0 && magnitude == 0) {
+        // Raised outside any captain (a pause, a scene end): nobody charges.
+        for (FormationStick& stick : sticks) stick = FormationStick();
+    } else {
+        sticks[audio_source_slot()] = { stickX, stickY, magnitude };
+    }
+    // The sound follows the most deflected stick.
+    const FormationStick* lead = nullptr;
+    for (const FormationStick& stick : sticks)
+        if (stick.magnitude != 0 && (lead == nullptr || stick.magnitude > lead->magnitude)) lead = &stick;
+    pc_audio_write_se_port(7, 2, static_cast<u16>(lead ? lead->x : stickX));
+    pc_audio_write_se_port(7, 3, static_cast<u16>(lead ? lead->magnitude : magnitude));
+    if (!soundActive && lead != nullptr) {
         pc_audio_write_se_port(7, 0, 1);
-        active = true;
+        soundActive = true;
         sPikiGayaTimer = 0;
-    } else if (active && magnitude == 0) {
+    } else if (soundActive && lead == nullptr) {
         pc_audio_write_se_port(7, 0, 0);
-        active = false;
+        soundActive = false;
     }
 }
 void Jac_StopSe(s32) {}
@@ -1140,8 +1195,6 @@ int Jac_GetActiveEvents(u32* eventIDs) {
 }
 } // extern "C"
 
-void Jac_NoteDemoSkipped() { sDemoWasSkipped = true; }
-
 void Jac_UpdatePikiGaya() {
     if (sNativeScene != SCENE_Course || audio_demo_active()) {
         sPikiGayaVolume = 0.0f;
@@ -1162,8 +1215,7 @@ void Jac_UpdatePikiGaya() {
 
 void Jac_PauseOrimaSe() {
     Jac_Orima_Formation(0, 0);
-    if (sWhistleVoice >= 0) pc_audio_release_wave(sWhistleVoice, 1600, 30);
-    sWhistleVoice = -1;
+    release_whistle_voices(true);
     pc_audio_set_se_track_paused(10, true);
 }
 void Jac_UnPauseOrimaSe() { apply_gameplay_audio_pause(); }
@@ -1187,4 +1239,12 @@ int Jac_StreamMovieGetPicture(void* pictureBuffer, int* widthOut, int* heightOut
 }
 void Jac_StreamMovieStop() {}
 }
+
+#ifdef PIKI_PC_PORT
+// moviePlayer.cpp calls this when a cutscene is skipped. The JAudio engine
+// (src/jaudio/pikidemo.c) records the skip for __Jac_FinishDemo, and the native
+// mixer has no such engine, so the note has nothing to record here.
+// C++ linkage, to match the declaration in include/jaudio/pikidemo.h.
+void Jac_NoteDemoSkipped(void) { sDemoWasSkipped = true; }
+#endif
 #endif

@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "trig.h"
 #include "Game/generalEnemyMgr.h"
 
@@ -323,6 +326,17 @@ void GenObjectEnemy::doRead(Stream& stream)
 			gen->mVersion.read(stream);
 			gen->doRead(stream);
 		}
+#ifdef PIKI_PC_PORT
+		// Randomizer: especie y tesoro del generador, ya leídos sus datos
+		// propios y antes de reservar el tesoro (setUse).
+		{
+			int rndEnemy = mEnemyID;
+			int rndCode  = mOtakaraItemCode.mValue;
+			pc_p2_rnd_gen_enemy(&rndEnemy, &rndCode);
+			mEnemyID                = static_cast<EnemyTypeID::EEnemyTypeID>(rndEnemy);
+			mOtakaraItemCode.mValue = static_cast<s16>(rndCode);
+		}
+#endif
 
 		if (pelletMgr) {
 			PelletInitArg initArg;
@@ -443,6 +457,17 @@ void GenObjectEnemy::doReadOldVersion(Stream& stream)
 			gen->mVersion.read(stream);
 			gen->doRead(stream);
 		}
+#ifdef PIKI_PC_PORT
+		// Randomizer: especie y tesoro del generador, ya leídos sus datos
+		// propios y antes de reservar el tesoro (setUse).
+		{
+			int rndEnemy = mEnemyID;
+			int rndCode  = mOtakaraItemCode.mValue;
+			pc_p2_rnd_gen_enemy(&rndEnemy, &rndCode);
+			mEnemyID                = static_cast<EnemyTypeID::EEnemyTypeID>(rndEnemy);
+			mOtakaraItemCode.mValue = static_cast<s16>(rndCode);
+		}
+#endif
 
 		if (pelletMgr) {
 			PelletInitArg initArg;

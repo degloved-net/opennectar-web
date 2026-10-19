@@ -20,10 +20,14 @@
 #include "pc_gfx.h"
 #include "pc_permadeath.h"
 #include "pc_coop.h"
+#include "pc_vs.h"
 #include "pc_speedrun.h"
+#include "pc_day_history.h"
+#include "randomizer/pc_randomizer.h"
 #include "mods/pc_vs_arena.h"
 #include "pc_window.h"
 #include "settings/pc_settings.h"
+#include "netplay/pc_coop_switch.h"
 #endif
 
 // Macros for packing and unpacking the section compression flag.
@@ -84,12 +88,72 @@ struct CardSelectSetupSection : public Node {
 		// reset the window pointer
 		memcardWindow = nullptr;
 #if defined(PIKI_PC_PORT)
+		// El salto es una petición de una sola partida nueva. Una visita nueva a
+		// esta pantalla nunca debe heredar una selección anterior o cancelada.
+		pc_tutorial_skip_set_pending(false);
 		// Venimos de perder una partida Permadeath: el aviso va primero y el
 		// resto del flujo espera debajo hasta que se cierra.
 		pc_erased_notice_open_if_queued();
-		// El selector 1P/2P va antes del slot (PLAN_COOP fase 0b). Challenge
-		// mode se lo salta: siempre 1 jugador.
-		if (gameflow.mIsChallengeMode && pc_vs_pending() && pc_coop_take_chosen_at_title()) {
+		// El selector 1P/2P va antes del slot (PLAN_COOP fase 0b). En el
+		// Challenge Mode es 1 jugador / Cooperativo / 1 vs 1.
+		if (pc_speedrun_take_restart()) {
+			// Speedrun: reset rápido, otra run de la misma categoría sin menús.
+			pc_window_input_reset_assignment();
+			pc_coop_set_captain(0, PC_CAPTAIN_OLIMAR);
+			pcStartSpeedrunRun();
+		} else if (gameflow.mIsChallengeMode && pc_vs_pending() && pc_vs_direct_take_setup()) {
+			// Editor de mapas (--vs-map): sin reglas ni mandos (las reglas
+			// guardadas; J1 teclado + mando 1, J2 mando 2). Si el mapa no se
+			// puede montar, se dice en la consola y se vuelve al título.
+			pc_coop_take_chosen_at_title();
+			// Netplay: each PC drives only its own player with the device the
+			// session assigned, and the captains are the session's.
+			if (!pc_vs_direct_online()) {
+				pc_window_input_reset_assignment();
+				pc_coop_set_captain(0, PC_CAPTAIN_OLIMAR);
+				pc_coop_set_captain(1, PC_CAPTAIN_LOUIE);
+			}
+			if (const char* why = pc_vs_arena_prepare()) {
+				fprintf(stderr, "[VS] --vs-map: el mapa no se puede jugar: %s\n", why);
+				pc_vs_set_pending(false);
+				pc_coop_set_pending(false);
+				mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameExit);
+			}
+			mState = Exit;
+			gsys->setFade(0.0f);
+		} else if (!gameflow.mIsChallengeMode && pc_coop_pending() && pc_coop_direct_take_setup()) {
+			// Co-op direct boot: a new file with no prompts. The captains and
+			// the controller assignment were armed by the co-op switch; the
+			// run takes no Permadeath, Hard mode, Randomizer or tutorial skip.
+			pc_coop_take_chosen_at_title();
+			pc_permadeath_set_pending(false);
+			pc_hardmode_set_pending(false);
+			pc_randomizer_set_menu_pending(false);
+			pc_tutorial_skip_set_pending(false);
+			gameflow.mGamePrefs.mHasSaveGame = false;
+			// An online session can continue a file instead (the host's card,
+			// copied to the guest): commit that slot like picking it here.
+			if (const int slot = pc_coop_direct_slot()) {
+				MemoryCard& memcard = gameflow.mMemoryCard;
+				memcard.getMemoryCardState(false);
+				if (memcard.mSaveFileIndex < 0) {
+					memcard.makeDefaultFile();
+					CardUtilIdleWhileBusy();
+					memcard.hasCardFinished();
+				}
+				if (memcard.getMemoryCardState(true) == 0 && memcard.mSaveFileIndex >= 0) {
+					CardQuickInfo infos[4];
+					memcard.getQuickInfos(infos);
+					commitSelectedFile(infos[slot - 1], slot - 1);
+					printf("[coop] direct boot: continuing file %d (day %d)\n", slot, (int)infos[slot - 1].mCurrentDay);
+				} else {
+					printf("[coop] direct boot: the card is not usable; starting a new run\n");
+				}
+			}
+			mNextSectionsFlag                = 0; // no destination: the exit starts the new run
+			mState                           = Exit;
+			gsys->setFade(0.0f);
+		} else if (gameflow.mIsChallengeMode && pc_vs_pending() && pc_coop_take_chosen_at_title()) {
 			// VS: primero la explicación y las reglas; luego mandos y
 			// capitanes de los dos jugadores; sin fichero.
 			mAwaitingVsRules = true;
@@ -109,6 +173,12 @@ struct CardSelectSetupSection : public Node {
 				} else {
 					pcStartSpeedrunRun();
 				}
+			} else if (pc_randomizer_menu_pending()) {
+				// Randomizer: primero la explicación del modo; luego capitán y
+				// slots, como Start.
+				pc_window_input_reset_assignment();
+				mAwaitingRandomizerIntro = true;
+				pc_randomizer_intro_open();
 			} else {
 				// 1 jugador: elige capitán (Olimar/Louie) antes del slot.
 				pc_window_input_reset_assignment();
@@ -116,9 +186,10 @@ struct CardSelectSetupSection : public Node {
 				pc_captain_prompt_open();
 			}
 		} else if (gameflow.mIsChallengeMode) {
-			pc_coop_set_captain(0, PC_CAPTAIN_OLIMAR);
-			memcardWindow = new zen::ogScrFileChkSelMgr();
-			memcardWindow->start(gameflow.mIsChallengeMode);
+			// Desafío: cuántos juegan; con 2, mandos y capitanes antes de la
+			// comprobación de la tarjeta (PLAN_CHALLENGE_COOP).
+			mAwaitingPlayerCount = true;
+			pc_playercount_prompt_open_challenge();
 		} else if (!gameflow.mIsChallengeMode && pc_speedrun_active()) {
 			// Salir de la partida a mitad de run: el speedrun no tiene
 			// pantalla de slots, así que vuelve al título.
@@ -143,7 +214,7 @@ struct CardSelectSetupSection : public Node {
 		// Los prompts que van antes del slot llevan de fondo el degradado y
 		// las estrellas de la selección de slot, como el de New Game.
 		if (mAwaitingCaptain || mAwaitingDevAssign || mAwaitingVsRules || mAwaitingSpeedrunIntro
-		    || pc_erased_notice_active()) {
+		    || mAwaitingRandomizerIntro || pc_erased_notice_active()) {
 			mPcBackdrop = new zen::ogScrFileChkSelMgr();
 			mPcBackdrop->pcStartBackdrop();
 		}
@@ -178,8 +249,21 @@ struct CardSelectSetupSection : public Node {
 	/// en el slot 1 de la tarjeta propia del modo (se vacía si guarda una run
 	/// anterior); el reloj arranca aquí, como "seleccionar partida nueva".
 	/// Si la tarjeta no responde, se abre la selección normal como respaldo.
+	/// 5 Parts carga su race file si lo hay; el Desafío va a la selección de
+	/// partida del Modo Desafío con la tarjeta normal.
 	void pcStartSpeedrunRun()
 	{
+		const int category = pc_speedrun_category();
+		if (category == PC_SR_CAT_CHALLENGE) {
+			gameflow.mGamePrefs.mHasSaveGame = false;
+			gameflow.mIsChallengeMode        = TRUE;
+		}
+		// Partida guardada que se carga en vez de una nueva: el race file de
+		// 5 Parts (día 2) o un punto de práctica (su día).
+		const int practiceDay = pc_speedrun_practice_day();
+		const bool race       = practiceDay > 1 ? pc_speedrun_practice_restore(practiceDay)
+		                                         : category == PC_SR_CAT_5_PARTS && pc_speedrun_race_restore();
+		const int raceDay     = practiceDay > 1 ? practiceDay : 2;
 		MemoryCard& card = gameflow.mMemoryCard;
 		card.getMemoryCardState(false);
 		// La tarjeta escribe en su propio hilo: makeDefaultFile y delFile solo
@@ -195,9 +279,26 @@ struct CardSelectSetupSection : public Node {
 			memcardWindow->start(gameflow.mIsChallengeMode);
 			return;
 		}
+		if (category == PC_SR_CAT_CHALLENGE) {
+			// Desafío: su tarjeta ya lista, a la comprobación del Modo Desafío.
+			pc_speedrun_start_timer();
+			memcardWindow = new zen::ogScrFileChkSelMgr();
+			memcardWindow->start(gameflow.mIsChallengeMode);
+			return;
+		}
 		CardQuickInfo infos[4];
 		card.getQuickInfos(infos);
-		if (infos[0].mSaveStatus == PlayState::ReadyToSave) {
+		// Válida: la partida del slot 1, en el día que toca.
+		const bool raceOk = race && infos[0].mSaveStatus == PlayState::ReadyToSave && infos[0].mCurrentDay == raceDay;
+		if (race && !raceOk) {
+			if (practiceDay > 1) {
+				pc_speedrun_practice_delete(practiceDay);
+				pc_speedrun_set_practice_day(1);
+			} else {
+				pc_speedrun_race_delete();
+			}
+		}
+		if (infos[0].mSaveStatus == PlayState::ReadyToSave && !raceOk) {
 			card.delFile(infos[0]);
 			CardUtilIdleWhileBusy();
 			card.hasCardFinished();
@@ -206,6 +307,7 @@ struct CardSelectSetupSection : public Node {
 		}
 		pc_permadeath_set_pending(false);
 		pc_hardmode_set_pending(false);
+		pc_tutorial_skip_set_pending(false);
 		commitSelectedFile(infos[0], 0);
 		pc_speedrun_start_timer();
 		mNextSectionsFlag = 0; // sin destino: la salida carga la partida nueva
@@ -223,7 +325,7 @@ struct CardSelectSetupSection : public Node {
 		}
 		// Bajo New Game el fondo es la pantalla de slots, que no se actualiza
 		// mientras el prompt está abierto: sin esto las estrellas se paran.
-		if (mAwaitingNewGameChoice && mPromptBackdrop) {
+		if ((mAwaitingNewGameChoice || mAwaitingRandomizerSettings) && mPromptBackdrop) {
 			mPromptBackdrop->pcUpdateBackdrop();
 		}
 		if (pc_erased_notice_active()) {
@@ -244,6 +346,24 @@ struct CardSelectSetupSection : public Node {
 				return;
 			}
 			pcStartSpeedrunRun();
+			return;
+		}
+		if (mAwaitingRandomizerIntro) {
+			const int choice = pc_randomizer_intro_result();
+			if (choice == PC_RANDOMIZER_INTRO_PENDING) {
+				return;
+			}
+			mAwaitingRandomizerIntro = false;
+			if (choice == PC_RANDOMIZER_INTRO_BACK) {
+				// Atrás: vuelta al título, ya sin Randomizer.
+				pc_randomizer_set_menu_pending(false);
+				mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameExit);
+				mState            = Exit;
+				gsys->setFade(0.0f);
+				return;
+			}
+			mAwaitingCaptain = true;
+			pc_captain_prompt_open();
 			return;
 		}
 		if (mAwaitingCaptain) {
@@ -294,6 +414,7 @@ struct CardSelectSetupSection : public Node {
 				return;
 			}
 			pc_coop_set_pending(choice == PC_PLAYERCOUNT_TWO);
+			if (choice == PC_PLAYERCOUNT_ONE) pc_coop_set_captain(0, PC_CAPTAIN_OLIMAR);
 			if (choice == PC_PLAYERCOUNT_TWO) {
 				// Con 2 jugadores, cada uno elige su mando antes del slot.
 				mAwaitingDevAssign = true;
@@ -337,6 +458,22 @@ struct CardSelectSetupSection : public Node {
 			memcardWindow->start(gameflow.mIsChallengeMode);
 			return;
 		}
+		if (mAwaitingRandomizerSettings) {
+			const int choice = pc_randomizer_intro_result();
+			if (choice == PC_RANDOMIZER_INTRO_PENDING) {
+				return;
+			}
+			mAwaitingRandomizerSettings = false;
+			if (choice == PC_RANDOMIZER_INTRO_BACK) {
+				mPromptBackdrop = nullptr;
+				memcardWindow   = new zen::ogScrFileChkSelMgr();
+				memcardWindow->start(gameflow.mIsChallengeMode);
+				return;
+			}
+			mAwaitingNewGameChoice = true;
+			pc_newgame_prompt_open();
+			return;
+		}
 		if (mAwaitingNewGameChoice) {
 			const int choice = pc_newgame_prompt_result();
 			if (choice == PC_NEWGAME_PENDING) {
@@ -354,6 +491,9 @@ struct CardSelectSetupSection : public Node {
 			}
 			pc_permadeath_set_pending(choice == PC_NEWGAME_PERMADEATH);
 			pc_hardmode_set_pending(pc_newgame_prompt_chose_hard());
+			// El Randomizer siempre salta el tutorial: el original depende de
+			// generadores y una pieza fijos que el barajado cambia.
+			pc_tutorial_skip_set_pending(pc_randomizer_menu_pending() || pc_newgame_prompt_chose_skip_tutorial());
 			commitSelectedFile(mPendingCard, mPendingSlot);
 			mState = Exit;
 			gsys->setFade(0.0f);
@@ -398,6 +538,7 @@ struct CardSelectSetupSection : public Node {
 							// its rule from the file instead, in readCurrentGame.
 							pc_permadeath_begin_new_run();
 							pc_hardmode_begin_new_run();
+							pc_randomizer_begin_new_run();
 #endif
 						}
 
@@ -413,6 +554,7 @@ struct CardSelectSetupSection : public Node {
 						// so that backing out of the prompt leaves nothing set.
 						pc_permadeath_begin_new_run();
 						pc_hardmode_begin_new_run();
+						pc_randomizer_begin_new_run();
 #endif
 
 						// next subsection will be the new game intro cutscene
@@ -427,7 +569,15 @@ struct CardSelectSetupSection : public Node {
 						sprintf(flowCont.mDoorStageFilePath, "%s", stage->mFileName);
 						// day one is locked at 2:48pm
 						gameflow.mWorldClock.setTime(TUTORIAL_TIME_OF_DAY);
+					#if defined(PIKI_PC_PORT)
+						// Skip tutorial enters the stage directly. IntroGame is only the
+						// two-part crash movie and has no progression state to preserve.
+						gameflow.mNextOnePlayerSectionID = pc_tutorial_skip_pending() || pc_coop_direct_active()
+						                                       ? ONEPLAYER_NewPikiGame
+						                                       : ONEPLAYER_IntroGame;
+					#else
 						gameflow.mNextOnePlayerSectionID = ONEPLAYER_IntroGame;
+					#endif
 					}
 				} else {
 					PRINT("CHALLENGE MODE!!!\n");
@@ -517,6 +667,13 @@ struct CardSelectSetupSection : public Node {
 			pc_speedrun_intro_draw();
 			return;
 		}
+		if (mAwaitingRandomizerIntro) {
+			if (mPcBackdrop) {
+				mPcBackdrop->drawBackdrop(gfx);
+			}
+			pc_randomizer_intro_draw();
+			return;
+		}
 		if (mAwaitingPlayerCount) {
 			pc_playercount_prompt_draw();
 			return;
@@ -540,6 +697,13 @@ struct CardSelectSetupSection : public Node {
 				mPcBackdrop->drawBackdrop(gfx);
 			}
 			pc_captain_prompt_draw();
+			return;
+		}
+		if (mAwaitingRandomizerSettings) {
+			if (mPromptBackdrop) {
+				mPromptBackdrop->drawBackdrop(gfx);
+			}
+			pc_randomizer_intro_draw();
 			return;
 		}
 		if (mAwaitingNewGameChoice) {
@@ -599,16 +763,38 @@ struct CardSelectSetupSection : public Node {
 				// created without ever asking. It looked like a European
 				// problem because that install started with an empty card;
 				// USA does the same on a card with nothing on it.
-				if (card.mSaveStatus != PlayState::ReadyToSave && pc_speedrun_active()) {
+				if (card.mSaveStatus != PlayState::ReadyToSave && pc_speedrun_active() && !gameflow.mIsChallengeMode) {
 					// Speedrun: partida nueva Normal sin preguntar (ni
 					// Permadeath ni Hard). Aquí empieza el tiempo, como en
 					// speedrun.com: al seleccionar la partida nueva.
 					pc_permadeath_set_pending(false);
 					pc_hardmode_set_pending(false);
+					pc_tutorial_skip_set_pending(false);
 					commitSelectedFile(card, returnCode - zen::ogScrFileChkSelMgr::FILECHKSEL_SlotOffset);
 					pc_speedrun_start_timer();
 					mState = Exit;
 					gsys->setFade(0.0f);
+					return;
+				}
+				if (card.mSaveStatus == PlayState::ReadyToSave
+				    && pc_randomizer_slot(returnCode - zen::ogScrFileChkSelMgr::FILECHKSEL_SlotOffset)
+				           != pc_randomizer_menu_pending()) {
+					// Las partidas Randomizer se empiezan y continúan desde su
+					// botón del título, y solo esas: la otra clase de partida
+					// no se carga desde aquí.
+					if (seSystem) seSystem->playSysSe(SYSSE_CANCEL);
+					memcardWindow = new zen::ogScrFileChkSelMgr();
+					memcardWindow->start(gameflow.mIsChallengeMode);
+					return;
+				}
+				if (card.mSaveStatus != PlayState::ReadyToSave && pc_randomizer_menu_pending()) {
+					// Randomizer: primero los ajustes de esta partida nueva,
+					// luego New Game. Las partidas existentes usan los suyos.
+					mPendingCard                 = card;
+					mPendingSlot                 = returnCode - zen::ogScrFileChkSelMgr::FILECHKSEL_SlotOffset;
+					mAwaitingRandomizerSettings  = true;
+					mPromptBackdrop              = mPromptBackdropNext;
+					pc_randomizer_settings_open();
 					return;
 				}
 				if (card.mSaveStatus != PlayState::ReadyToSave) {
@@ -618,6 +804,19 @@ struct CardSelectSetupSection : public Node {
 					mPromptBackdrop        = mPromptBackdropNext;
 					pc_newgame_prompt_open();
 					return;
+				}
+				// Selector de días: se eligió un día anterior; su archivo pasa a
+				// la tarjeta como un guardado más y la ranura se vuelve a leer.
+				{
+					const int slot = returnCode - zen::ogScrFileChkSelMgr::FILECHKSEL_SlotOffset;
+					const int day  = pc_days_take_choice(slot);
+					if (day > 0 && gameflow.mMemoryCard.pcRestoreDay(slot, day)) {
+						CardUtilIdleWhileBusy();
+						gameflow.mMemoryCard.hasCardFinished();
+						CardQuickInfo infos[4];
+						gameflow.mMemoryCard.getQuickInfos(infos);
+						card = infos[slot];
+					}
 				}
 #endif
 				// we selected a a save file (A, B, or C)
@@ -654,6 +853,8 @@ struct CardSelectSetupSection : public Node {
 	bool mAwaitingPlayerCount   = false; ///< The 1P/2P prompt is up (before the slot screen).
 	bool mAwaitingCaptain       = false; ///< 1P: selector Olimar/Louie antes del slot.
 	bool mAwaitingSpeedrunIntro = false; ///< Speedrun: explicación del modo antes del slot.
+	bool mAwaitingRandomizerIntro = false; ///< Randomizer: explicación del modo antes del capitán.
+	bool mAwaitingRandomizerSettings = false; ///< Randomizer: ajustes de la partida nueva (ranura vacía).
 	bool mAwaitingDevAssign     = false; ///< The controller assignment prompt is up.
 	bool mAwaitingVsRules       = false; ///< VS: explicación y reglas, antes de los mandos.
 	bool mAwaitingNewGameChoice = false; ///< The new-game prompt is up.

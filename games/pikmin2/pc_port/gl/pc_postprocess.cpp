@@ -110,11 +110,17 @@ std::string pc_post_build_shadow_mask_shader()
 	src += "uniform vec4 uProjInfo;\n";   // invP00, invP11, near, far
 	src += "uniform mat4 uLightVP;\n";    // vista -> clip de la luz
 	src += "uniform vec4 uShadowParams;\n"; // x strength, y texel, z bias, w alcance (vista)
+	// Pantalla partida: la pasada se dibuja dentro del rectángulo de la vista
+	// (vUV va de 0 a 1 en él) y la profundidad se lee en su sitio de la
+	// pantalla. uProjOff: frustum corrido de la cámara fusionada.
+	src += "uniform vec4 uViewRect;\n";  // x, y, ancho, alto (normalizados, origen abajo)
+	src += "uniform vec2 uProjOff;\n";
+	src += "uniform float uMapScale;\n"; // parte de la textura que ocupa el mapa (pantalla partida: 0.5)
 	src += pc_post_view_depth_glsl();
 	src += "void main() {\n";
-	src += "    float z = viewDepth(vUV);\n";
+	src += "    float z = viewDepth(uViewRect.xy + vUV * uViewRect.zw);\n";
 	src += "    if (z >= uProjInfo.w * 0.999) { oColour = vec4(1.0); return; }\n";
-	src += "    vec2 ndc = vUV * 2.0 - 1.0;\n";
+	src += "    vec2 ndc = vUV * 2.0 - 1.0 - uProjOff;\n";
 	src += "    vec3 P = vec3(ndc * uProjInfo.xy * z, -z);\n";
 	src += "    vec4 lc = uLightVP * vec4(P, 1.0);\n";
 	src += "    vec3 l = lc.xyz / lc.w * 0.5 + 0.5;\n";
@@ -123,7 +129,7 @@ std::string pc_post_build_shadow_mask_shader()
 	src += "    float lit = 0.0;\n";
 	src += "    float ref = l.z - uShadowParams.z;\n";
 	src += "    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {\n";
-	src += "        lit += texture(uShadowMap, vec3(l.xy + vec2(float(x), float(y)) * uShadowParams.y * 1.5, ref));\n";
+	src += "        lit += texture(uShadowMap, vec3(l.xy * uMapScale + vec2(float(x), float(y)) * uShadowParams.y * 1.5, ref));\n";
 	src += "    }\n";
 	src += "    lit /= 9.0;\n";
 	// Fundido al final del alcance para que el borde del mapa no corte.
@@ -649,7 +655,10 @@ std::string pc_post_build_fragment_shader(const PcPostEffects& fx)
 		src += "    c = clamp(c, 0.0, 1.0);\n";
 	}
 
-	src += "    oColour = vec4(c, 1.0);\n";
+	// El alfa de la escena se conserva: la interfaz de Pikmin 2 mezcla con el
+	// alfa de destino (DSTALPHA) y con 1.0 fijo un relleno negro que debía
+	// quedar invisible tapaba media pantalla (triángulo negro con Louie).
+	src += "    oColour = vec4(c, texture(uScene, vUV).a);\n";
 	src += "}\n";
 	return src;
 }

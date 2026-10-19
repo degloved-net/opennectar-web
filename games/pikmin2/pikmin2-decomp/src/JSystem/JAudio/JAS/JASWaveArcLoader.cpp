@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "audio/pc_audio_drops.h"
+#endif
 #include "Dolphin/dvd.h"
 #include "string.h"
 #include "JSystem/JAudio/JAS/JASDisposer.h"
@@ -144,6 +147,11 @@ void JASWaveArc::loadToAramCallback(void* args)
 	if (getenv("PIKMIN_AUDIO_LOG")) {
 		fprintf(stderr, "[jaudio] wave copy entry=%d aram=%p size=%u result=%d\n", castedArgs->mFileNumber,
 		        castedArgs->_08, arc->mFileSize, copied ? 1 : 0);
+	}
+	if (!copied) {
+		// Sin esto el banco se quedaba sin cargar y sus sonidos mudos, sin aviso.
+		std::fprintf(stderr, "[PC Port] Audio: no se pudo cargar el archivo de ondas %d en ARAM\n", castedArgs->mFileNumber);
+		pc_audio_drop(PCAD_WaveLoadFail);
 	}
 	if (copied && arc->loadSetup(castedArgs->_0C)) {
 		arc->onLoadDone();

@@ -1,5 +1,9 @@
+#ifdef PIKI_PC_PORT
+extern "C" float pc_p2_hard_teki_life(float base);
+#endif
 // Enemies
 #include "Game/generalEnemyMgr.h"
+#include "Game/pcCoop.h"
 #ifdef PIKI_PC_PORT
 extern "C" float pc_mods_teki_damage(float damage);
 #endif
@@ -1541,6 +1545,10 @@ void EnemyBase::setParameters()
 {
 	mHealth    = getParms().mHealth.mValue;
 	mMaxHealth = getParms().mHealth.mValue;
+#ifdef PIKI_PC_PORT
+	mHealth    = pc_p2_hard_teki_life(mHealth);
+	mMaxHealth = pc_p2_hard_teki_life(mMaxHealth);
+#endif
 	mMass      = getParms().mMass.mValue;
 	mFriction  = mMass;
 
@@ -1578,23 +1586,43 @@ void EnemyBase::pcGuardPosition()
 	if (!isAlive()) {
 		return;
 	}
-	if (!pcBadVec(mPosition) && !pcBadVec(mCurrentVelocity)) {
-		mPcGoodPos    = mPosition;
-		mPcHasGoodPos = true;
+	// Además de posición y velocidad, todo lo que entra en la matriz del modelo
+	// o en el siguiente paso de física: un NaN en el giro (mFaceDir) o en la
+	// escala también lo deja invisible. Pasaba con un Pikmin lanzado que cae
+	// justo encima de un Bulborb enano.
+	const bool badFace  = !(mFaceDir == mFaceDir);
+	const bool badScale = pcBadVec(mScale) || !(mScaleModifier == mScaleModifier);
+	const bool badPhys  = pcBadVec(mTargetVelocity) || pcBadVec(mAcceleration);
+	if (!pcBadVec(mPosition) && !pcBadVec(mCurrentVelocity) && !pcBadVec(mRotation) && !badFace && !badScale && !badPhys) {
+		mPcGoodPos      = mPosition;
+		mPcGoodFaceDir  = mFaceDir;
+		mPcGoodScale    = mScale;
+		mPcGoodScaleMod = mScaleModifier;
+		mPcHasGoodPos   = true;
 		return;
 	}
 	static int sReports = 0;
 	if (sReports < 30) {
 		sReports++;
-		fprintf(stderr, "[NAN] Enemy %s pos=(%f,%f,%f) vel=(%f,%f,%f) rot=(%f,%f,%f) health=%f stuckPikmin=%d\n", getCreatureName(),
-		        mPosition.x, mPosition.y, mPosition.z, mCurrentVelocity.x, mCurrentVelocity.y, mCurrentVelocity.z, mRotation.x,
-		        mRotation.y, mRotation.z, mHealth, (int)mStuckPikminCount);
+		fprintf(stderr,
+		        "[NAN] Enemy %s pos=(%f,%f,%f) vel=(%f,%f,%f) rot=(%f,%f,%f) face=%f scale=(%f,%f,%f)x%f health=%f stuckPikmin=%d\n",
+		        getCreatureName(), mPosition.x, mPosition.y, mPosition.z, mCurrentVelocity.x, mCurrentVelocity.y, mCurrentVelocity.z,
+		        mRotation.x, mRotation.y, mRotation.z, mFaceDir, mScale.x, mScale.y, mScale.z, mScaleModifier, mHealth,
+		        (int)mStuckPikminCount);
 		fflush(stderr);
 	}
 	mCurrentVelocity = Vector3f(0.0f);
 	mTargetVelocity  = Vector3f(0.0f);
+	mAcceleration    = Vector3f(0.0f);
+	if (badFace) {
+		mFaceDir = mPcHasGoodPos ? mPcGoodFaceDir : 0.0f;
+	}
 	if (pcBadVec(mRotation)) {
-		mRotation = Vector3f(0.0f);
+		mRotation = Vector3f(0.0f, mFaceDir, 0.0f);
+	}
+	if (badScale && mPcHasGoodPos) {
+		mScale         = mPcGoodScale;
+		mScaleModifier = mPcGoodScaleMod;
 	}
 	if (mPcHasGoodPos) {
 		onSetPosition(mPcGoodPos);
@@ -1848,7 +1876,7 @@ void EnemyBase::doEntryLiving()
 		changeMaterial();
 	} else {
 		if (BaseHIOParms::sEntryOpt) {
-			if (!gameSystem->isMultiplayerMode())
+			if (!PC_TWO_CAPTAIN_PLAY())
 				return;
 		}
 
@@ -2098,13 +2126,38 @@ void EnemyBase::bounceProcedure(Sys::Triangle* triangle)
  * @note Address: 0x80104340
  * @note Size: 0x6D4
  */
+#ifdef PIKI_PC_PORT
+// Diagnóstico: primer paso de la física que deja la velocidad disparada
+// (Bulborb enano que desaparece al caerle un Pikmin encima).
+static void pcTraceEnemyVel(EnemyBase* enemy, const char* stage, f32 frameRate)
+{
+	const Vector3f& v = enemy->mCurrentVelocity;
+	if ((v.x == v.x && v.y == v.y && v.z == v.z) && fabsf(v.x) <= 1.0e6f && fabsf(v.y) <= 1.0e6f && fabsf(v.z) <= 1.0e6f) {
+		return;
+	}
+	static int sReports = 0;
+	if (sReports < 20) {
+		sReports++;
+		fprintf(stderr, "[VEL] Enemy %s stage=%s vel=(%g,%g,%g) accel=(%g,%g,%g) target=(%g,%g,%g) frameRate=%g dt=%g mass=%g\n",
+		        enemy->getCreatureName(), stage, v.x, v.y, v.z, enemy->mAcceleration.x, enemy->mAcceleration.y, enemy->mAcceleration.z,
+		        enemy->mTargetVelocity.x, enemy->mTargetVelocity.y, enemy->mTargetVelocity.z, frameRate, sys->mDeltaTime, enemy->mMass);
+		fflush(stderr);
+	}
+}
+#define PC_TRACE_ENEMY_VEL(stage) pcTraceEnemyVel(this, stage, frameRate)
+#else
+#define PC_TRACE_ENEMY_VEL(stage)
+#endif
+
 void EnemyBase::collisionMapAndPlat(f32 frameRate)
 {
+	PC_TRACE_ENEMY_VEL("enter");
 	// If isn't stuck
 	if (!isStickTo()) {
 		// Apply simulation for ground or flying enemies
 		if (!(isEvent(0, EB_Untargetable))) {
 			doSimulationGround(frameRate);
+			PC_TRACE_ENEMY_VEL("ground");
 		} else {
 			doSimulationFlying(frameRate);
 
@@ -2123,7 +2176,14 @@ void EnemyBase::collisionMapAndPlat(f32 frameRate)
 		collSphere.mPosition = pos;
 		collSphere.mRadius   = yOffsetFromMap;
 
-		f32 bounceAmount = isEarthQuakeOrDropping() ? 0.0f : static_cast<CreatureProperty*>(mParms)->mProps.mWallReflection.mValue;
+		f32 bounceAmount = isEarthQuakeOrDropping() ? 0.0f : 
+#ifdef PIKI_PC_PORT
+		    // En PC la vtable de CreatureParms va delante (en GC detrás, _D8):
+		    // el cast directo desde void* leía basura (-12.38) y el enemigo salía disparado.
+		    static_cast<CreatureParms*>(mParms)->mCreatureProps.mProps.mWallReflection.mValue;
+#else
+		    static_cast<CreatureProperty*>(mParms)->mProps.mWallReflection.mValue;
+#endif
 
 		mAcceleration.y = 0.0f;
 
@@ -2135,6 +2195,7 @@ void EnemyBase::collisionMapAndPlat(f32 frameRate)
 		mapMgr->traceMove(moveInfo, frameRate);
 
 		mCurrentVelocity = newVelocity;
+		PC_TRACE_ENEMY_VEL("mapTrace");
 
 		// Apply acceleration by converting the velocity to a direction,
 		// clamping it, and then setting the velocity again
@@ -2172,6 +2233,7 @@ void EnemyBase::collisionMapAndPlat(f32 frameRate)
 		if (platMgr && isEvent(0, EB_PlatformCollEnabled)) {
 			moveInfo.mVelocity = &mCurrentVelocity;
 			platMgr->traceMove(moveInfo, frameRate);
+			PC_TRACE_ENEMY_VEL("platTrace");
 
 			if (!mFloorTriangle) {
 				if (moveInfo.mFloorTriangle) {
@@ -2276,6 +2338,12 @@ void EnemyBase::gotoHell()
 		return;
 	}
 
+#ifdef PIKI_PC_PORT
+	// Cae por debajo del mapa: desaparece sin rastro. Se anota para poder
+	// distinguirlo de otros fallos (p. ej. colisión con el suelo).
+	printf("[PC Port] Enemy fell out of the map: type=%d pos=(%.1f %.1f %.1f)\n", (int)getEnemyTypeID(), mPosition.x,
+	       mPosition.y, mPosition.z);
+#endif
 	throwupItem();
 	EnemyKillArg killArg(CKILL_DisableDeathEffects | CKILL_LeaveNoCarcass | CKILL_NotKilledByPlayer);
 	kill(&killArg);

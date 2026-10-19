@@ -62,6 +62,8 @@ enum {
     PC_KEY_ACT_GYRO_RECENTER = 23,
     // Mod "Bomb Control": el amarillo con bomba la lanza al cursor o la suelta.
     PC_KEY_ACT_BOMB          = 24,
+    // Modo Speedrun: mantener 1 s reinicia la run (pc_speedrun.cpp).
+    PC_KEY_ACT_SPEEDRUN_RESET = 25,
     PC_KEY_ACT_COUNT
 };
 void pc_window_set_key_binding(int action, SDL_Scancode scancode);
@@ -82,16 +84,24 @@ static inline bool pc_bind_is_valid(int binding) { return binding >= 0 && bindin
 // Whether the swarm binding (keyboard, mouse or gamepad) is held right now.
 bool pc_window_swarm_held(void);
 bool pc_window_swarm_held_p2(void);
-/// Flanco de subida: true una sola vez por pulsación, y se consume al leerlo.
-bool pc_window_take_lockon_press(void);
+/// D-pad Down on that player's pad: the pad's swarm button, so it must not
+/// also trigger the original D-pad Down action (Olimar lying down).
+bool pc_window_pad_dpad_down_held(int player);
+/// Eje vertical del stick derecho con Free Camera activo (zoom del radar).
+float pc_window_free_camera_sub_y(void);
+/// Flanco de subida del Lock-On de ese jugador (0/1): true una vez por
+/// pulsación, y se consume al leerlo.
+bool pc_window_take_lockon_press(int player);
 // Mod "Bomb Control": pulsación del botón Bomb de ese jugador (0/1), consumida.
 bool pc_window_take_bomb_press(int player);
-/// Flanco del botón de swarm: con el Charge activo es el que lanza la carga.
-bool pc_window_take_swarm_press(void);
+/// Flanco del botón de swarm de ese jugador: con el Charge activo lanza la carga.
+bool pc_window_take_swarm_press(int player);
 /// Inyecta la pulsación desde la capa táctil, que no pasa por los bindings.
-void pc_window_request_lockon_press(void);
+void pc_window_request_lockon_press(int player);
 void pc_window_request_firstperson_press(void);
-void pc_window_request_charge_press(void);
+void pc_window_request_charge_press(int player);
+/// Botón táctil de la bomba (mod Bomb Control): como pulsar Bomb.
+void pc_window_request_bomb_press(int player);
 // Name for either kind of binding ("Mouse 4", "Space", ...).
 const char* pc_window_binding_name(int binding);
 // Whether a binding is currently held, given the keyboard and mouse state.
@@ -141,6 +151,12 @@ SDL_GameController* pc_window_get_controller_p2(void);
 int  pc_window_num_gamepads(void);
 void pc_window_input_reset_assignment(void);
 void pc_window_input_assign(int player, int kind, int gamepadId);
+#if defined(PIKI_PC_PORT)
+// Netplay builds (--netplay-input): ignore every key and/or every gamepad,
+// and bind a player to the index-th open gamepad (resolved on hotplug).
+void pc_window_set_netplay_input_filter(bool ignoreKeyboard, bool ignoreGamepads);
+void pc_window_set_netplay_gamepad(int player, int index);
+#endif
 int  pc_window_input_get_assignment(int player, int* gamepadId);
 // Jugador (0/1) que tiene el teclado; el ratón va con él.
 int  pc_window_get_keyboard_owner(void);

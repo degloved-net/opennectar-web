@@ -10,6 +10,9 @@
 #include <cstring>
 #include <vector>
 bool pc_speedrun_active() { return false; }
+const char* pc_speedrun_card_subdir() { return nullptr; }
+bool pc_randomizer_menu_pending() { return false; }
+void pc_netplay_load_keepalive(int) {}
 #if PIKI_P2_HOST
 static thread_local bool hostAllocation = false;
 bool pc_host_alloc_active() { return hostAllocation; }

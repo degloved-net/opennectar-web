@@ -11,11 +11,70 @@
 #include <limits>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <iconv.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace pikmin {
 namespace launcher {
 namespace {
+
+#if defined(__APPLE__)
+/// True when the bytes are well-formed UTF-8 (RFC 3629). APFS refuses names that
+/// are not. The allowed second byte depends on the lead byte, which rejects
+/// overlong forms, surrogates and code points above U+10FFFF.
+bool isValidUtf8(const std::string& text)
+{
+	std::size_t i = 0;
+	while (i < text.size()) {
+		const auto lead = static_cast<unsigned char>(text[i]);
+		if (lead < 0x80) { ++i; continue; }
+		unsigned char low = 0x80, high = 0xBF;
+		std::size_t extra = 0;
+		if (lead >= 0xC2 && lead <= 0xDF) extra = 1;
+		else if (lead == 0xE0) { extra = 2; low = 0xA0; }
+		else if (lead >= 0xE1 && lead <= 0xEC) extra = 2;
+		else if (lead == 0xED) { extra = 2; high = 0x9F; }
+		else if (lead >= 0xEE && lead <= 0xEF) extra = 2;
+		else if (lead == 0xF0) { extra = 3; low = 0x90; }
+		else if (lead >= 0xF1 && lead <= 0xF3) extra = 3;
+		else if (lead == 0xF4) { extra = 3; high = 0x8F; }
+		else return false;
+		if (i + extra >= text.size()) return false;
+		const auto second = static_cast<unsigned char>(text[i + 1]);
+		if (second < low || second > high) return false;
+		for (std::size_t k = 2; k <= extra; ++k) {
+			if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80) return false;
+		}
+		i += extra + 1;
+	}
+	return true;
+}
+
+/// Converts Shift-JIS to UTF-8 with iconv. False when the input is not valid
+/// Shift-JIS. Uses CP932, the code page the Windows branch below uses: plain
+/// SHIFT_JIS maps some characters differently (0x8160 is U+301C there and U+FF5E
+/// in CP932), so the same disc name would get a different filename per platform.
+bool shiftJisToUtf8(const std::string& input, std::string& output)
+{
+	const iconv_t converter = iconv_open("UTF-8", "CP932");
+	if (converter == reinterpret_cast<iconv_t>(-1)) return false;
+
+	std::string in = input;   // iconv takes non-const pointers
+	std::vector<char> out(input.size() * 4 + 4);
+	char* inPtr = in.data();
+	std::size_t inLeft = in.size();
+	char* outPtr = out.data();
+	std::size_t outLeft = out.size();
+	const std::size_t result = iconv(converter, &inPtr, &inLeft, &outPtr, &outLeft);
+	iconv_close(converter);
+	if (result == static_cast<std::size_t>(-1) || inLeft != 0) return false;
+	output.assign(out.data(), out.size() - outLeft);
+	return true;
+}
+#endif
 
 /**
  * @brief Turns a raw FST name into a path component.
@@ -30,6 +89,11 @@ namespace {
  * Decode explicitly instead: UTF-8 first, then Shift-JIS, and finally a
  * byte-preserving widening that cannot fail. The last step keeps a file with an
  * unrecognisable name rather than losing the extraction.
+ *
+ * macOS differs at the last step. Its file system accepts only UTF-8 names, so
+ * raw bytes that are neither UTF-8 nor Shift-JIS cannot be written there. The
+ * install stops with "Could not write" for such a name. Every name on the USA
+ * disc converts, so this does not arise for it.
  */
 fs::path discNameToPath(const std::string& name)
 {
@@ -58,6 +122,13 @@ fs::path discNameToPath(const std::string& name)
 	}
 	return fs::path(wide);
 #else
+#if defined(__APPLE__)
+	// APFS takes only UTF-8 names. Convert Shift-JIS names the way Windows does.
+	if (!isValidUtf8(name)) {
+		std::string utf8;
+		if (shiftJisToUtf8(name, utf8)) return fs::path(utf8);
+	}
+#endif
 	return fs::path(name);
 #endif
 }

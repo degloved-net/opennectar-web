@@ -8,6 +8,7 @@
 //   0x0E u16 bucle | 0x10 u32 frecuencia | 0x14 u32 muestras
 //   0x18 u32 inicio bucle | 0x1C u32 fin bucle | cabecera de 0x40 bytes
 //   Bloques: 'BLCK' u32 tamano-por-canal, cabecera 0x20, luego un tramo por canal.
+#include "audio/pc_audio_drops.h"
 #include "pc_ast_stream.h"
 #include "types.h"
 #include "Dolphin/dvd.h"
@@ -226,12 +227,17 @@ void pc_ast_mix(int16_t* pcm, size_t frames, int outRate)
 		return;
 	const double step = double(sRate) / double(outRate);
 	const u32 end     = sLoop ? sLoopEnd : sFrames;
+	const bool levels = pc_audio_levels_enabled();
+	double levelSum   = 0.0;
+	int levelPeak     = 0;
+	unsigned levelN   = 0;
 	for (size_t i = 0; i < frames; i++) {
 		u32 pos = u32(sCursor);
 		if (pos >= end) {
 			if (!sLoop) {
 				sPlaying  = false;
 				sFinished = true;
+				if (levels) pc_audio_level_block(PCAL_Stream, levelSum, levelPeak, levelN, 0);
 				return;
 			}
 			sCursor -= double(sLoopEnd - sLoopStart);
@@ -239,10 +245,16 @@ void pc_ast_mix(int16_t* pcm, size_t frames, int outRate)
 		}
 		const s32 l   = s32(sPcm[size_t(pos) * 2 + 0] * sGainL);
 		const s32 r   = s32(sPcm[size_t(pos) * 2 + 1] * sGainR);
+		if (levels) {
+			levelSum += 0.5 * (double(l) * l + double(r) * r);
+			levelPeak = std::max(levelPeak, std::max(std::abs(l), std::abs(r)));
+			++levelN;
+		}
 		pcm[i * 2 + 0] = clamp16(pcm[i * 2 + 0] + l);
 		pcm[i * 2 + 1] = clamp16(pcm[i * 2 + 1] + r);
 		sCursor += step;
 	}
+	if (levels) pc_audio_level_block(PCAL_Stream, levelSum, levelPeak, levelN, 0);
 }
 
 } // extern "C"

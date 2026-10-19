@@ -6,6 +6,9 @@
 #include "types.h"
 #include "zen/DrawCommon.h"
 #include "zen/Math.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_sim_rng.h"
+#endif
 
 class P2DScreen;
 
@@ -71,9 +74,16 @@ public:
 	    : P2DPaneCallBack(pane, PANETYPE_Picture)
 	{
 		mRotationAngle    = 0.0f;
+#if defined(PIKI_PC_PORT)
+		// Netplay: UI-only drift, so it draws from the cosmetic stream.
+		mRotationSpeed    = (pc_cosmetic_randf(1.0f) + 1.0f) * ((pc_cosmetic_randf(10.0f) > 5.0f) ? 1.0f : -1.0f);
+		mScaleSpeedFactor = pc_cosmetic_randf(0.1f) + 0.05f;
+		mMoveSpeed        = pc_cosmetic_randf(10.0f) + 5.0f;
+#else
 		mRotationSpeed    = (Rand(1.0f) + 1.0f) * ((Rand(10.0f) > 5.0f) ? 1.0f : -1.0f);
 		mScaleSpeedFactor = Rand(0.1f) + 0.05f;
 		mMoveSpeed        = Rand(10.0f) + 5.0f;
+#endif
 		mTimer            = 0.0f;
 		mPanelMgr         = mgr;
 		pane->setOffset(pane->getWidth() >> 1, pane->getHeight() >> 1);

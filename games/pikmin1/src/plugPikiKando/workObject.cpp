@@ -1033,7 +1033,15 @@ void Bridge::refresh(Graphics& gfx)
 		mCollInfo->updateInfo(gfx, false);
 	}
 
+	// _424 is the "force a platform update" countdown MapMgr::update reads
+	// through alwaysUpdatePlatform(). Count it once per tick, in the
+	// authoritative pass: counting presentation passes too made it depend on
+	// how many frames a peer drew.
+#if defined(PIKI_PC_PORT)
+	if (_424 && pc_render_is_authoritative()) {
+#else
 	if (_424) {
+#endif
 		_424--;
 	}
 }

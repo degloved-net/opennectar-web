@@ -1,4 +1,9 @@
 #include "DualCreature.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_policy.h"
+#include "netplay/pc_netplay_present.h"
+#include "timing/pc_render_phase.h"
+#endif
 #include "DebugLog.h"
 #include "Graphics.h"
 #include "ItemMgr.h"
@@ -162,10 +167,21 @@ void DualCreature::update()
 void DualCreature::refresh(Graphics& gfx)
 {
 	Matrix4f mtx;
+#if defined(PIKI_PC_PORT)
+	// Netplay two-pass frame: AI culling, dynamics mode, the world matrix and
+	// collisions are sim, so only the sim side writes them; the presentation
+	// pass renders from the stored values.
+	const bool simSide = pc_netplay_present_sim_side();
+	if (simSide) {
+#endif
 #if defined(VERSION_PIKIDEMO) || defined(VERSION_GPIJ01_01)
 	// I don't enjoy splitting this difference in two, but syntax highlighting really hates extra opening braces.
 #else
+#if defined(PIKI_PC_PORT)
+	bool isPointVisible = pc_netplay_sim_visible(gfx.mCamera->isPointVisible(mSRT.t, 2.0f * getBoundingSphereRadius()));
+#else
 	bool isPointVisible = gfx.mCamera->isPointVisible(mSRT.t, 2.0f * getBoundingSphereRadius());
+#endif
 
 	if (isPointVisible) {
 		disableAICulling();
@@ -194,12 +210,25 @@ void DualCreature::refresh(Graphics& gfx)
 	} else {
 		mWorldMtx.makeSRT(mSRT.s, mSRT.r, mSRT.t);
 	}
+#if defined(PIKI_PC_PORT)
+	}
+#endif
 
 	gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, mtx);
+#if defined(PIKI_PC_PORT)
+	// The presentation pass culls the draw on the real local frustum.
+	if (simSide || gfx.mCamera->isPointVisible(mSRT.t, 2.0f * getBoundingSphereRadius())) {
+		doRender(gfx, mtx);
+	}
+	if (simSide && mIsRealDynamics) {
+		createCollisions(gfx);
+	}
+#else
 	doRender(gfx, mtx);
 	if (mIsRealDynamics) {
 		createCollisions(gfx);
 	}
+#endif
 
 	_43E = false;
 }

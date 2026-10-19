@@ -1,6 +1,12 @@
+#ifdef PIKI_PC_PORT
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "Game/Navi.h"
+#include "Game/pcCoop.h"
+#include "Game/NaviState.h"
 #ifdef PIKI_PC_PORT
 extern "C" void pc_gfx_world_done(void);
+extern "C" int pc_record_hud_hidden(void);
 extern "C" unsigned gPcSectionTicks;
 static unsigned gPcSectionTicksForFade() { return gPcSectionTicks; }
 #endif
@@ -314,6 +320,9 @@ bool BaseGameSection::doUpdate()
 {
 	SysShape::Model::cullCount = 0;
 	gameSystem->startFrame();
+#ifdef PIKI_PC_PORT
+	pcCoopJoinCheck();
+#endif
 	Screen::gGame2DMgr->update();
 	if (mIsBlendCameraActive) {
 		updateBlendCamera();
@@ -382,7 +391,7 @@ bool BaseGameSection::doUpdate()
 	sys->mTimers->_stop("particle");
 	onUpdate();
 	if (moviePlayer && !gameSystem->mIsMoviePause) {
-		if (gameSystem->isMultiplayerMode()) {
+		if (PC_TWO_CAPTAIN_PLAY()) {
 			moviePlayer->update(mControllerP1, mControllerP2);
 		} else {
 			moviePlayer->update(mControllerP1, nullptr);
@@ -399,9 +408,18 @@ bool BaseGameSection::doUpdate()
  * @note Address: 0x8014BC28
  * @note Size: 0x170
  */
+#ifdef PIKI_PC_PORT
+extern "C" bool gPcMovieInterpFrame; // pcMovieInterp.cpp
+#endif
 void BaseGameSection::doDraw(Graphics& gfx)
 {
 	captureRadarmap(gfx);
+#ifdef PIKI_PC_PORT
+	// Frame interpolado de un cinematico: la camara ya trae la vista mezclada
+	// y no debe avanzar (su update va un dibujo por detras de la escena).
+	if (gPcMovieInterpFrame) {
+	} else
+#endif
 	if (gameSystem->paused()) {
 		if (cameraMgr) {
 			cameraMgr->controllerLock(CAMNAVI_Both);
@@ -412,6 +430,9 @@ void BaseGameSection::doDraw(Graphics& gfx)
 	} else if (cameraMgr) {
 		cameraMgr->update();
 	}
+#ifdef PIKI_PC_PORT
+	pcUpdateCoopMerge();
+#endif
 
 	sys->mTimers->_start("_draw3D_", true);
 	draw3D(gfx);
@@ -674,6 +695,9 @@ void BaseGameSection::initGenerators()
 		if (file) {
 			RamStream defaultGenTxt(file, -1);
 			defaultGenTxt.setMode(STREAM_MODE_TEXT, 1);
+#ifdef PIKI_PC_PORT
+			pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 			generatorMgr->read(defaultGenTxt, false);
 			generatorMgr->updateUseList();
 
@@ -694,6 +718,9 @@ void BaseGameSection::initGenerators()
 			if (file) {
 				RamStream plantsGenTxt(file, -1);
 				plantsGenTxt.setMode(STREAM_MODE_TEXT, 1);
+#ifdef PIKI_PC_PORT
+				pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 				plantsGeneratorMgr->read(plantsGenTxt, false);
 				plantsGeneratorMgr->updateUseList();
 				generatorFiles[fileIdx]    = file;
@@ -717,6 +744,9 @@ void BaseGameSection::initGenerators()
 			if (file) {
 				RamStream initgenTxt(file, -1);
 				initgenTxt.setMode(STREAM_MODE_TEXT, 1);
+#ifdef PIKI_PC_PORT
+				pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 				onceGeneratorMgr->read(initgenTxt, false);
 				onceGeneratorMgr->updateUseList();
 				generatorFiles[fileIdx]    = file;
@@ -752,6 +782,9 @@ void BaseGameSection::initGenerators()
 					GeneratorMgr* currentNonloopMgr = new GeneratorMgr;
 					currentNonloopMgr->mUnusedFlag  = true; // is nonrepeating?
 
+#ifdef PIKI_PC_PORT
+					pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 					currentNonloopMgr->read(noonloopTxt, false);
 					currentNonloopMgr->setDayLimit(currentGen->mDayLimit);
 					currentNonloopMgr->updateUseList();
@@ -805,6 +838,9 @@ void BaseGameSection::initGenerators()
 						GeneratorMgr* currentLoopMgr = new GeneratorMgr;
 						currentLoopMgr->mUnusedFlag  = true; // is nonrepeating?
 
+#ifdef PIKI_PC_PORT
+						pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 						currentLoopMgr->read(loopTxt, false);
 						u32 dayLimit = currentGen->mDayLimit - 30;
 						dayLimit += floorDay;
@@ -831,6 +867,9 @@ void BaseGameSection::initGenerators()
 				if (file) {
 					RamStream dayTxt(file, -1);
 					dayTxt.setMode(STREAM_MODE_TEXT, 1);
+#ifdef PIKI_PC_PORT
+					pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 					dayGeneratorMgr->read(dayTxt, false);
 					dayGeneratorMgr->updateUseList();
 					generatorFiles[fileIdx]    = file;
@@ -952,7 +991,7 @@ void BaseGameSection::initGenerators()
 			louie->setDeadLaydown();
 			return;
 		}
-		if (!gameSystem->isMultiplayerMode() && !olimarAlive) {
+		if (!PC_TWO_CAPTAIN_PLAY() && !olimarAlive) {
 			InteractFue callNavi(olimar, false, true); // don't combine parties, is new to party
 			louie->stimulate(callNavi);
 		}
@@ -1072,6 +1111,25 @@ void BaseGameSection::pmPlayerJoin()
  */
 void BaseGameSection::setPlayerMode(int mode)
 {
+#ifdef PIKI_PC_PORT
+	// Co-op: la historia vuelve siempre a la pantalla partida con los dos
+	// capitanes (inicio del día o de subnivel, fin de cinemática). Antes de que
+	// llegue Louie, un solo capitán (docs/PLAN_COOP.md §3.1). Si cae uno, el
+	// otro sigue a pantalla completa con su propio mando, como en el original
+	// el capitán que queda (§6.8); el día acaba cuando caen los dos.
+	if (pc_p2_coop_active() && !pc_p2_coop_movie_full()) {
+		Navi* olimar     = naviMgr->getAt(NAVIID_Olimar);
+		Navi* louie      = naviMgr->getAt(NAVIID_Louie);
+		const bool olimarUp = olimar && olimar->isAlive();
+		const bool louieUp  = louie && louie->isAlive();
+		if (olimarUp != louieUp) {
+			mode = olimarUp ? NAVIID_Olimar : NAVIID_Louie;
+		} else {
+			mode = NAVIID_Multiplayer;
+		}
+	}
+	pc_p2_coop_set_split(mode == NAVIID_Multiplayer);
+#endif
 	Navi* navis[2];
 	navis[NAVIID_Olimar] = navis[NAVIID_Louie] = nullptr;
 
@@ -1137,6 +1195,148 @@ void BaseGameSection::setPlayerMode(int mode)
 	}
 	mPrevNaviIdx = mode;
 }
+
+#ifdef PIKI_PC_PORT
+bool BaseGameSection::pcPausePressed()
+{
+	if (mControllerP1->getButtonDown() & Controller::PRESS_START) {
+		pc_p2_coop_set_menu_player(0);
+		return true;
+	}
+	if (pc_p2_coop_active() && mControllerP2->getButtonDown() & Controller::PRESS_START) {
+		pc_p2_coop_set_menu_player(1);
+		return true;
+	}
+	return false;
+}
+
+Controller* BaseGameSection::pcMenuController()
+{
+	return pc_p2_coop_active() && pc_p2_coop_menu_player() == 1 ? mControllerP2 : mControllerP1;
+}
+
+/**
+ * Co-op: la bandera que activa el co-op (DEMO_First_Use_Louie) se pone justo
+ * después de lanzar x05_louiestart, así que esa cinemática no pasa por el
+ * desvío y al acabar nada parte la pantalla. En cuanto el co-op está activo,
+ * con los dos capitanes en pie y sin cinemática, se pasa a la pantalla
+ * partida y P2 entra con Louie.
+ */
+void BaseGameSection::pcCoopJoinCheck()
+{
+	// Un capitán con mando no sigue al otro: tras la reunión del tutorial el
+	// inactivo quedaba en NSID_Follow, sin responder a su jugador y ayudando a
+	// arrancar para sí (los Pikmin acababan en su grupo).
+	if (pc_p2_coop_active() && naviMgr && moviePlayer && moviePlayer->mDemoState == DEMOSTATE_Inactive) {
+		for (int i = 0; i < 2; i++) {
+			Navi* navi = naviMgr->getAt(i);
+			if (navi && navi->isAlive() && navi->mController1 && navi->getStateID() == NSID_Follow) {
+				navi->transit(NSID_Walk, nullptr);
+			}
+		}
+	}
+	if (!pc_p2_coop_active() || pc_p2_coop_movie_full() || mPrevNaviIdx == NAVIID_Multiplayer || !naviMgr || !moviePlayer
+	    || moviePlayer->mDemoState != DEMOSTATE_Inactive || moviePlayer->isFlag(MVP_IsActive)) {
+		return;
+	}
+	Navi* olimar = naviMgr->getAt(NAVIID_Olimar);
+	Navi* louie  = naviMgr->getAt(NAVIID_Louie);
+	if (!olimar || !louie || !olimar->isAlive() || !louie->isAlive()) {
+		return;
+	}
+	setPlayerMode(NAVIID_Multiplayer);
+	setCamController();
+}
+
+/**
+ * Cámara fusionada del co-op, como updateDynamicSplit del co-op de Pikmin 1:
+ * una cámara unificada con el foco en el punto medio de los dos, la
+ * orientación de la del capitán 1 y la distancia media más un extra
+ * proporcional a la separación, para que quepan los dos. Con histéresis, la
+ * vista de cada uno pasa (en ~0,45 s) de la unificada a la propia cuando se
+ * separan, y vuelve al acercarse. Solo se rehace la matriz de vista (y los
+ * planos de recorte): el estado propio de cada PlayCamera no se toca. Los
+ * controles leen los vectores de esa matriz, así que siguen a la vista.
+ */
+void BaseGameSection::pcUpdateCoopMerge()
+{
+	static int sLastSide = 0;
+	if (!pc_p2_coop_merge_on() || !cameraMgr || !cameraMgr->mCameraObjList || !naviMgr) {
+		pc_p2_coop_set_split_blend(1.0f);
+	} else {
+		PlayCamera* cams[2] = { cameraMgr->mCameraObjList[NAVIID_Olimar], cameraMgr->mCameraObjList[NAVIID_Louie] };
+		Navi* navis[2]      = { naviMgr->getAt(NAVIID_Olimar), naviMgr->getAt(NAVIID_Louie) };
+		if (cams[0] && cams[1] && navis[0] && navis[1] && !cams[0]->isRunning() && !cams[1]->isRunning()) {
+			Vector3f eye[2], tgt[2], dir[2];
+			f32 dist[2];
+			for (int i = 0; i < 2; i++) {
+				// PlayCamera monta la vista con ángulos y distancia alrededor de
+				// mLookAtPosition (su mPosition no es el ojo): el ojo sale de la
+				// propia matriz de vista.
+				eye[i]  = cams[i]->Camera::getPosition();
+				tgt[i]  = cams[i]->mLookAtPosition;
+				dir[i]  = eye[i] - tgt[i];
+				dist[i] = dir[i].length();
+				if (dist[i] > 0.001f) {
+					dir[i] = dir[i] * (1.0f / dist[i]);
+				}
+			}
+			Vector3f p0 = navis[0]->getPosition(), p1 = navis[1]->getPosition();
+			const f32 sep  = p0.distance(p1);
+			const f32 dAvg = 0.5f * (dist[0] + dist[1]);
+			// Orientación de la cámara del capitán 1 (promediar las dos se anula
+			// cuando miran en sentidos opuestos).
+			const Vector3f focus = (tgt[0] + tgt[1]) * 0.5f;
+			const Vector3f uEye  = focus + dir[0] * (dAvg + 0.7f * sep);
+
+			// Umbral con histéresis relativo a la distancia de cámara propia.
+			f32 blend      = pc_p2_coop_split_blend();
+			const f32 goal = sep > 0.6f * dAvg ? 1.0f : (sep < 0.4f * dAvg ? 0.0f : (blend > 0.5f ? 1.0f : 0.0f));
+			const f32 step = sys->mDeltaTime / 0.45f;
+			blend          = blend < goal ? (blend + step > goal ? goal : blend + step) : (blend - step < goal ? goal : blend - step);
+			pc_p2_coop_set_split_blend(blend);
+
+			// Lado de cada uno por su posición en la imagen unificada, solo con
+			// ella entera y con margen para que no salte al cruzarse.
+			if (blend <= 0.0f) {
+				Vector3f fwd   = dir[0] * -1.0f;
+				Vector3f right = fwd.cross(Vector3f(0.0f, 1.0f, 0.0f));
+				right.normalise();
+				Vector3f up        = right.cross(fwd);
+				const bool vert    = pc_p2_coop_vertical() != 0;
+				const Vector3f axis = vert ? right : up;
+				const f32 a0       = (p0 - uEye).dot(axis);
+				const f32 a1       = (p1 - uEye).dot(axis);
+				const f32 d        = vert ? a0 - a1 : a1 - a0; // < 0: el 1 a la izquierda / arriba
+				if (d < -12.0f) {
+					pc_p2_coop_set_p1_side(0);
+				} else if (d > 12.0f) {
+					pc_p2_coop_set_p1_side(1);
+				}
+			}
+
+			// Vista de cada uno: de la unificada a la propia.
+			if (blend < 1.0f) {
+				Vector3f worldUp(0.0f, 1.0f, 0.0f);
+				for (int i = 0; i < 2; i++) {
+					Vector3f e = uEye + (eye[i] - uEye) * blend;
+					Vector3f t = focus + (tgt[i] - focus) * blend;
+					C_MTXLookAt(cams[i]->mLookMatrix.mMatrix.mtxView, (Vec*)&e, (Vec*)&worldUp, (Vec*)&t);
+					cams[i]->updatePlanes();
+				}
+			}
+		}
+	}
+	// Al cambiar de lado (o salir de la fusión), las vistas se recolocan.
+	const int side = pc_p2_coop_view_side(0);
+	if (side != sLastSide) {
+		sLastSide = side;
+		if (mPrevNaviIdx == NAVIID_Multiplayer && mSplit == 0.0f) {
+			mSplitter->split2(0.5f);
+		}
+	}
+}
+#endif
 
 /**
  * @note Address: 0x8014DBD4
@@ -1209,6 +1409,11 @@ void BaseGameSection::setCamController()
 		navis[NAVIID_Louie]->mCamera      = louieCam;
 		navis[NAVIID_Louie]->mCamera2     = louieCam;
 		Controller* louieController       = mControllerP1;
+#ifdef PIKI_PC_PORT
+		if (pc_p2_coop_active()) {
+			louieController = mControllerP2; // co-op: Louie solo (Olimar caído) sigue con el mando de P2
+		}
+#endif
 		navis[NAVIID_Louie]->mController1 = louieController;
 		navis[NAVIID_Louie]->mController2 = louieController;
 		moviePlayer->mTargetNavi          = navis[NAVIID_Louie];
@@ -1448,11 +1653,14 @@ void BaseGameSection::draw3D(Graphics& gfx)
 }
 
 #ifdef PIKI_PC_PORT
-extern "C" int pc_settings_get_eternal_night(void);
+extern "C" int pc_settings_get_fireflies(void);
+void pcDrawLockOnRing(Graphics& gfx, Viewport* port); // navi.cpp
+void pcDrawSwarmArrows(Graphics& gfx, Viewport* port); // navi.cpp
 
 namespace {
 /**
- * @brief Eternal Night: luciérnagas por lo que ve la cámara.
+ * @brief Fireflies: luciérnagas por lo que ve la cámara, de día o de noche
+ * (opción propia, separada de Eternal Night, como en Pikmin 1).
  *
  * Igual que en Pikmin 1, pero sin nada de P1: cada luciérnaga lleva su rumbo,
  * su altura y su parpadeo, y se dibuja como un halo aditivo con GX directo.
@@ -1544,7 +1752,7 @@ void pcBuildGlowTex()
 void pcDrawNightFireflies(Graphics& gfx, Viewport* port)
 {
 	Game::GameSystem* gs = Game::gameSystem;
-	if (!pc_settings_get_eternal_night() || !gs || !gs->isStoryMode() || gs->mIsInCave || !Game::naviMgr) {
+	if (!pc_settings_get_fireflies() || !gs || !gs->isStoryMode() || gs->mIsInCave || !Game::naviMgr) {
 		return;
 	}
 	Game::Navi* navi = Game::naviMgr->getActiveNavi();
@@ -1615,6 +1823,9 @@ void pcDrawNightFireflies(Graphics& gfx, Viewport* port)
 	GXLoadTexObj(&sPcGlowTexObj, GX_TEXMAP0);
 	GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
 	GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
+	// Sin indirecto: la última partícula pudo dejarlo puesto.
+	GXSetNumIndStages(0);
+	GXSetTevDirect(GX_TEVSTAGE0);
 	GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_VTX, GX_SRC_VTX, GX_LIGHT_NULL, GX_DF_NONE, GX_AF_NONE);
 	GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
 	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
@@ -1681,7 +1892,7 @@ void BaseGameSection::drawParticle(Graphics& gfx, int viewport)
 
 		port->setProjection();
 		port->setViewport();
-		if (!gameSystem->isMultiplayerMode() && mPrevNaviIdx != NAVIID_Multiplayer) {
+		if (!PC_TWO_CAPTAIN_PLAY() && mPrevNaviIdx != NAVIID_Multiplayer) {
 			mLightMgr->mFogMgr->off(gfx);
 			particleMgr->draw(port, 0);
 			mLightMgr->mFogMgr->set(gfx);
@@ -1701,6 +1912,8 @@ void BaseGameSection::drawParticle(Graphics& gfx, int viewport)
 		particleMgr->draw(port, 2);
 #ifdef PIKI_PC_PORT
 		pcDrawNightFireflies(gfx, port);
+		pcDrawLockOnRing(gfx, port);
+		pcDrawSwarmArrows(gfx, port);
 #endif
 	}
 }
@@ -1714,7 +1927,11 @@ void BaseGameSection::draw_Ogawa2D(Graphics& gfx)
 	gfx.mPerspGraph.setPort();
 	particle2dMgr->draw(true, 0);
 	sys->mTimers->_start("2ddraw", true);
-	Screen::gGame2DMgr->draw(gfx);
+#if defined(PIKI_PC_PORT)
+	// Atajo de grabación Ctrl+1 (pc_record.h): sin HUD encima del juego.
+	if (!pc_record_hud_hidden())
+#endif
+		Screen::gGame2DMgr->draw(gfx);
 	sys->mTimers->_stop("2ddraw");
 	gfx.mPerspGraph.setPort();
 	particle2dMgr->draw(false, 0);
@@ -2435,7 +2652,7 @@ void BaseGameSection::setupFixMemory_dvdload()
 	sys->heapStatusEnd("navi-piki");
 
 	pelletMgr = new PelletMgr;
-	pelletMgr->createManagers(nullptr);
+	pelletMgr->createManagers(0);
 	gameSystem->addObjectMgr(pelletMgr);
 
 	createScreenRootNode();
@@ -2574,6 +2791,9 @@ void BaseGameSection::setupFloatMemory()
 		sprintf(path, "user/Mukki/mapunits/caveinfo/%s", getCaveFilename());
 		getCaveFilename();
 		Cave::CaveInfo* info       = Cave::CaveInfo::load(path);
+#ifdef PIKI_PC_PORT
+		pc_p2_rnd_cave_loaded(getCaveFilename(), info, getCurrFloor());
+#endif
 		Cave::EditMapUnit* mapunit = nullptr;
 		if (gameSystem->isVersusMode()) {
 			if (strcmp("random", getEditorFilename())) {
@@ -2588,7 +2808,17 @@ void BaseGameSection::setupFloatMemory()
 		}
 		mapMgr = new RoomMapMgr(info);
 		sys->heapStatusStart("mapMgr", nullptr);
+#ifdef PIKI_PC_PORT
+		// Randomizer, cuevas fijas por semilla: misma semilla, mismas salas. El
+		// generador del juego sigue después con una semilla sacada de sí mismo.
+		const unsigned rndLayoutSeed = pc_p2_rnd_cave_layout_seed(getCaveFilename(), getCurrFloor());
+		const unsigned rndResumeSeed = rndLayoutSeed ? (unsigned(rand()) << 15) ^ unsigned(rand()) : 0;
+		if (rndLayoutSeed) srand(rndLayoutSeed);
+#endif
 		static_cast<RoomMapMgr*>(mapMgr)->createRandomMap(getCurrFloor(), mapunit);
+#ifdef PIKI_PC_PORT
+		if (rndLayoutSeed) srand(rndResumeSeed);
+#endif
 		sys->heapStatusEnd("mapMgr");
 		gameSystem->addObjectMgr(mapMgr);
 

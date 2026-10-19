@@ -9,6 +9,7 @@
  * OpenGL context setup, and input polling.
  */
 #include <cstdio>
+#include "netplay/pc_online_switch.h"
 #include <cstdlib>
 #include <cstring>
 #ifdef __EMSCRIPTEN__
@@ -57,7 +58,20 @@ __declspec(dllexport) int           AmdPowerXpressRequestHighPerformance = 1;
 #include "android/pc_android.h"
 #endif
 #include "settings/pc_settings.h"
+#include "mods/pc_hd_model_convert.h"
+#include "mods/pc_vs_map.h"
+#include "pc_vs.h"
 #include "settings/pc_settings_p2d.h"
+#include "netplay/pc_netplay_det.h"
+#include "netplay/pc_input_log.h"
+#include "netplay/pc_state_hash.h"
+#include "netplay/pc_coop_switch.h"
+
+// Netplay session switches: strong-defined by pc_netplay_session.cpp in
+// netplay builds only, null otherwise.
+void pc_netplay_session_notify_argv(int argc, char** argv);
+void pc_netplay_launch_preinit(int argc, char** argv);
+void pc_netplay_launch_post_settings(void);
 
 int main(int argc, char* argv[])
 {
@@ -97,6 +111,16 @@ int main(int argc, char* argv[])
         if (settingsResult >= 0) return settingsResult;
     }
 
+    // --netplay-host-ice / --netplay-join-ice: the run folder, the private
+    // save folder and the joiner's session bundle, before anything reads them.
+#if PC_ONLINE_ENABLED // online features are off project-wide (pc_online_switch.h)
+    if (pc_netplay_launch_preinit != nullptr) pc_netplay_launch_preinit(argc, argv);
+#endif
+
+    // Netplay determinism switches (--netplay-deterministic and the
+    // PIKMIN_NETPLAY_* variables), before the game starts. Inert unless set.
+    pc_netplay_det_init(argc, argv);
+
     // Before SDL_Init, and before anything can touch GL: on Linux the vendor
     // is selected by libglvnd the first time it is asked, and by the time a
     // context exists the choice has already been made. No-op elsewhere.
@@ -106,6 +130,10 @@ int main(int argc, char* argv[])
     if (argc == 2 && std::strcmp(argv[1], "--audio-self-test") == 0)
         return pc_jaudio_integration_test();
 #endif
+    // Netplay harness: --input-record/--input-replay and --state-hash-log.
+    // No-ops unless those switches (or their env vars) are set.
+    pc_input_log_notify_argv(argc, argv);
+    pc_state_hash_notify_argv(argc, argv);
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dump-texture-names") == 0)
             pc_gfx_set_dump_texture_names(1);
@@ -113,7 +141,25 @@ int main(int argc, char* argv[])
         // línea de comandos es la única puerta al pack.
         if (std::strcmp(argv[i], "--texture-pack") == 0)
             pc_texpack_request_enable();
+        // Editor de mapas: "Probar" abre el juego directo en una partida VS.
+        if (std::strcmp(argv[i], "--vs-map") == 0 && i + 1 < argc) {
+            pc_vs_map_select_file(argv[++i]);
+            pc_vs_direct_request();
+        }
+        // Straight into a new two-captain story run (--coop-captains=<p1>,<p2>
+        // picks the captains).
+        if (std::strcmp(argv[i], "--coop-direct") == 0) {
+            PcCoopSwitch sw = pc_coop_switch_parse(argc, argv);
+            sw.coop         = true;
+            pc_coop_switch_apply(sw);
+            pc_coop_direct_request();
+        }
     }
+    // --netplay-host / --netplay-join. A session also takes the co-op direct
+    // boot. No-op unless a netplay switch is set.
+#if PC_ONLINE_ENABLED
+    if (pc_netplay_session_notify_argv != nullptr) pc_netplay_session_notify_argv(argc, argv);
+#endif
     (void)argc;
     (void)argv;
 
@@ -140,6 +186,10 @@ int main(int argc, char* argv[])
     printf("[PC Port] Loading persisted settings...\n");
     fflush(stdout);
     pc_settings_init();
+    // A netplay launch locks the sim settings here; the joiner adopts the host's.
+    if (pc_netplay_launch_post_settings != nullptr) pc_netplay_launch_post_settings();
+    // Con Pikmin 2 instalado, su Louie sirve de capitán sin bajar ningún pack.
+    pc_hd_models_import_pikmin2();
 
     printf("[PC Port] Initializing game system...\n");
     fflush(stdout);

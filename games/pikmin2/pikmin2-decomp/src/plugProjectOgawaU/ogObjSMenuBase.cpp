@@ -5,6 +5,12 @@
 #include "Controller.h"
 #include "System.h"
 #include "trig.h"
+#if PIKI_PC_TOUCH
+extern "C" bool pc_touch_visible(void);
+extern "C" void pc_touch_claim_game_menu(void);
+extern "C" bool pc_touch_pane_rect(const void* pane, float* x0, float* y0, float* x1, float* y1);
+extern "C" void pc_touch_mark_help_icon(char tag, float cx, float cy, float size);
+#endif
 
 /**
  * @note Address: N/A
@@ -109,6 +115,11 @@ void ObjSMenuBase::doCreateAfter(JKRArchive* arc, P2DScreen::Mgr* scrn)
 void ObjSMenuBase::commonUpdateBase()
 {
 	updateYaji();
+#if PIKI_PC_TOUCH
+	// Menú de pausa/radar/objetos: la pantalla es del menú (se toca lo que
+	// dibuja) y deslizar en horizontal pasa de página (L/R).
+	pc_touch_claim_game_menu();
+#endif
 }
 
 /**
@@ -380,6 +391,16 @@ void ObjSMenuBase::updateYaji()
 void ObjSMenuBase::drawYaji(Graphics& gfx)
 {
 	mScreenLR->draw(gfx, gfx.mPerspGraph);
+#if PIKI_PC_TOUCH
+	// Táctil: sobre las flechas L/R, el gesto de deslizar que cambia de página.
+	J2DPane* yaji[2] = { mNyaji_l, mNyaji_r };
+	for (int i = 0; i < 2; i++) {
+		float x0, y0, x1, y1;
+		if (!pc_touch_pane_rect(yaji[i], &x0, &y0, &x1, &y1) || !pc_touch_visible() || !mEnableYaji || mAlpha == 0) continue;
+		const float h = y1 - y0;
+		pc_touch_mark_help_icon(i == 0 ? 'L' : 'R', i == 0 ? x0 + h * 0.5f : x1 - h * 0.5f, (y0 + y1) * 0.5f, h * 1.2f);
+	}
+#endif
 }
 
 /**

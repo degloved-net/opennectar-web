@@ -141,7 +141,75 @@ bool combine_static(uint8_t op, bool test0, bool test1)
 	}
 }
 
-void emit_stage(std::string& out, const PcTevShaderKey& key, int index)
+// Valores de GXIndTexWrap 1..5 en texels.
+int ind_wrap_texels(uint8_t wrap)
+{
+	return wrap >= 1 && wrap <= 5 ? (256 >> (wrap - 1)) : 0;
+}
+
+// Coordenada de la etapa con texturas indirectas, como la calcula la GameCube
+// (Dolphin, PixelShaderGen): en texels de la textura que lee la etapa, con el
+// wrap aplicado, más el desplazamiento de la matriz sobre la muestra indirecta
+// y, con addPrev, la coordenada de la etapa anterior. Deja el resultado en
+// "tcInd" (texels) y "tsz" (tamaño de la textura).
+void emit_indirect_coord(std::string& out, const PcTevShaderKey& key, const PcTevStageKey& stage, int coord)
+{
+	char line[512];
+	if (stage.texMap >= 0 && stage.texMap < 8) {
+		snprintf(line, sizeof(line), "\t\tvec2 tsz = vec2(textureSize(uTex%d, 0));\n", int(stage.texMap));
+	} else {
+		snprintf(line, sizeof(line), "\t\tvec2 tsz = vec2(1.0);\n");
+	}
+	out += line;
+	snprintf(line, sizeof(line), "\t\tvec2 tcInd = (vTexCoord%d / vTcQ[%d]) * tsz;\n", coord, coord);
+	out += line;
+	const uint8_t wraps[2] = { stage.indWrapS, stage.indWrapT };
+	for (int axis = 0; axis < 2; ++axis) {
+		const char* c = axis == 0 ? "x" : "y";
+		if (wraps[axis] == 6) {
+			snprintf(line, sizeof(line), "\t\ttcInd.%s = 0.0;\n", c);
+			out += line;
+		} else if (const int texels = ind_wrap_texels(wraps[axis])) {
+			snprintf(line, sizeof(line), "\t\ttcInd.%s = mod(tcInd.%s, %d.0);\n", c, c, texels);
+			out += line;
+		}
+	}
+	const int mtx = stage.indMtx;
+	const bool validStage = stage.indStage < key.numIndStages && stage.indStage < 4;
+	if (mtx != 0 && validStage) {
+		snprintf(line, sizeof(line), "\t\tvec3 ic = ind%d;\n", int(stage.indStage));
+		out += line;
+		if (stage.indFmt != 0) {
+			const int bits = stage.indFmt == 1 ? 32 : stage.indFmt == 2 ? 16 : 8;
+			snprintf(line, sizeof(line), "\t\tic = mod(ic, %d.0);\n", bits);
+			out += line;
+		}
+		if (stage.indBias != 0) {
+			const char* b = stage.indFmt == 0 ? "-128.0" : "1.0";
+			for (int k = 0; k < 3; ++k) {
+				if (!(stage.indBias & (1 << k))) continue;
+				snprintf(line, sizeof(line), "\t\tic.%s += %s;\n", k == 0 ? "x" : k == 1 ? "y" : "z", b);
+				out += line;
+			}
+		}
+		const int slot = (mtx & 3) - 1;
+		if (slot >= 0 && slot < 3) {
+			if (mtx <= 3) {
+				snprintf(line, sizeof(line),
+				         "\t\ttcInd += vec2(dot(uIndMtx[%d], ic), dot(uIndMtx[%d], ic));\n", slot * 2, slot * 2 + 1);
+			} else {
+				// Matrices dinámicas: la coordenada por la componente S (5..7)
+				// o T (9..11) de la muestra, como hace el hardware.
+				snprintf(line, sizeof(line), "\t\ttcInd += tcInd * (ic.%s / 256.0) * uIndScale[%d];\n",
+				         mtx < 8 ? "x" : "y", slot);
+			}
+			out += line;
+		}
+	}
+	if (stage.indAddPrev) out += "\t\ttcInd += tcPrev;\n";
+}
+
+void emit_stage(std::string& out, const PcTevShaderKey& key, int index, bool trackPrev)
 {
 	const PcTevStageKey& stage = key.stages[index];
 	char line[512];
@@ -153,14 +221,32 @@ void emit_stage(std::string& out, const PcTevShaderKey& key, int index)
 	// The vertex stage exports four coordinate sets (vTexCoord0..3, vTcQ is a
 	// vec4); higher GX texcoords fold onto the last one exactly as the
 	// ubershader's coordinate resolver does, so the program always compiles.
-	if (stage.texMap >= 0 && stage.texMap < 8) {
-		const int coord = stage.texCoord > 3 ? 3 : int(stage.texCoord);
+	const int coord = stage.texCoord > 3 ? 3 : int(stage.texCoord);
+	if (pc_tev_stage_indirect(stage)) {
+		emit_indirect_coord(out, key, stage, coord);
+		if (stage.texMap >= 0 && stage.texMap < 8) {
+			snprintf(line, sizeof(line), "\t\tvec4 tex = texture(uTex%d, tcInd / tsz);\n", int(stage.texMap));
+		} else {
+			snprintf(line, sizeof(line), "\t\tvec4 tex = vec4(1.0);\n");
+		}
+		out += line;
+		if (trackPrev) out += "\t\ttcPrev = tcInd;\n";
+	} else if (stage.texMap >= 0 && stage.texMap < 8) {
 		snprintf(line, sizeof(line), "\t\tvec4 tex = texture(uTex%d, vTexCoord%d / vTcQ[%d]);\n",
 		         int(stage.texMap), coord, coord);
+		out += line;
+		if (trackPrev) {
+			snprintf(line, sizeof(line), "\t\ttcPrev = (vTexCoord%d / vTcQ[%d]) * vec2(textureSize(uTex%d, 0));\n",
+			         coord, coord, int(stage.texMap));
+			out += line;
+		}
 	} else {
-		snprintf(line, sizeof(line), "\t\tvec4 tex = vec4(1.0);\n");
+		out += "\t\tvec4 tex = vec4(1.0);\n";
+		if (trackPrev) {
+			snprintf(line, sizeof(line), "\t\ttcPrev = vTexCoord%d / vTcQ[%d];\n", coord, coord);
+			out += line;
+		}
 	}
-	out += line;
 	std::string swap;
 	emit_swap(swap, "tex", key.swapTable[stage.texSwapSel & 3]);
 	if (!swap.empty()) out += "\t" + swap;
@@ -298,6 +384,11 @@ bool operator==(const PcTevShaderKey& a, const PcTevShaderKey& b)
 	if (a.useMaterialRgb1 != b.useMaterialRgb1) return false;
 	if (a.fog != b.fog) return false;
 	if (std::memcmp(a.swapTable, b.swapTable, sizeof(a.swapTable)) != 0) return false;
+	if (a.numIndStages != b.numIndStages) return false;
+	if (std::memcmp(a.indTexCoord, b.indTexCoord, sizeof(a.indTexCoord)) != 0) return false;
+	if (std::memcmp(a.indTexMap, b.indTexMap, sizeof(a.indTexMap)) != 0) return false;
+	if (std::memcmp(a.indScaleS, b.indScaleS, sizeof(a.indScaleS)) != 0) return false;
+	if (std::memcmp(a.indScaleT, b.indScaleT, sizeof(a.indScaleT)) != 0) return false;
 	// Only the stages in use take part: whatever sits in the unused tail must
 	// never split one configuration across two cache entries.
 	const size_t used = size_t(a.numStages) * sizeof(PcTevStageKey);
@@ -323,6 +414,11 @@ uint64_t pc_tev_hash_key(const PcTevShaderKey& key)
 	mix(&key.useMaterialRgb1, sizeof(key.useMaterialRgb1));
 	mix(&key.fog, sizeof(key.fog));
 	mix(key.swapTable, sizeof(key.swapTable));
+	mix(&key.numIndStages, sizeof(key.numIndStages));
+	mix(key.indTexCoord, sizeof(key.indTexCoord));
+	mix(key.indTexMap, sizeof(key.indTexMap));
+	mix(key.indScaleS, sizeof(key.indScaleS));
+	mix(key.indScaleT, sizeof(key.indScaleT));
 	mix(key.stages, size_t(key.numStages) * sizeof(PcTevStageKey));
 	return hash;
 }
@@ -341,10 +437,21 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 
 	bool usesSampler[8] = {};
 	bool usesChannel1 = false;
+	bool usesIndStage[4] = {};
+	bool usesIndMtx = false;
+	bool trackPrev = false;
 	for (int i = 0; i < stageCount; ++i) {
 		const PcTevStageKey& stage = key.stages[i];
 		if (stage.texMap >= 0 && stage.texMap < 8) usesSampler[stage.texMap] = true;
 		if (stage.rasChannel == 1) usesChannel1 = true;
+		if (stage.indAddPrev) trackPrev = true;
+		if (stage.indMtx != 0 && stage.indStage < key.numIndStages && stage.indStage < 4) {
+			usesIndStage[stage.indStage] = true;
+			usesIndMtx = true;
+		}
+	}
+	for (int n = 0; n < 4; ++n) {
+		if (usesIndStage[n] && key.indTexMap[n] < 8) usesSampler[key.indTexMap[n]] = true;
 	}
 
 	std::string out;
@@ -352,6 +459,7 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 	out += kGlslVersion;
 	out += kGlslPrecision;
 	out += "in vec3 vLit0;\n";
+	out += "in float vLitA0;\n";
 	if (usesChannel1) out += "in vec3 vLit1;\n";
 	// Iluminación GX compartida + selector por píxel (uPerPixel).
 	out += kGxLightingGlsl;
@@ -390,6 +498,17 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 	if (needsRef0) out += "uniform float uAlphaRef0;\n";
 	if (needsRef1) out += "uniform float uAlphaRef1;\n";
 	out += "uniform vec3 uOutTint;\n"; // multiplicador final (HUD de J2 en coop)
+	// uOutTint negativo: gris y luego el color (cursores del selector de capitanes de P2).
+	out += "vec3 applyOutTint(vec3 c) {\n";
+	out += "\tif (uOutTint.r < 0.0) return vec3(dot(c, vec3(0.299, 0.587, 0.114))) * -uOutTint;\n";
+	out += "\treturn c * uOutTint;\n";
+	out += "}\n";
+	if (usesIndMtx) {
+		// Filas de las tres matrices indirectas, ya multiplicadas por 2^escala,
+		// y la escala sola para las matrices dinámicas.
+		out += "uniform vec3 uIndMtx[6];\n";
+		out += "uniform float uIndScale[3];\n";
+	}
 
 	out += "void main() {\n";
 
@@ -401,6 +520,10 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 	out += line;
 	out += "\tvec3 lit0 = gxPixelLit0(vLit0);\n";
 	out += "\tvec4 rast0 = (lit0.x < -0.5) ? base0 : vec4(clamp(base0.rgb * lit0, 0.0, 1.0), base0.a);\n";
+	// Canal de alfa iluminado (GX_ALPHA0 con luces), como el ubershader. Sin
+	// esto el alfa era el del material: el cristal del casco de los capitanes,
+	// que es casi transparente salvo en los bordes, salía azul y opaco.
+	out += "\tif (vLitA0 >= 0.0) rast0.a = clamp(base0.a * vLitA0, 0.0, 1.0);\n";
 	if (usesChannel1) {
 		snprintf(line, sizeof(line), "\tvec4 base1 = vec4(%s, base0.a);\n",
 		         key.useMaterialRgb1 ? "uMaterialColor1.rgb" : "vColor.rgb");
@@ -414,7 +537,21 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 	out += "\tvec4 c1 = uTevReg1;\n";
 	out += "\tvec4 c2 = uTevReg2;\n";
 
-	for (int i = 0; i < stageCount; ++i) emit_stage(out, key, i);
+	// Muestras indirectas: una por etapa indirecta usada, con su coordenada
+	// dividida por la escala de GXSetIndTexCoordScale. El hardware lee los
+	// componentes A, B y G como enteros de 8 bits (S, T, U).
+	for (int n = 0; n < 4; ++n) {
+		if (!usesIndStage[n]) continue;
+		const int ic = key.indTexCoord[n] > 3 ? 3 : int(key.indTexCoord[n]);
+		snprintf(line, sizeof(line),
+		         "\tvec3 ind%d = floor(texture(uTex%d, (vTexCoord%d / vTcQ[%d]) * vec2(%.8f, %.8f)).abg * 255.0 + 0.5);\n",
+		         n, int(key.indTexMap[n] & 7), ic, ic, 1.0 / double(1 << (key.indScaleS[n] & 15)),
+		         1.0 / double(1 << (key.indScaleT[n] & 15)));
+		out += line;
+	}
+	if (trackPrev) out += "\tvec2 tcPrev = vec2(0.0);\n";
+
+	for (int i = 0; i < stageCount; ++i) emit_stage(out, key, i, trackPrev);
 
 	// Alpha test. When both functions are constant the outcome is decided
 	// here, and the common always-pass case leaves no discard in the shader
@@ -470,7 +607,7 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 		out += "\tprev.rgb = mix(prev.rgb, uFogColour.rgb, fogAmount);\n";
 	}
 
-	out += "\tfragColor = vec4(prev.rgb * uOutTint, prev.a);\n";
+	out += "\tfragColor = vec4(applyOutTint(prev.rgb), prev.a);\n";
 	out += "}\n";
 	return out;
 }

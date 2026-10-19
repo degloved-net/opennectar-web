@@ -3,6 +3,13 @@
 
 #include "DebugLog.h"
 #include "gameflow.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_loadguard.h"
+// Netplay keep-alive (pc_netplay_loadguard.h): card waits run inside one
+// netplay tick. Strong-defined by pc_netplay_session.cpp in netplay builds
+// only, null otherwise.
+void pc_netplay_load_keepalive(int site);
+#endif
 
 /// Global thread for async card operations called directly by the game code.
 CardUtilThread CardThread;
@@ -738,6 +745,9 @@ bool CardUtilIsCardBusy()
 void CardUtilIdleWhileBusy()
 {
 	while (CardUtilIsCardBusy()) {
+#if defined(PIKI_PC_PORT)
+		if (pc_netplay_load_keepalive != nullptr) pc_netplay_load_keepalive(pc_netplay_loadguard::kSiteSave);
+#endif
 		OSYieldThread();
 	}
 }

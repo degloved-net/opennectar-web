@@ -1,4 +1,5 @@
 #include "Game/Entities/UmiMushi.h"
+#include "Game/pcCoop.h"
 #include "Game/Navi.h"
 #include "Game/EnemyFunc.h"
 #include "Game/EnemyAnimKeyEvent.h"
@@ -846,7 +847,8 @@ bool Obj::isChangeNavi()
 	}
 
 	Navi* navi;
-	if (gameSystem && gameSystem->isTwoPlayerMode()) {
+	// Port: en co-op, el más cercano, como en el desafío 2P.
+	if (gameSystem && (gameSystem->isTwoPlayerMode() || pc_p2_coop_active())) {
 		navi = EnemyFunc::getNearestNavi(this, 360.0f, C_GENERALPARMS.mSearchDistance(), nullptr, nullptr);
 	} else {
 		navi = naviMgr->getActiveNavi();

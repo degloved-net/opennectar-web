@@ -3,6 +3,9 @@
 
 #include "Node.h"
 #include "system.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_sim_rng.h"
+#endif
 
 class AtxCommandStream;
 class AgeServer;
@@ -33,7 +36,11 @@ public:
 	 * @brief Gets a random float between 0 and 1. Unused in DOL.
 	 * @return Random value between 0 and 1.
 	 */
+#if defined(PIKI_PC_PORT)
+	f32 rnd() { return pc_sim_rand() / f32(RAND_MAX); }
+#else
 	f32 rnd() { return rand() / f32(RAND_MAX); }
+#endif
 
 	void startAgeServer();
 	void stopAgeServer();

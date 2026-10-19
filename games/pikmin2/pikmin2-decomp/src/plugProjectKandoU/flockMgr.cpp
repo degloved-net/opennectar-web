@@ -129,6 +129,15 @@ void BaseFlockMgr::resolveCollision(f32 p1)
  */
 void BaseFlockMgr::doSimpleDraw(Viewport* vp, J3DModelData** models, int p1)
 {
+#ifdef PIKI_PC_PORT
+	// mIsAgentVisible tiene 2 entradas; el visor de "tesoro encontrado" es el 2
+	// (BaseGameSection::mTreasureGetViewport). En GameCube esa lectura cae en el
+	// relleno (0) y no se dibuja; en PC lee otro campo y se colgaba al dibujar
+	// hierba o piedras en esa escena.
+	if (vp->mVpId < 0 || vp->mVpId >= 2) {
+		return;
+	}
+#endif
 	if (mIsAgentVisible[vp->mVpId]) {
 		for (int i = 0; i < p1; i++) {
 			J3DModelData* model = models[i];

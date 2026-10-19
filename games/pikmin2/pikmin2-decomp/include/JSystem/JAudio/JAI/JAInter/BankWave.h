@@ -41,7 +41,11 @@ inline void assignWaveBanks()
 typedef void (*LoadCallback)();
 typedef void (*InitCallback)();
 typedef void (*SceneSetFinishCallback)(s32, s32);
-void finishSceneSet(JASDvd::JASDvdCallbackArg);
+#ifdef PIKI_PC_PORT
+void finishSceneSet(uintptr_t); // JASDvdCallback lleva uintptr_t en el port
+#else
+void finishSceneSet(u32);
+#endif
 void init();
 void loadFirstStayWave();
 void loadGroupWave(s32, s32);

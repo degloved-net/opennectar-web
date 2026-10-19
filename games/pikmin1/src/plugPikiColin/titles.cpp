@@ -21,7 +21,11 @@
 #include "zen/ogStart.h"
 #include "zen/ogTitle.h"
 #if defined(PIKI_PC_PORT)
+#include "pc_coop.h"
 #include "pc_gfx.h"
+#include "pc_speedrun.h"
+#include "pc_vs.h"
+#include "netplay/pc_coop_switch.h"
 #endif
 
 class TitleSetupSection;
@@ -372,6 +376,35 @@ public:
 			mPlayer->update();
 
 			if (mState == STATE_Active) {
+#if defined(PIKI_PC_PORT)
+				// Editor de mapas (--vs-map): directo al VS, como si se hubiera
+				// elegido en el menú (ogTitle) y sin pasar por él.
+				if (pc_vs_direct_take_title()) {
+					pc_coop_set_pending(true);
+					pc_vs_set_pending(true);
+					pc_coop_set_chosen_at_title(true);
+					mNextSectionsFlag                = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameSetup);
+					gameflow.mGamePrefs.mHasSaveGame = false;
+					gameflow.mIsChallengeMode        = TRUE;
+					Jac_SceneExit(SCENE_Exit, 0);
+					mState = STATE_ExitPending;
+					gsys->setFade(0.0f);
+					return;
+				}
+				// Co-op direct boot (--coop-direct, netplay): straight into a
+				// new two-captain story run, as if Co-op had been chosen.
+				if (pc_coop_direct_take_title()) {
+					pc_coop_set_pending(true);
+					pc_coop_set_chosen_at_title(true);
+					mNextSectionsFlag                = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameSetup);
+					gameflow.mGamePrefs.mHasSaveGame = false;
+					gameflow.mIsChallengeMode        = FALSE;
+					Jac_SceneExit(SCENE_Exit, 0);
+					mState = STATE_ExitPending;
+					gsys->setFade(0.0f);
+					return;
+				}
+#endif
 				// handle hiscore window closing
 				if (totalWindow && totalWindow->update(mController)) {
 					// go from hiscore window back to PRESS START
@@ -815,6 +848,9 @@ void TitlesSection::init()
 {
 #if defined(PIKI_PC_PORT)
 	pc_gfx_set_dof_focus(0.0f);
+	// Volver al título acaba cualquier run de Speedrun (o práctica): el modo
+	// se vuelve a elegir desde el menú.
+	pc_speedrun_set_active(false);
 #endif
 	Node::init("<TitlesSection>");
 	Jac_BackDVDBuffer();

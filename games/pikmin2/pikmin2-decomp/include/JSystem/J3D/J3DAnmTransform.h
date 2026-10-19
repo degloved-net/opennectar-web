@@ -40,6 +40,13 @@ struct J3DAnmTransform : public J3DAnmBase {
 	u16 mUpdateMaterialNum; // _1E
 };
 
+#ifdef PIKI_PC_PORT
+// Presentation-only transition filter used by the normal J3D matrix adaptor.
+// Sampling remains owned by each animation type; this only bridges clip/loop
+// discontinuities without changing animation timers or key events.
+void pcJ3DSmoothTransform(const J3DAnmTransform*, u16, J3DTransformInfo*);
+#endif
+
 /**
  * @size{0x24}
  */

@@ -162,6 +162,17 @@ void TMainTitleMgr::startMenuSet(s32, s32 select)
 	case Select_Bonus:
 		id = 5;
 		break;
+#ifdef PIKI_PC_PORT
+	case Select_Speedrun:
+		id = mTitleMenu.menuNum() > PC_TITLE_SPEEDRUN ? PC_TITLE_SPEEDRUN : 0;
+		break;
+	case Select_Coop:
+		id = mTitleMenu.menuNum() > PC_TITLE_COOP ? PC_TITLE_COOP : 0;
+		break;
+	case Select_Randomizer:
+		id = mTitleMenu.menuNum() > PC_TITLE_RANDOMIZER ? PC_TITLE_RANDOMIZER : 0;
+		break;
+#endif
 	default:
 		JUT_PANICLINE(177, "P2Assert");
 	}
@@ -348,6 +359,17 @@ void TMainTitleMgr::update()
 				case 5:
 					mSelectedMenuOption = Select_Bonus;
 					break;
+#ifdef PIKI_PC_PORT
+				case PC_TITLE_SPEEDRUN:
+					mSelectedMenuOption = Select_Speedrun;
+					break;
+				case PC_TITLE_COOP:
+					mSelectedMenuOption = Select_Coop;
+					break;
+				case PC_TITLE_RANDOMIZER:
+					mSelectedMenuOption = Select_Randomizer;
+					break;
+#endif
 				}
 			}
 			title::titleMgr->breakup();

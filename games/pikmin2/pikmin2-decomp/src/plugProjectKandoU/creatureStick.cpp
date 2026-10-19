@@ -1,3 +1,4 @@
+#include "pc_p2_captains.h"
 #include "Game/Stickers.h"
 #include "Game/Navi.h" // specifically for the navi scale defines. no other reason to include --EpochFlame
 #include "CollInfo.h"
@@ -229,11 +230,7 @@ void Creature::updateStick(Vector3f& pos)
 		if (static_cast<MouthCollPart*>(mStuckCollPart)->mIsOniKurage) {
 			if (isNavi()) {
 				// use olimar/louie's scale
-				if (getCreatureID() == 0) {
-					scale = OLIMAR_SCALE;
-				} else {
-					scale = LOUIE_SCALE;
-				}
+				scale = pc_p2_captain_scale(getCreatureID());
 			}
 
 			Vector3f scalevec(scale);

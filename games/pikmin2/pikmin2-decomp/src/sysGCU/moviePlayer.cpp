@@ -10,6 +10,13 @@
 namespace JStudio {
 extern f64 gPcJStudioSubFrame;
 }
+extern "C" int pc_settings_get_hide_olimar_text(void);
+extern "C" int pc_speedrun_active(void);
+#include "Game/pcCoop.h"
+#include "Game/BaseGameSection.h"
+#include "Game/Navi.h"
+#include "Game/pelletMgr.h"
+#include "Game/Entities/ItemGate.h"
 #endif
 #include "Screen/Game2DMgr.h"
 #include "Game/GameSystem.h"
@@ -32,6 +39,113 @@ extern f64 gPcJStudioSubFrame;
 
 static const u32 padding[]    = { 0, 0, 0 };
 static const char className[] = "moviePlayer";
+
+#ifdef PIKI_PC_PORT
+// Co-op (docs/PLAN_COOP.md §6.4): cada cinemática, a pantalla completa con el
+// capitán que la protagoniza (el del objeto que la dispara, si es un capitán;
+// si no, el de la cinemática o el primero vivo), con los dos mandos para
+// saltarla. Al acabar, vuelta a la pantalla partida.
+static bool pcCoopMovieNavis()
+{
+	return Game::gameSystem && Game::gameSystem->mSection && pc_p2_coop_active() && Game::naviMgr
+	    && Game::naviMgr->getAt(NAVIID_Olimar) && Game::naviMgr->getAt(NAVIID_Louie);
+}
+
+static void pcCoopMovieBegin(Game::MoviePlayer* player)
+{
+	if (!pcCoopMovieNavis()) {
+		return;
+	}
+	Game::Navi* navi = nullptr;
+	if (player->mTargetObject && player->mTargetObject->isNavi()) {
+		navi = static_cast<Game::Navi*>(player->mTargetObject);
+	}
+	if (!navi || !navi->isAlive()) {
+		navi = player->mTargetNavi;
+	}
+	if (!navi || !navi->isAlive()) {
+		navi = Game::naviMgr->getMovieNavi();
+	}
+	if (!navi || navi->mNaviIndex > NAVIID_Louie) {
+		return;
+	}
+	Game::BaseGameSection* section = Game::gameSystem->mSection;
+	pc_p2_coop_set_movie_full(1);
+	if (section->mPrevNaviIdx != navi->mNaviIndex) {
+		section->setPlayerMode(navi->mNaviIndex);
+		section->setCamController();
+	}
+}
+
+static void pcCoopMovieRestore()
+{
+	if (!pcCoopMovieNavis()) {
+		return;
+	}
+	Game::BaseGameSection* section = Game::gameSystem->mSection;
+	if (section->mPrevNaviIdx != NAVIID_Multiplayer) {
+		section->setPlayerMode(NAVIID_Multiplayer);
+		section->setCamController();
+	}
+}
+#endif
+
+#ifdef PIKI_PC_PORT
+/**
+ * Mod "Hide Drake Texts": en el modo historia, los textos de todas las demos
+ * se escriben de golpe y pasan de página solos; la escena se sigue viendo.
+ */
+
+static bool pcIsDrakeTextDemo(Game::MovieConfig* config)
+{
+	if (!config || !Game::gameSystem || !Game::gameSystem->isStoryMode() || !pc_settings_get_hide_olimar_text()) {
+		return false;
+	}
+	// Todas las demos del modo historia: quien ya lo jugó no repasa ningún texto.
+	return true;
+}
+
+// Co-op: la llegada de Louie (el primer cambio con Y, que abre el co-op)
+// se salta entera; en un jugador se sigue viendo. El vaciado de
+// Finishing ejecuta el resto del guion, así que Louie queda en su sitio.
+static bool pcIsCoopSkipDemo(Game::MovieConfig* config)
+{
+	return config && pc_p2_coop_session() && config->is(const_cast<char*>("x05_louiestart"));
+}
+
+// Demos de la nave: se ven, pero sus textos corren y pasan solos
+// (lo lee TSequenceProcessor::do_isReady).
+bool gPcAutoAdvanceMovieText = false;
+
+// La demo en curso se salta sola (no se dibuja su texto ni se aclara la pantalla).
+static bool sPcAutoSkipDemo = false;
+// Las demos de recoger un tesoro y de la compuerta pueden empezar antes de que
+// termine su efecto en el juego: un salto espera a que ese efecto se aplique.
+static bool sPcDeferredGameplaySkip = false;
+
+static bool pcMoviePelletDeliveryPending()
+{
+	if (!Game::gameSystem || !Game::gameSystem->mSection)
+		return false;
+	auto* creature = Game::gameSystem->mSection->mDraw2DCreature;
+	return creature && creature->isPellet()
+	    && static_cast<Game::Pellet*>(creature)->getStateID() == Game::PELSTATE_Goal;
+}
+
+static bool pcMovieGateBreakPending(const Game::MoviePlayer* player)
+{
+	if (!player->mCurrentConfig || !player->mCurrentConfig->is("g18_find_gate") || !player->mTargetObject
+	    || player->mTargetObject->getObjType() != OBJTYPE_Gate)
+		return false;
+	auto* gate = static_cast<Game::ItemGate*>(player->mTargetObject);
+	return gate->getStateID() == GATESTATE_Down && gate->mSegmentsDown < gate->mMaxSegments;
+}
+
+static bool pcMovieGameplayTransitionPending(const Game::MoviePlayer* player)
+{
+	return pcMoviePelletDeliveryPending() || pcMovieGateBreakPending(player);
+}
+#endif
 
 namespace Game {
 
@@ -174,11 +288,17 @@ int MoviePlayer::play(MovieConfig* config, MoviePlayArg& arg, bool flag)
 		if (Screen::gGame2DMgr) {
 			Screen::gGame2DMgr->stopFinalFloorSound();
 		}
+#ifdef PIKI_PC_PORT
+		pcCoopMovieBegin(this);
+#endif
 		mAltNavi   = mTargetNavi;
 		mAltCamera = mActingCamera;
 		cameraMgr->controllerLock(CAMNAVI_Both);
 		config->dump();
 		mCurrentConfig = config;
+#ifdef PIKI_PC_PORT
+		sPcDeferredGameplaySkip = false;
+#endif
 		mNaviID        = arg.mNaviID;
 		P2ASSERTLINE(594, config);
 
@@ -565,6 +685,16 @@ bool MoviePlayer::update(Controller* input1, Controller* input2)
 			setPauseAndDraw(mCurrentConfig);
 			mDemoState = DEMOSTATE_Playing;
 			u16 flag   = mCurrentConfig->mDrawType;
+#ifdef PIKI_PC_PORT
+			sPcAutoSkipDemo         = pcIsCoopSkipDemo(mCurrentConfig);
+			gPcAutoAdvanceMovieText = pcIsDrakeTextDemo(mCurrentConfig);
+			if (pc_settings_get_hide_olimar_text()) {
+				fprintf(stderr, "[Drake] demo %s autoText=%d skip=%d\n", mCurrentConfig->mMovieNameBuffer2, gPcAutoAdvanceMovieText, sPcAutoSkipDemo);
+			}
+			if (sPcAutoSkipDemo) {
+				// Sigue en negro: skip() la cierra en el primer frame de juego.
+			} else
+#endif
 			if (!(flag & 4) && flag & 2) {
 				gameSystem->startFadein(0.5f);
 			} else {
@@ -619,9 +749,24 @@ bool MoviePlayer::update(Controller* input1, Controller* input2)
 			if (Screen::gGame2DMgr) {
 				Screen::gGame2DMgr->restartFinalFloorSound();
 			}
+#ifdef PIKI_PC_PORT
+			// Co-op: si sigue otra en cola, se queda a pantalla completa. Si no,
+			// el delegado ya puede volver a la pantalla partida (setPlayerMode)
+			// y, si no lo hace, se vuelve aquí.
+			const bool pcChained = mStoreContextActive.getChild() != nullptr;
+			const bool pcWasFull = pc_p2_coop_movie_full();
+			if (!pcChained) {
+				pc_p2_coop_set_movie_full(0);
+			}
+#endif
 			if (mDelegate1) {
 				mDelegate1->invoke(config, 0, mNaviID);
 			}
+#ifdef PIKI_PC_PORT
+			if (pcWasFull && !pcChained && !isFlag(MVP_IsActive)) {
+				pcCoopMovieRestore();
+			}
+#endif
 			gameSystem->startFadein(1.0f);
 			if (mStoreContextActive.getChild()) {
 				PSMCancelToPauseOffMainBgm();
@@ -697,20 +842,25 @@ bool MoviePlayer::update(Controller* input1, Controller* input2)
 		}
 #ifdef PIKI_PC_PORT
 		} else if (mObjectSystem) {
-			// Ticks intermedios: como el cinePlayer de Pikmin 1 (tiempo decimal),
-			// las curvas de JStudio se evaluan en la fraccion de frame transcurrida
-			// y se aplican a actores, camara y luces; el guion stb solo avanza en
-			// los ticks originales. Los objetos se registran para el dibujo en
-			// cada frame (sin esto el fondo parpadeaba).
-			JStudio::gPcJStudioSubFrame += PC_ORIG_DT_SCALE();
-			if (JStudio::gPcJStudioSubFrame > 0.999) {
-				JStudio::gPcJStudioSubFrame = 0.999;
-			}
-			if (mStudioControl && (int)mStudioControl->mSuspend <= 0) {
-				mStudioControl->forward_value(0);
-			}
+			// Ticks intermedios (frames de presentacion, no ticks de la escena):
+			// JStudio solo se evalua en los ticks originales de 30 Hz. Evaluar
+			// sus curvas en edades fraccionarias interpolaba como escalares
+			// angulos Euler, escalas y SRT relativos a un hueso padre, y producia
+			// poses que el original nunca genera (capitanes fuera de la cabina,
+			// decorado estirado). Aqui se mantiene el ultimo estado: update()
+			// sin PC_ORIG_TICK reconstruye la misma pose (no avanza animaciones
+			// y los comandos ya se consumieron) y vuelve a fijar a los actores
+			// del juego frente a su fisica. Los objetos se registran para el
+			// dibujo en cada frame (sin esto el fondo parpadeaba).
+			JStudio::gPcJStudioSubFrame = 0.0;
 			mObjectSystem->update();
 			mObjectSystem->entry();
+		}
+#endif
+#ifdef PIKI_PC_PORT
+		if (sPcAutoSkipDemo && mDemoState == DEMOSTATE_Playing && mStudioControl) {
+			sPcAutoSkipDemo = false;
+			skip();
 		}
 #endif
 		if (mDemoState == DEMOSTATE_Playing && mFlags.isSet(MVP_DoSkip) && !mStudioControl->mSuspend) {
@@ -720,10 +870,25 @@ bool MoviePlayer::update(Controller* input1, Controller* input2)
 
 			} else if (((input1->getButtonDown() & Controller::PRESS_START)
 			            || (input2 && (input2->getButtonDown() & Controller::PRESS_START)))
+#ifdef PIKI_PC_PORT
+			           // Port: Start salta cualquier demo, como en Pikmin 1. El
+			           // vaciado de Finishing ejecuta el resto del guion, así que
+			           // nave, cebollas y capitanes quedan donde los deja el final.
+			           // En Speedrun, solo lo que se salta en GameCube.
+			           && (!pc_speedrun_active() || !mCurrentConfig->isNeverSkippable())) {
+#else
 			           && !mCurrentConfig->isNeverSkippable()) {
+#endif
 				skip();
 			}
 		}
+#ifdef PIKI_PC_PORT
+		// El salto pedido se cumple en cuanto el efecto en el juego ya se aplicó
+		// (fuera de la espera de texto: el botón ya se pulsó antes).
+		if (sPcDeferredGameplaySkip && mDemoState == DEMOSTATE_Playing && mStudioControl && !pcMovieGameplayTransitionPending(this)) {
+			skip();
+		}
+#endif
 	}
 	return isFlag(MVP_IsActive);
 }
@@ -764,6 +929,10 @@ bool MoviePlayer::start(Camera* cam)
  */
 bool MoviePlayer::stop()
 {
+#ifdef PIKI_PC_PORT
+	gPcAutoAdvanceMovieText = false;
+	sPcDeferredGameplaySkip = false;
+#endif
 	if (isFlag(MVP_IsActive)) {
 		clearPauseAndDraw();
 		resetFlag(MVP_IsActive);
@@ -999,6 +1168,18 @@ void MoviePlayer::drawLoading(Graphics& gfx)
  */
 void MoviePlayer::skip()
 {
+#ifdef PIKI_PC_PORT
+	// La pantalla de resultados del día tiene que pasar por su guardado antes
+	// de que esta demo pueda terminar: no se salta.
+	if (mCurrentConfig && mCurrentConfig->is("s02_dayend_result")) {
+		return;
+	}
+	if (pcMovieGameplayTransitionPending(this)) {
+		sPcDeferredGameplaySkip = true;
+		return;
+	}
+	sPcDeferredGameplaySkip = false;
+#endif
 	setFlag(MVP_IsFinished);
 	mDemoState = DEMOSTATE_Finishing;
 	mFadeTimer = 2.0f;

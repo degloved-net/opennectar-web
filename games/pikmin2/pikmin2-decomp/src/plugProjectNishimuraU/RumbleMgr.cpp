@@ -1,4 +1,5 @@
 #include "Game/rumble.h"
+#include "Game/pcCoop.h"
 #include "Game/Data.h"
 #include "Game/GameSystem.h"
 #include "Game/Navi.h"
@@ -81,7 +82,7 @@ void RumbleMgr::init()
 void RumbleMgr::update()
 {
 	if (isRumbleUpdateOn()) {
-		if (gameSystem && !gameSystem->isMultiplayerMode()) {
+		if (gameSystem && !PC_TWO_CAPTAIN_PLAY()) {
 			if (mController) {
 				mContRumble[0]->setController(true);
 				mContRumble[0]->mPadChannel = mController->mPortNum;

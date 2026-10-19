@@ -54,6 +54,15 @@
 #include "Texture.h"
 #endif
 #include "pc_achievements.h"
+#include "pc_speedrun.h"
+#if PIKI_P2_HOST
+#include "pc_p2_captains.h"
+#include "pc_p2_coop.h"
+#include "pc_p2_captain_preview.h"
+#include "randomizer/pc_randomizer.h"
+#include "randomizer/pc_randomizer_catalog.h"
+#endif
+#include "pc_livesplit.h"
 #if PIKI_PC_TOUCH
 #include "touch/pc_touch.h"
 #endif
@@ -90,6 +99,8 @@
 // menú desvía sus reservas a malloc mientras dura.
 bool pc_host_alloc_active();
 void pc_host_alloc_set(bool active);
+std::string pc_card_save_dir(); // card_stubs.cpp
+
 namespace {
 struct PcSettingsHostAlloc {
     bool prev = pc_host_alloc_active();
@@ -169,6 +180,7 @@ struct PcConfig {
     // Mod: show how many Pikmin are idle on the map (0=off, 1=on).
     int idleCounter = 0;
     int eternalNight = 0;       // siempre de noche (luz), el reloj del día sigue igual
+    int fireflies = 0;          // luciérnagas por el escenario (de día o de noche)
     // Mods: health as a percentage of the original. Applied as a divisor on
     // incoming damage rather than by resizing the health bar, so the life
     // gauge and every "below a quarter" check keep reading correctly.
@@ -186,6 +198,8 @@ struct PcConfig {
     int noTrip = 0;             // los Pikmin no tropiezan al correr
     int onionStep10 = 0;        // Y + arriba/abajo en la cebolla mueve de 10 en 10
     int instantWhistle = 0;     // los Pikmin silbados se unen sin la reacción de girarse
+    int whistlePluck = 0;       // el silbato arranca los brotes bajo el cursor
+    int hideOlimarText = 0;     // sin los textos de la Drake (tutoriales y avisos)
     // Cheats.
     int pikiInvincible = 0;     // los Pikmin no mueren (ataques, fuego, agua, gas, aplastados)
     int allFlowers = 0;         // todo Pikmin lleva flor
@@ -219,6 +233,10 @@ struct PcConfig {
     int pikiLimit = 100;
     // Minutes of play per in-game day, as shown in the menu. 10 is the original.
     int dayMinutes = 10;
+    // Pikmin 2: personaje de cada capitán (selector de capitanes,
+    // pc_p2_captains.h). -1 en el capitán 2 es el original (Louie o el Presidente).
+    int p2Captain1 = 0;
+    int p2Captain2 = -1;
     // Última elección del selector 1P/2P, solo para preseleccionarla. La
     // partida en sí no la guarda (PLAN_COOP).
     int coopPlayers = 1;
@@ -250,6 +268,16 @@ struct PcConfig {
     // variable: the launcher starts the game as a child process, so an
     // exported variable does not reliably reach it.
     int debugKeys = 0;
+    // Modo Speedrun (opción del título): explicación ya vista, categoría
+    // (PC_SR_CAT_*) y splits visibles bajo el reloj (1-10).
+    int speedrunIntroHidden = 0;
+    int speedrunCategory = 0;
+    int speedrunSplitsShown = 5;
+    // Cliente del LiveSplit Server (pc_livesplit.cpp): apagado por defecto.
+    int speedrunLiveSplit = 0;
+    int speedrunLsHideClock = 0; // con LiveSplit conectado, sin reloj ni splits propios
+    char speedrunLsHost[64] = "127.0.0.1";
+    int speedrunLsPort = 16834;
     // Texture pack (PLAN_TEXTURAS_HD fase 2): nombre de carpeta bajo
     // Load/Textures/ que se indexa al arrancar. Se aplica reiniciando: el
     // índice del pack se construye una sola vez, en pc_texpack_init.
@@ -284,6 +312,7 @@ struct PcConfig {
         bluesOnlyWater = 0;
         idleCounter = 0;
         eternalNight = 0;
+        fireflies = 0;
         naviHealthPct = 100;
         tekiHealthPct = 100;
         infiniteDay = 0;
@@ -295,6 +324,8 @@ struct PcConfig {
         noTrip = 0;
         onionStep10 = 0;
         instantWhistle = 0;
+        whistlePluck = 0;
+        hideOlimarText = 0;
         pikiInvincible = 0;
         allFlowers = 0;
         carrySpeedPct = 100;
@@ -316,6 +347,8 @@ struct PcConfig {
         mouseWheelAction = 0;
         pikiLimit = 100;
         dayMinutes = 0;
+        p2Captain1 = 0;
+        p2Captain2 = -1;
         coopPlayers = 1;
 #if PIKI_PC_TOUCH
         coopSplit = 1;
@@ -627,7 +660,7 @@ constexpr int kSaturationStopCount = int(sizeof(kSaturationStops) / sizeof(kSatu
 // Pikmin 2 reserva modelos de los cinco colores por plaza: capacidad 500 (Game/Piki.h).
 constexpr int kPikiLimits[]   = { 50, 100, 150, 200, 300, 500 };
 #endif
-constexpr int kFpsModeCount = 3;
+constexpr int kFpsModeCount = 4; // 30, 60, 120, Monitor
 #if !PIKI_P2_HOST
 constexpr int kPikiLimits[]   = { 50, 100, 150, 200, 300, 500, 750, 999 };
 #endif
@@ -1163,6 +1196,7 @@ void saveConfig() {
     out << "bluesOnlyWater = " << sConfig.bluesOnlyWater << "\n";
     out << "idleCounter = " << sConfig.idleCounter << "\n";
     out << "eternalNight = " << sConfig.eternalNight << "\n";
+    out << "fireflies = " << sConfig.fireflies << "\n";
     out << "naviHealthPct = " << sConfig.naviHealthPct << "\n";
     out << "tekiHealthPct = " << sConfig.tekiHealthPct << "\n";
     out << "infiniteDay = " << sConfig.infiniteDay << "\n";
@@ -1174,6 +1208,8 @@ void saveConfig() {
     out << "noTrip = " << sConfig.noTrip << "\n";
     out << "onionStep10 = " << sConfig.onionStep10 << "\n";
     out << "instantWhistle = " << sConfig.instantWhistle << "\n";
+    out << "whistlePluck = " << sConfig.whistlePluck << "\n";
+    out << "hideOlimarText = " << sConfig.hideOlimarText << "\n";
     out << "pikiInvincible = " << sConfig.pikiInvincible << "\n";
     out << "allFlowers = " << sConfig.allFlowers << "\n";
     out << "carrySpeedPct = " << sConfig.carrySpeedPct << "\n";
@@ -1195,6 +1231,10 @@ void saveConfig() {
     out << "mouseWheelAction = " << sConfig.mouseWheelAction << "\n";
     out << "pikiLimit = " << sConfig.pikiLimit << "\n";
     out << "dayLength = " << sConfig.dayMinutes << "\n";
+#if PIKI_P2_HOST
+    out << "p2Captain1 = " << sConfig.p2Captain1 << "\n";
+    out << "p2Captain2 = " << sConfig.p2Captain2 << "\n";
+#endif
     out << "coopPlayers = " << sConfig.coopPlayers << "\n";
     out << "coopSplit = " << sConfig.coopSplit << "\n";
     out << "coopMergeCamera = " << sConfig.coopMergeCamera << "\n";
@@ -1211,6 +1251,13 @@ void saveConfig() {
     out << "brightness = " << sConfig.brightness << "\n";
     out << "saturation = " << sConfig.saturation << "\n";
     out << "debugKeys = " << sConfig.debugKeys << "\n";
+    out << "speedrunIntroHidden = " << sConfig.speedrunIntroHidden << "\n";
+    out << "speedrunCategory = " << sConfig.speedrunCategory << "\n";
+    out << "speedrunSplitsShown = " << sConfig.speedrunSplitsShown << "\n";
+    out << "speedrunLiveSplit = " << sConfig.speedrunLiveSplit << "\n";
+    out << "speedrunLsHideClock = " << sConfig.speedrunLsHideClock << "\n";
+    out << "speedrunLsHost = " << sConfig.speedrunLsHost << "\n";
+    out << "speedrunLsPort = " << sConfig.speedrunLsPort << "\n";
     out << "texturePack = " << sConfig.texturePack << "\n";
     out << "texturePackEnabled = " << sConfig.texturePackEnabled << "\n";
     out << "hdModelsDisabled = " << sConfig.hdModelsDisabled << "\n";
@@ -1340,6 +1387,7 @@ void loadConfig() {
             sConfig.bluesOnlyWater = atoi(val.c_str()) ? 1 : 0;
         }
         else if (key == "eternalNight") sConfig.eternalNight = atoi(val.c_str()) ? 1 : 0;
+        else if (key == "fireflies") sConfig.fireflies = atoi(val.c_str()) ? 1 : 0;
         else if (key == "idleCounter") {
             sConfig.idleCounter = atoi(val.c_str()) ? 1 : 0;
         }
@@ -1376,6 +1424,12 @@ void loadConfig() {
         else if (key == "instantWhistle") {
             sConfig.instantWhistle = atoi(val.c_str()) ? 1 : 0;
         }
+        else if (key == "whistlePluck") {
+            sConfig.whistlePluck = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "hideOlimarText") {
+            sConfig.hideOlimarText = atoi(val.c_str()) ? 1 : 0;
+        }
         else if (key == "pikiInvincible") sConfig.pikiInvincible = atoi(val.c_str()) ? 1 : 0;
         else if (key == "allFlowers") sConfig.allFlowers = atoi(val.c_str()) ? 1 : 0;
         else if (key == "carrySpeedPct") sConfig.carrySpeedPct = clampSpeedPct(atoi(val.c_str()));
@@ -1391,7 +1445,7 @@ void loadConfig() {
         else if (key == "vsPikiLimit") sConfig.vsPikiLimit = std::clamp(atoi(val.c_str()), 0, 2);
         else if (key == "vsPellets") sConfig.vsPellets = std::clamp(atoi(val.c_str()), 0, 3);
         else if (key == "lockOn") {
-            sConfig.lockOn = atoi(val.c_str()) ? 1 : 0;
+            sConfig.lockOn = std::clamp(atoi(val.c_str()), 0, 2); // 0 off, 1 manual, 2 automatico
         }
         else if (key == "charge") {
             sConfig.charge = atoi(val.c_str()) ? 1 : 0;
@@ -1454,6 +1508,16 @@ void loadConfig() {
             sConfig.saturation = (float)atof(val.c_str());
             if (!(sConfig.saturation >= 0.0f && sConfig.saturation <= 2.0f)) sConfig.saturation = 1.0f;
         }
+#if PIKI_P2_HOST
+        else if (key == "p2Captain1") {
+            sConfig.p2Captain1 = atoi(val.c_str());
+            if (sConfig.p2Captain1 < 0 || sConfig.p2Captain1 >= PC_P2_CHAR_COUNT) sConfig.p2Captain1 = 0;
+        }
+        else if (key == "p2Captain2") {
+            sConfig.p2Captain2 = atoi(val.c_str());
+            if (sConfig.p2Captain2 < -1 || sConfig.p2Captain2 >= PC_P2_CHAR_COUNT) sConfig.p2Captain2 = -1;
+        }
+#endif
         else if (key == "dayLength") {
             sConfig.dayMinutes = atoi(val.c_str());
             if (sConfig.dayMinutes < 0 || sConfig.dayMinutes > 120) sConfig.dayMinutes = 0;
@@ -1474,6 +1538,27 @@ void loadConfig() {
         }
         else if (key == "debugKeys") {
             sConfig.debugKeys = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "speedrunIntroHidden") {
+            sConfig.speedrunIntroHidden = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "speedrunCategory") {
+            sConfig.speedrunCategory = std::clamp(atoi(val.c_str()), 0, PC_SR_CAT_COUNT - 1);
+        }
+        else if (key == "speedrunSplitsShown") {
+            sConfig.speedrunSplitsShown = std::clamp(atoi(val.c_str()), 1, 10);
+        }
+        else if (key == "speedrunLiveSplit") {
+            sConfig.speedrunLiveSplit = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "speedrunLsHideClock") {
+            sConfig.speedrunLsHideClock = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "speedrunLsHost") {
+            if (!val.empty()) snprintf(sConfig.speedrunLsHost, sizeof(sConfig.speedrunLsHost), "%s", val.c_str());
+        }
+        else if (key == "speedrunLsPort") {
+            sConfig.speedrunLsPort = std::clamp(atoi(val.c_str()), 1, 65535);
         }
         else if (key == "texturePack") {
             const bool safe = !val.empty() && val.size() < 64
@@ -1523,6 +1608,10 @@ void loadConfig() {
         }
     }
     in.close();
+#if PIKI_P2_HOST
+    pc_p2_captain_set_choice(0, sConfig.p2Captain1);
+    pc_p2_captain_set_choice(1, sConfig.p2Captain2);
+#endif
     if (sConfig.windowWidth <= 0) sConfig.windowWidth = 1280;
     if (sConfig.windowHeight <= 0) sConfig.windowHeight = 720;
     printf("[PC Settings] Loaded %s: %dx%d mode=%d vsync=%d refresh=%.0f\n",
@@ -1622,6 +1711,11 @@ void latchKeys() {
 // prompt has to read input from inside this function: keys are latched right
 // after it returns, so anything polling later in the frame sees no edges.
 void pcNewGamePromptInput();
+#if PIKI_P2_HOST
+void pcCaptainSelectInput();
+#endif
+void pcSpeedrunMenuInput();
+void pcErasedNoticeInput();
 void pcPlayerCountPromptInput();
 void pcDevAssignPromptInput();
 
@@ -1824,6 +1918,13 @@ void pollMenuInput() {
     // when that modal exits while the button is still held.
     sPrevMenuToggleHeld = menuToggleHeld;
 
+    if (pc_erased_notice_active()) {
+#if PIKI_PC_TOUCH
+        pc_touch_claim_game_menu();
+#endif
+        pcErasedNoticeInput();
+        return;
+    }
     if (pc_newgame_prompt_active()) {
 #if PIKI_PC_TOUCH
         pc_touch_claim_game_menu();
@@ -1834,6 +1935,22 @@ void pollMenuInput() {
         pcNewGamePromptInput();
         return;
     }
+#if PIKI_P2_HOST
+    if (pc_captain_select_active()) {
+#if PIKI_PC_TOUCH
+        pc_touch_claim_game_menu();
+#endif
+        pcCaptainSelectInput();
+        return;
+    }
+    if (pc_speedrun_menu_active()) {
+#if PIKI_PC_TOUCH
+        pc_touch_claim_game_menu();
+#endif
+        pcSpeedrunMenuInput();
+        return;
+    }
+#endif
     if (pc_playercount_prompt_active()) {
 #if PIKI_PC_TOUCH
         pc_touch_claim_game_menu();
@@ -2639,6 +2756,9 @@ void modsRowChange(int row, bool left, bool right) {
     else if (row == 40) {
         if (left || right) sPending.eternalNight = sPending.eternalNight ? 0 : 1;
     }
+    else if (row == 41) {
+        if (left || right) sPending.fireflies = sPending.fireflies ? 0 : 1;
+    }
     // Vida de Olimar, en porcentaje de la original.
     else if (row == 11) {
         if (pc_hardmode_active())
@@ -2663,7 +2783,8 @@ void modsRowChange(int row, bool left, bool right) {
     }
     // Fijar objetivo.
     else if (row == 15) {
-        if (left || right) sPending.lockOn = sPending.lockOn ? 0 : 1;
+        if (right) sPending.lockOn = (sPending.lockOn + 1) % 3;
+        if (left) sPending.lockOn = (sPending.lockOn + 2) % 3;
     }
     // Mandar el escuadrón contra el objetivo fijado.
     else if (row == 16) {
@@ -2705,6 +2826,12 @@ void modsRowChange(int row, bool left, bool right) {
     else if (row == 25) {
         if (left || right) sPending.instantWhistle = sPending.instantWhistle ? 0 : 1;
     }
+    else if (row == 34) {
+        if (left || right) sPending.whistlePluck = sPending.whistlePluck ? 0 : 1;
+    }
+    else if (row == 36) {
+        if (left || right) sPending.hideOlimarText = sPending.hideOlimarText ? 0 : 1;
+    }
     // Cheats (26-32). Hard los anula, como la vida y el día.
     else if (row >= 26 && row <= 32) {
         if (pc_hardmode_active() || !(left || right))
@@ -2733,9 +2860,11 @@ void saveDataRowAction(int row) {
         else pc_save_android_open_restore();
     }
 #else
-    texturePackNotice(false,
-        "Desktop saves live in the game's 'save' folder (card0 / card1). "
-        "Copy that folder to transfer.");
+    (void)row;
+    const std::string dir = pc_card_save_dir();
+    if (SDL_OpenURL(("file://" + dir).c_str()) != 0) {
+        texturePackNotice(true, ("Could not open the folder: " + dir).c_str());
+    }
 #endif
 }
 
@@ -2843,7 +2972,11 @@ void mainRowValue(int row, char* out, size_t n) {
 
     const char* fpsModeNames[3] = { "30 FPS (original)", "60 FPS (experimental)", "120 FPS (experimental)" };
     char fpsModeBuf[32];
-    snprintf(fpsModeBuf, sizeof(fpsModeBuf), "%s", fpsModeNames[sPending.fpsMode >= 0 && sPending.fpsMode < 3 ? sPending.fpsMode : 0]);
+    if (sPending.fpsMode == 3) {
+        snprintf(fpsModeBuf, sizeof(fpsModeBuf), "Monitor (%.0f Hz)", pc_window_get_refresh_rate());
+    } else {
+        snprintf(fpsModeBuf, sizeof(fpsModeBuf), "%s", fpsModeNames[sPending.fpsMode >= 0 && sPending.fpsMode < 3 ? sPending.fpsMode : 0]);
+    }
 
     char valueBuf[ROW_DISPLAY_COUNT][128];
     snprintf(valueBuf[0], sizeof(valueBuf[0]), "%s",
@@ -3484,8 +3617,22 @@ void drawF1Page(DGXGraphics* gfx) {
         char value[128];
         pc_settings_row_value(sOpenGroup, sGroupSel, value, sizeof(value));
         const bool on = pc_settings_row_enabled(sOpenGroup, sGroupSel);
-        f1Plate(gfx, rx - 2, y, rw + 4, kF1OptH - 2, on ? 2 : 1);
-        f1Text(rx + (rw - f1TextW(value, 10)) / 2, y + 3, value, on ? kF1SelDark : kF1Off, 10, 15);
+        if (sOpenGroup == PC_SET_GROUP_ACHIEVEMENTS) {
+            // Progreso global de logros. La placa amarilla funciona como el
+            // relleno y deja visible de un vistazo la proporción conseguida.
+            const int unlocked = pc_achievements_unlocked_count();
+            const int total = (int)PC_ACH_COUNT;
+            const int barW = rw + 4;
+            f1Plate(gfx, rx - 2, y, barW, kF1OptH - 2, 1);
+            const int fillW = total > 0 ? barW * unlocked / total : 0;
+            if (fillW > 0) f1Plate(gfx, rx - 2, y, fillW, kF1OptH - 2, 2);
+            char progress[32];
+            snprintf(progress, sizeof(progress), "%d/%d", unlocked, total);
+            f1Text(rx + (rw - f1TextW(progress, 10)) / 2, y + 3, progress, kF1Section, 10, 15);
+        } else {
+            f1Plate(gfx, rx - 2, y, rw + 4, kF1OptH - 2, on ? 2 : 1);
+            f1Text(rx + (rw - f1TextW(value, 10)) / 2, y + 3, value, on ? kF1SelDark : kF1Off, 10, 15);
+        }
         y += kF1OptH;
         // Logros: su icono, a color si está conseguido y oscurecido si no.
         if (sOpenGroup == PC_SET_GROUP_ACHIEVEMENTS) {
@@ -3588,6 +3735,27 @@ void pc_settings_touch_tap(float x, float y) {
     sTouchTapPending = true;
 }
 
+// El launcher deja Load/Textures/.activate al descargar un pack: se
+// activa ese pack (su carpeta) y se borra el aviso. Al arrancar el juego y
+// en las órdenes del launcher (--settings-dump...).
+static void applyLauncherPackActivation() {
+    const std::filesystem::path activate = std::filesystem::path("Load") / "Textures" / ".activate";
+    std::string name;
+    {
+        std::ifstream in(activate);
+        if (in) std::getline(in, name);
+    }
+    while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+    if (!name.empty()) {
+        sConfig.texturePack = name;
+        sConfig.texturePackEnabled = 1;
+        sPending = sConfig;
+        saveConfig();
+    }
+    std::error_code activateEc;
+    std::filesystem::remove(activate, activateEc);
+}
+
 void pc_settings_init(void) {
     PC_SETTINGS_HOST_ALLOC();
     loadConfig();
@@ -3622,6 +3790,7 @@ void pc_settings_init(void) {
     pc_gfx_set_aspect_ratio_mode(sPending.aspectRatioMode);
     applyControls(sConfig);
     applyGraphics(sConfig);
+    applyLauncherPackActivation();
     // PLAN_TEXTURAS_HD fase 2: si hay un pack activo, solicitar su
     // indexación antes de que pc_texpack_init() construya el mapa en
     // pc_gfx_init(). pc_texpack_select_pack() se llama aquí para que el
@@ -4530,16 +4699,1814 @@ void pc_devassign_prompt_draw(void) {
     drawHelpLine(panelX + panelW / 2, panelY + 212, help, Colour(150, 165, 195, 255));
 }
 #else
-// Pikmin 2 no tiene estas pantallas: nunca estan activas.
+// Pikmin 2 no tiene el selector 1P/2P ni el de capitán de Pikmin 1 (el co-op
+// es una opción del título): nunca están activos.
 namespace {
-void pcNewGamePromptInput() { }
 void pcPlayerCountPromptInput() { }
-void pcDevAssignPromptInput() { }
 void pcCaptainPromptInput() { }
 } // namespace
-bool pc_newgame_prompt_active(void) { return false; }
 bool pc_playercount_prompt_active(void) { return false; }
-bool pc_devassign_prompt_active(void) { return false; }
+
+// ─── Aviso "Expedition Lost" de Pikmin 2 ───
+//
+// Como el de Pikmin 1: tras perder una partida Permadeath, el siguiente
+// selector de ficheros lo muestra primero. Placa y fuente de Pikmin 2.
+namespace {
+bool sErasedNoticeQueued = false;
+bool sErasedNoticeOpen   = false;
+} // namespace
+
+void pc_erased_notice_queue(void) { sErasedNoticeQueued = true; }
+
+bool pc_erased_notice_open_if_queued(void)
+{
+    if (!sErasedNoticeQueued) return false;
+    sErasedNoticeQueued = false;
+    sErasedNoticeOpen   = true;
+    pc_menu_edge_reset();
+    return true;
+}
+
+bool pc_erased_notice_active(void) { return sErasedNoticeOpen; }
+
+namespace {
+void pcErasedNoticeInput()
+{
+    if (!sErasedNoticeOpen) return;
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE)
+               || (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    if (sTouchTapPending) {
+        sTouchTapPending = false;
+        accept           = true;
+    }
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl && promptPadA(ctl)) accept = true;
+    if (accept) sErasedNoticeOpen = false;
+}
+} // namespace
+
+void pc_erased_notice_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    if (!sErasedNoticeOpen || !gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+
+    int screenW = gfx->mScreenWidth, screenH = gfx->mScreenHeight;
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+
+    const int panelW = 520, panelH = 190;
+    const int panelX = screenW / 2 - panelW / 2;
+    const int panelY = screenH / 2 - panelH / 2 + 20;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, panelW, "Expedition Lost");
+
+    const char* lines[3] = { "Both captains fell during a Permadeath run.", "That expedition's log is gone from the",
+                             "memory card for good." };
+    for (int i = 0; i < 3; i++) {
+        const int tw = f1TextW(lines[i], 13);
+        f1Text(panelX + panelW / 2 - tw / 2, panelY + 44 + i * 30, lines[i], Colour(205, 239, 250, 255), 13, 19);
+    }
+    drawHelpLine(panelX + panelW / 2, panelY + 148, "A: continue", Colour(150, 170, 190, 255), panelW - 40);
+}
+
+// ─── Ventana "New Game" de Pikmin 2 ───
+//
+// La abre el selector de ficheros al crear una partida. Una fila Difficulty
+// (Normal / Hard) sobre otra Game mode (Standard / Permadeath) y, debajo, la
+// explicación de lo elegido en la fila con foco. Placas y fuente son las del
+// atlas de Pikmin 2 (pc_settings_p2d_* del shim).
+namespace {
+bool sNewGamePromptOpen   = false;
+int  sNewGamePromptRow    = 0;   // fila con foco: 0 = Difficulty, 1 = Game mode, 2 = Start
+int  sNewGamePromptCol    = 0;   // opción bajo el cursor en la fila con foco
+// Hasta soltarlo todo, la ventana no atiende: la pulsación (o el toque) que
+// eligió la partida no debe aceptar también aquí.
+bool sNewGamePromptArmed  = false;
+int  sNewGamePromptRules  = 0;   // 0 = standard, 1 = permadeath
+int  sNewGamePromptResult = PC_NEWGAME_PENDING;
+bool sNewGamePromptHard   = false;
+
+// Dos filas de opciones y, debajo, el botón Start. Las flechas mueven el
+// cursor, A elige la opción bajo él y solo Start empieza la partida.
+const int kNgPanelW   = 560;
+const int kNgPanelH   = 390;
+const int kNgBoxW     = 220;
+const int kNgBoxH     = 40;
+const int kNgRowCount = 2;
+const int kNgStartRow = kNgRowCount;
+int ngRowY(int panelY, int row) { return panelY + 84 + row * 80; }
+int ngBoxX(int panelX, int i) { return panelX + 50 + i * (kNgBoxW + 20); }
+int ngStartX(int panelX) { return panelX + kNgPanelW / 2 - kNgBoxW / 2; }
+
+int ngRowValue(int row) { return row == 0 ? (sNewGamePromptHard ? 1 : 0) : sNewGamePromptRules; }
+
+void ngSetRowValue(int row, int v)
+{
+    if (row == 0) sNewGamePromptHard = v != 0;
+    else          sNewGamePromptRules = v;
+}
+
+void ngScreen(int* w, int* h)
+{
+    *w = 640;
+    *h = 480;
+    if (gsys && gsys->mDGXGfx) {
+        DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+        *w = gfx->mScreenWidth;
+        *h = gfx->mScreenHeight;
+    }
+}
+
+// ─── Randomizer: la misma ventana con sus ajustes (docs/PLAN_RANDOMIZER.md §11) ───
+//
+// Entrando por la opción Randomizer del título, la ventana añade la semilla
+// (con su código RND2 para compartir: Ctrl+C lo copia, Ctrl+V pega uno) y los
+// ajustes de la partida, en una lista compacta: Arriba/Abajo eligen fila,
+// Izquierda/Derecha cambian el valor y Start empieza (si la semilla da un
+// mundo completable).
+enum {
+    NGR_Difficulty, NGR_Mode, NGR_Seed, NGR_Treasures, NGR_Enemies, NGR_Bosses, NGR_Mix, NGR_Globes,
+    NGR_Candypops, NGR_Layout, NGR_Plants, NGR_Debt, NGR_Spoiler, NGR_Start, NGR_Count
+};
+const char* const kNgrTitles[NGR_Count] = { "Difficulty", "Game mode", "Seed", "Treasures", "Enemies", "Bosses",
+                                            "Bosses <-> enemies", "Globes", "Candypops", "Cave layout", "Plants",
+                                            "Debt", "Spoiler log", "Start" };
+int  sNgrRow = 0;
+char sNgrMessage[96] = "";
+
+int ngrCount(int row)
+{
+    switch (row) {
+    case NGR_Enemies: case NGR_Bosses: return 3;
+    case NGR_Debt: return 4;
+    case NGR_Seed: case NGR_Start: return 0;
+    default: return 2;
+    }
+}
+
+int ngrValue(int row)
+{
+    const uint32_t f = pc_randomizer_pending_flags();
+    switch (row) {
+    case NGR_Difficulty: return sNewGamePromptHard ? 1 : 0;
+    case NGR_Mode:       return sNewGamePromptRules;
+    case NGR_Treasures:  return (f & PC_RND_ShuffleTreasures) ? 1 : 0;
+    case NGR_Enemies:    return int(pc_rnd_enemy_mode(f));
+    case NGR_Bosses:     return int(pc_rnd_boss_mode(f));
+    case NGR_Mix:        return (f & PC_RND_BossEnemyMix) ? 1 : 0;
+    case NGR_Globes:     return (f & PC_RND_ShuffleGlobes) ? 1 : 0;
+    case NGR_Candypops:  return (f & PC_RND_ShuffleCandypops) ? 1 : 0;
+    case NGR_Layout:     return (f & PC_RND_FixedCaveLayout) ? 1 : 0;
+    case NGR_Plants:     return (f & PC_RND_ShufflePlants) ? 1 : 0;
+    case NGR_Debt:       return int(pc_rnd_debt_preset(f));
+    case NGR_Spoiler:    return (f & PC_RND_WriteSpoilerLog) ? 1 : 0;
+    default:             return 0;
+    }
+}
+
+void ngrSetValue(int row, int v)
+{
+    uint32_t f = pc_randomizer_pending_flags();
+    auto bit = [&](uint32_t b) { f = v ? (f | b) : (f & ~b); };
+    switch (row) {
+    case NGR_Difficulty: sNewGamePromptHard = v != 0; return;
+    case NGR_Mode:       sNewGamePromptRules = v; return;
+    case NGR_Treasures:  bit(PC_RND_ShuffleTreasures); break;
+    case NGR_Enemies:    f = pc_rnd_with_enemy_mode(f, uint32_t(v)); break;
+    case NGR_Bosses:     f = pc_rnd_with_boss_mode(f, uint32_t(v)); break;
+    case NGR_Mix:        bit(PC_RND_BossEnemyMix); break;
+    case NGR_Globes:     bit(PC_RND_ShuffleGlobes); break;
+    case NGR_Candypops:  bit(PC_RND_ShuffleCandypops); break;
+    case NGR_Layout:     bit(PC_RND_FixedCaveLayout); break;
+    case NGR_Plants:     bit(PC_RND_ShufflePlants); break;
+    case NGR_Debt:       f = pc_rnd_with_debt_preset(f, uint32_t(v)); break;
+    case NGR_Spoiler:    bit(PC_RND_WriteSpoilerLog); break;
+    default: return;
+    }
+    pc_randomizer_set_pending_flags(f);
+}
+
+const char* ngrValueText(int row, int v)
+{
+    static const char* const kModes[3] = { "Vanilla", "Shuffled", "Chaos" };
+    static const char* const kDebt[4]  = { "10,000 (original)", "5,000", "15,000", "20,000" };
+    switch (row) {
+    case NGR_Difficulty: return v ? "Hard" : "Normal";
+    case NGR_Mode:       return v ? "Permadeath" : "Standard";
+    case NGR_Treasures:  return v ? "Shuffled" : "Vanilla";
+    case NGR_Enemies:
+    case NGR_Bosses:     return kModes[v % 3];
+    case NGR_Globes:
+    case NGR_Candypops:
+    case NGR_Plants:     return v ? "Shuffled" : "Fixed";
+    case NGR_Layout:     return v ? "Fixed by seed" : "Random";
+    case NGR_Debt:       return kDebt[v % 4];
+    default:             return v ? "On" : "Off";
+    }
+}
+
+const char* ngrDetail(int row)
+{
+    switch (row) {
+    case NGR_Difficulty: return "Hard: tougher enemies, 8-minute days, 80 Pikmin.";
+    case NGR_Mode:       return "Permadeath: if both captains go down, the file is erased.";
+    case NGR_Seed:       return "A: new seed.  Ctrl+C: copy code.  Ctrl+V: paste a friend's code.";
+    case NGR_Treasures:  return "Treasures trade places. Each cave keeps its count. Louie stays put.";
+    case NGR_Enemies:    return "Shuffled: same kind of creature. Chaos: any creature that fits the spot.";
+    case NGR_Bosses:     return "Bosses trade arenas. The Waterwraith and Titan Dweevil stay put.";
+    case NGR_Mix:        return "Bosses may appear where creatures were, and the other way round.";
+    case NGR_Globes:     return "The two globes that open new areas can move too (always reachable).";
+    case NGR_Candypops:  return "Candypop colours trade places outside the Valley of Repose caves.";
+    case NGR_Layout:     return "Fixed by seed: the same seed always builds the same cave rooms.";
+    case NGR_Plants:     return "Plants and flora trade places with each other.";
+    case NGR_Debt:       return "Pokos the company owes. The world is always payable without Wistful Wild.";
+    case NGR_Spoiler:    return "Writes randomizer_spoiler.txt with where everything went.";
+    default:             return "Begin the expedition with these settings.";
+    }
+}
+
+void ngrStart()
+{
+    if (!pc_randomizer_seed_is_valid(pc_randomizer_pending_seed(), pc_randomizer_pending_flags())) {
+        std::snprintf(sNgrMessage, sizeof(sNgrMessage), "No completable world for this seed. Try another.");
+        return;
+    }
+    sNewGamePromptResult = sNewGamePromptRules ? PC_NEWGAME_PERMADEATH : PC_NEWGAME_NORMAL;
+    sNewGamePromptOpen   = false;
+}
+
+void ngrInput()
+{
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    const bool ctrl = (SDL_GetModState() & KMOD_CTRL) != 0;
+    const bool copy  = ctrl && keyWentDown(SDL_SCANCODE_C);
+    const bool paste = ctrl && keyWentDown(SDL_SCANCODE_V);
+    if (ctrl) { left = right = false; } // Ctrl+A/Ctrl+D no mueven
+
+    left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    up     |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    down   |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+    // Táctil: el primer toque elige la fila; otro sobre la elegida la usa
+    // (Start empieza, Seed sortea otra, el resto cambia; a la izquierda del
+    // valor retrocede). Fuera de la ventana, atrás. Misma geometría que ngrDraw.
+    if (sTouchTapPending) {
+        sTouchTapPending = false;
+        int sw, sh;
+        ngScreen(&sw, &sh);
+        const float x = sTouchTapX * sw;
+        const float y = sTouchTapY * sh;
+        const int panelW = 600, panelH = 466, rowH = 24;
+        const int panelX = sw / 2 - panelW / 2;
+        const int panelY = sh / 2 - panelH / 2;
+        const int top = panelY + 52;
+        const int valueX = panelX + 290;
+        if (x >= panelX && x <= panelX + panelW && y >= panelY && y <= panelY + panelH) {
+            for (int row = 0; row < NGR_Count; row++) {
+                const int rowY = top + row * rowH + (row == NGR_Start ? 8 : 0);
+                if (y < rowY - 4 || y >= rowY + rowH - 4) continue;
+                if (row != sNgrRow) {
+                    sNgrRow = row;
+                    sNgrMessage[0] = '\0';
+                } else if (row != NGR_Start && row != NGR_Seed && x >= valueX && x < valueX + 24) {
+                    left = true;
+                } else {
+                    accept = true;
+                }
+                break;
+            }
+        } else {
+            cancel = true;
+        }
+    }
+
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl) {
+        if (padNavLeft(ctl))  left   = true;
+        if (padNavRight(ctl)) right  = true;
+        if (padNavUp(ctl))    up     = true;
+        if (padNavDown(ctl))  down   = true;
+        if (promptPadA(ctl))  accept = true;
+        if (promptPadB(ctl))  cancel = true;
+    }
+
+    if (copy) {
+        char code[PC_RANDOMIZER_SHARE_CODE_LEN];
+        pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), code, sizeof(code));
+        SDL_SetClipboardText(code);
+        std::snprintf(sNgrMessage, sizeof(sNgrMessage), "Copied %s", code);
+    }
+    if (paste) {
+        char* text = SDL_GetClipboardText();
+        uint64_t seed = 0;
+        uint32_t flags = 0;
+        if (text && pc_randomizer_parse_share_code(text, &seed, &flags)) {
+            pc_randomizer_set_pending_seed(seed);
+            pc_randomizer_set_pending_flags(flags);
+            std::snprintf(sNgrMessage, sizeof(sNgrMessage), "Code pasted: same world as your friend.");
+        } else {
+            std::snprintf(sNgrMessage, sizeof(sNgrMessage), "The clipboard has no valid RND2 code.");
+        }
+        if (text) SDL_free(text);
+    }
+
+    if (up || down) {
+        sNgrRow = (sNgrRow + (up ? NGR_Count - 1 : 1)) % NGR_Count;
+        sNgrMessage[0] = '\0';
+    }
+    const int n = ngrCount(sNgrRow);
+    if ((left || right) && n > 0) {
+        ngrSetValue(sNgrRow, (ngrValue(sNgrRow) + (left ? n - 1 : 1)) % n);
+        sNgrMessage[0] = '\0';
+    }
+    if (accept) {
+        if (sNgrRow == NGR_Start) {
+            ngrStart();
+        } else if (sNgrRow == NGR_Seed) {
+            pc_randomizer_reroll_pending_seed();
+            sNgrMessage[0] = '\0';
+        } else if (n > 0) {
+            ngrSetValue(sNgrRow, (ngrValue(sNgrRow) + 1) % n);
+        }
+    } else if (cancel) {
+        sNewGamePromptResult = PC_NEWGAME_CANCELLED;
+        sNewGamePromptOpen   = false;
+    }
+}
+
+void ngrDraw(DGXGraphics* gfx, int screenW, int screenH)
+{
+    const int panelW = 600, panelH = 466;
+    const int panelX = screenW / 2 - panelW / 2;
+    const int panelY = screenH / 2 - panelH / 2;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, panelW, "Randomizer");
+
+    const Colour gold(255, 207, 75, 255);
+    const Colour pale(205, 239, 250, 255);
+    const Colour dim(150, 170, 190, 255);
+    const int rowH = 24;
+    const int top  = panelY + 52;
+    const int labelX = panelX + 44;
+    const int valueX = panelX + 290;
+    for (int row = 0; row < NGR_Count; row++) {
+        const bool focus = row == sNgrRow;
+        const int y = top + row * rowH + (row == NGR_Start ? 8 : 0);
+        if (focus) f1Text(labelX - 18, y, ">", gold, 13, 18);
+        if (row == NGR_Start) {
+            const char* t = "Start";
+            f1Text(panelX + panelW / 2 - f1TextW(t, 14) / 2, y, t, focus ? Colour(255, 255, 255, 255) : dim, 14, 20);
+            continue;
+        }
+        f1Text(labelX, y, kNgrTitles[row], focus ? gold : dim, 12, 18);
+        char value[48];
+        if (row == NGR_Seed) {
+            pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), value,
+                                            sizeof(value));
+        } else {
+            std::snprintf(value, sizeof(value), "%s%s%s", focus ? "< " : "", ngrValueText(row, ngrValue(row)),
+                          focus ? " >" : "");
+        }
+        f1Text(valueX, y, value, focus ? Colour(255, 255, 255, 255) : pale, 12, 18);
+    }
+
+    const char* detail = sNgrMessage[0] ? sNgrMessage : ngrDetail(sNgrRow);
+    const int detailY = top + NGR_Count * rowH + 16;
+    f1Text(panelX + panelW / 2 - f1TextW(detail, 11) / 2, detailY, detail, sNgrMessage[0] ? gold : pale, 11, 16);
+#ifdef __ANDROID__
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "Tap a row to pick it, tap it again to change it    Tap outside: back",
+                 dim, panelW - 40);
+#else
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "Up/Down: row    Left/Right: change    A: select    B: back",
+                 dim, panelW - 40);
+#endif
+}
+
+void pcNewGamePromptInput()
+{
+    if (!sNewGamePromptOpen) return;
+    if (!sNewGamePromptArmed) {
+        SDL_GameController* pad = pc_window_get_controller();
+        const bool padHeld = pad && (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)
+                                     || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B));
+        const Uint8* keys = SDL_GetKeyboardState(nullptr);
+        const bool keyHeld = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_ESCAPE]);
+        sTouchTapPending = false;
+        if (padHeld || keyHeld || sTouchFrameButtons != 0) return;
+        sNewGamePromptArmed = true;
+        pc_menu_edge_reset();
+        return;
+    }
+    if (pc_randomizer_menu_pending()) {
+        ngrInput();
+        return;
+    }
+
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+
+    left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    up     |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    down   |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+
+    if (sTouchTapPending) {
+        sTouchTapPending = false;
+        int sw, sh;
+        ngScreen(&sw, &sh);
+        const float x = sTouchTapX * sw;
+        const float y = sTouchTapY * sh;
+        const int panelX = sw / 2 - kNgPanelW / 2;
+        const int panelY = sh / 2 - kNgPanelH / 2;
+        // Un toque elige la opción; el de Start empieza.
+        for (int row = 0; row < kNgRowCount; ++row) {
+            const float optY = float(ngRowY(panelY, row));
+            for (int i = 0; i < 2; ++i) {
+                const float boxX = float(ngBoxX(panelX, i));
+                if (x >= boxX && x <= boxX + kNgBoxW && y >= optY - 8.0f && y <= optY + kNgBoxH + 8.0f) {
+                    sNewGamePromptRow = row;
+                    sNewGamePromptCol = i;
+                    ngSetRowValue(row, i);
+                }
+            }
+        }
+        const float startY = float(ngRowY(panelY, kNgStartRow));
+        const float startX = float(ngStartX(panelX));
+        if (x >= startX && x <= startX + kNgBoxW && y >= startY - 8.0f && y <= startY + kNgBoxH + 8.0f) {
+            sNewGamePromptRow = kNgStartRow;
+            accept            = true;
+        }
+    }
+
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl) {
+        if (padNavLeft(ctl))  left   = true;
+        if (padNavRight(ctl)) right  = true;
+        if (padNavUp(ctl))    up     = true;
+        if (padNavDown(ctl))  down   = true;
+        if (promptPadA(ctl))  accept = true;
+        if (promptPadB(ctl))  cancel = true;
+    }
+
+    const int rows = kNgRowCount + 1; // opciones + Start
+    if (up || down) {
+        sNewGamePromptRow = (sNewGamePromptRow + (up ? rows - 1 : 1)) % rows;
+        // El cursor entra en la fila sobre la opción ya elegida.
+        if (sNewGamePromptRow < kNgRowCount) sNewGamePromptCol = ngRowValue(sNewGamePromptRow);
+    }
+    if ((left || right) && sNewGamePromptRow < kNgRowCount) sNewGamePromptCol = sNewGamePromptCol ? 0 : 1;
+
+    if (accept) {
+        if (sNewGamePromptRow < kNgRowCount) {
+            ngSetRowValue(sNewGamePromptRow, sNewGamePromptCol); // A elige
+        } else {
+            sNewGamePromptResult = sNewGamePromptRules ? PC_NEWGAME_PERMADEATH : PC_NEWGAME_NORMAL;
+            sNewGamePromptOpen   = false;
+        }
+    } else if (cancel) {
+        sNewGamePromptResult = PC_NEWGAME_CANCELLED;
+        sNewGamePromptOpen   = false;
+    }
+}
+} // namespace
+
+void pc_newgame_prompt_open(void)
+{
+    sNewGamePromptOpen   = true;
+    sNewGamePromptArmed  = false;
+    sNewGamePromptRow    = 0;
+    sNewGamePromptCol    = 0;
+    sNewGamePromptRules  = 0;
+    sNewGamePromptResult = PC_NEWGAME_PENDING;
+    sNewGamePromptHard   = false;
+    sNgrRow              = NGR_Seed;
+    sNgrMessage[0]       = '\0';
+    pc_menu_edge_reset();
+}
+
+bool pc_newgame_prompt_active(void) { return sNewGamePromptOpen; }
+
+int pc_newgame_prompt_result(void) { return sNewGamePromptResult; }
+
+bool pc_newgame_prompt_chose_hard(void) { return sNewGamePromptHard; }
+
+void pc_newgame_prompt_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    if (!sNewGamePromptOpen) return;
+    if (!gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+
+    if (pc_randomizer_menu_pending()) {
+        ngrDraw(gfx, screenW, screenH);
+        return;
+    }
+
+    const int panelW = kNgPanelW;
+    const int panelH = kNgPanelH;
+    const int panelX = screenW / 2 - panelW / 2;
+    const int panelY = screenH / 2 - panelH / 2;
+
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, panelW, "New Game");
+
+    const Colour gold(255, 207, 75, 255);
+    const Colour pale(205, 239, 250, 255);
+    const Colour dim(150, 170, 190, 255);
+
+    const char* titles[2]     = { "Difficulty", "Game mode" };
+    const char* options[2][2] = { { "Normal", "Hard" }, { "Standard", "Permadeath" } };
+    for (int row = 0; row < kNgRowCount; row++) {
+        const bool rowFocus = (row == sNewGamePromptRow);
+        const int optY = ngRowY(panelY, row);
+        f1Text(ngBoxX(panelX, 0), optY - 26, titles[row], rowFocus ? gold : dim, 13, 19);
+        for (int i = 0; i < 2; i++) {
+            const bool chosen = (i == ngRowValue(row));
+            const int boxX = ngBoxX(panelX, i);
+            // Cursor: marcador a la izquierda de la opción (la elegida va en amarillo).
+            if (rowFocus && i == sNewGamePromptCol) f1Text(boxX - 16, optY + 10, ">", gold, 14, 20);
+            if (pc_settings_p2d_active()) {
+                // Como el F1: la elegida lleva la placa amarilla (2) y todas
+                // el cristal (1) encima.
+                if (chosen) pc_settings_p2d_plate(boxX, optY, kNgBoxW, kNgBoxH, 2);
+                pc_settings_p2d_plate(boxX, optY, kNgBoxW, kNgBoxH, 1);
+            } else {
+                const Colour fill = chosen && rowFocus ? Colour(70, 92, 150, 240)
+                                    : chosen          ? Colour(48, 60, 96, 230)
+                                                      : Colour(26, 30, 48, 220);
+                gfx->setColour(fill, true);
+                gfx->setAuxColour(fill);
+                gfx->fillRectangle(RectArea(boxX, optY, boxX + kNgBoxW, optY + kNgBoxH));
+            }
+            const Colour tc = chosen ? Colour(255, 255, 255, 255) : dim;
+            const int tw = f1TextW(options[row][i], 14);
+            f1Text(boxX + kNgBoxW / 2 - tw / 2, optY + 10, options[row][i], tc, 14, 20);
+        }
+    }
+
+    // Botón Start: el único que empieza la partida.
+    {
+        const bool focus = sNewGamePromptRow == kNgStartRow;
+        const int bx = ngStartX(panelX), by = ngRowY(panelY, kNgStartRow);
+        if (focus) f1Text(bx - 16, by + 10, ">", gold, 14, 20);
+        if (pc_settings_p2d_active()) {
+            if (focus) pc_settings_p2d_plate(bx, by, kNgBoxW, kNgBoxH, 2);
+            pc_settings_p2d_plate(bx, by, kNgBoxW, kNgBoxH, 1);
+        } else {
+            const Colour fill = focus ? Colour(70, 92, 150, 240) : Colour(26, 30, 48, 220);
+            gfx->setColour(fill, true);
+            gfx->setAuxColour(fill);
+            gfx->fillRectangle(RectArea(bx, by, bx + kNgBoxW, by + kNgBoxH));
+        }
+        f1Text(bx + kNgBoxW / 2 - f1TextW("Start", 14) / 2, by + 10, "Start", focus ? Colour(255, 255, 255, 255) : dim, 14, 20);
+    }
+
+    // Explica la opción bajo el cursor: es el único sitio donde se cuentan
+    // Hard y Permadeath.
+    const int value = sNewGamePromptRow < kNgRowCount ? sNewGamePromptCol : 0;
+    const char* detail;
+    if (sNewGamePromptRow == kNgStartRow) {
+        detail = "Begin the expedition\nwith these settings.";
+    } else if (sNewGamePromptRow == 0) {
+        detail = value ? "Tougher enemies, captains take more damage.\n8-minute days, 80 Pikmin, fewer sprays and nectar."
+                       : "Original enemy health, day length,\nfield limit and sprays.";
+    } else {
+        detail = value ? "If both captains go down,\nthis file is erased."
+                       : "Both captains down ends the day.\nThe original rules.";
+    }
+    // Centrada, una línea por cada '\n'.
+    const Colour detailColour = value ? Colour(255, 150, 150, 255) : pale;
+    int lineY = panelY + 292;
+    for (const char* p = detail; *p;) {
+        const char* end = std::strchr(p, '\n');
+        char line[128];
+        snprintf(line, sizeof(line), "%.*s", end ? (int)(end - p) : (int)std::strlen(p), p);
+        f1Text(panelX + panelW / 2 - f1TextW(line, 12) / 2, lineY, line, detailColour, 12, 18);
+        lineY += 22;
+        p = end ? end + 1 : p + std::strlen(p);
+    }
+
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 46, "Arrows: move    A: select    B: back", dim, panelW - 60);
+}
+
+// ─── Randomizer: código de la partida en la pausa (PLAN_RANDOMIZER.md §11.4) ───
+extern "C" bool pc_p2_rnd_pause_code(char* out, int outSize);
+
+void pc_randomizer_pause_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    char code[PC_RANDOMIZER_SHARE_CODE_LEN];
+    if (!gsys || !gsys->mDGXGfx || !pc_p2_rnd_pause_code(code, sizeof(code))) return;
+    // Ctrl+C lo copia (flanco propio: el F1 puede estar cerrado).
+    static bool sWasCopy = false;
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    const bool copyNow = keys && keys[SDL_SCANCODE_C] && (SDL_GetModState() & KMOD_CTRL);
+    static Uint32 sCopiedAt = 0;
+    if (copyNow && !sWasCopy) {
+        SDL_SetClipboardText(code);
+        sCopiedAt = SDL_GetTicks();
+    }
+    sWasCopy = copyNow;
+
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+    char line[64];
+    const bool copied = sCopiedAt && SDL_GetTicks() - sCopiedAt < 2000;
+    std::snprintf(line, sizeof(line), "%s  %s", code, copied ? "(copied)" : "Ctrl+C: copy");
+    f1Text(16, screenH - 30, line, copied ? Colour(255, 207, 75, 255) : Colour(205, 239, 250, 255), 11, 16);
+}
+
+// Atajos de prueba del Randomizer (PIKI_RND_DEBUG=1): ayuda o último resultado.
+extern "C" const char* pc_p2_rnd_debug_status(void);
+
+void pc_randomizer_debug_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    const char* line = pc_p2_rnd_debug_status();
+    if (!line || !gsys || !gsys->mDGXGfx || !pc_settings_in_gameplay()) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+    f1Text(16, 64, line, Colour(255, 207, 75, 255), 10, 15);
+}
+
+// ─── Co-op de Pikmin 2: asignación de mandos ───
+//
+// Al entrar desde la opción Coop del título, antes del selector de capitanes
+// (singleGS_FileSelect). Como la de Pikmin 1, sin elegir capitán: P1 lleva a
+// Olimar y P2 a Louie (o los del selector de capitanes). docs/PLAN_COOP.md §5.
+
+namespace {
+const int kCoopPanelW = 560;
+const int kCoopPanelH = 330;
+const int kCoopBoxW   = 220;
+const int kCoopBoxH   = 40;
+int coopBoxX(int panelX, int i) { return panelX + 50 + i * (kCoopBoxW + 20); }
+int coopBoxY(int panelY) { return panelY + 150; }
+
+// Placa de una opción con el aspecto de la ventana New Game.
+void coopOption(DGXGraphics* gfx, int x, int y, const char* label, bool focus)
+{
+    const Colour gold(255, 207, 75, 255);
+    const Colour dim(150, 170, 190, 255);
+    if (focus) f1Text(x - 16, y + 10, ">", gold, 14, 20);
+    if (pc_settings_p2d_active()) {
+        if (focus) pc_settings_p2d_plate(x, y, kCoopBoxW, kCoopBoxH, 2);
+        pc_settings_p2d_plate(x, y, kCoopBoxW, kCoopBoxH, 1);
+    } else {
+        const Colour fill = focus ? Colour(70, 92, 150, 240) : Colour(26, 30, 48, 220);
+        gfx->setColour(fill, true);
+        gfx->setAuxColour(fill);
+        gfx->fillRectangle(RectArea(x, y, x + kCoopBoxW, y + kCoopBoxH));
+    }
+    f1Text(x + kCoopBoxW / 2 - f1TextW(label, 14) / 2, y + 10, label, focus ? Colour(255, 255, 255, 255) : dim, 14, 20);
+}
+
+void coopCentered(int panelX, int y, const char* text, const Colour& c)
+{
+    f1Text(panelX + kCoopPanelW / 2 - f1TextW(text, 12) / 2, y, text, c, 12, 18);
+}
+
+// Panel y título de la ventana sobre el marco 2D ya abierto.
+void coopBeginPanel(DGXGraphics* gfx, int screenW, int screenH, int* panelX, int* panelY, const char* title)
+{
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+    *panelX = screenW / 2 - kCoopPanelW / 2;
+    *panelY = screenH / 2 - kCoopPanelH / 2;
+    drawPikminPanel(gfx, *panelX, *panelY, kCoopPanelW, kCoopPanelH, 22);
+    drawPikminHeader(gfx, *panelX, *panelY, kCoopPanelW, title);
+}
+
+// Asignación: "Player 1, press a button", luego P2 y una confirmación. Un
+// dispositivo no puede ir a los dos, y tras cada asignación se descartan las
+// pulsaciones un rato para que un mando duplicado por el sistema no se cuele.
+enum { COOPASSIGN_WaitP1 = 0, COOPASSIGN_WaitP2 = 1, COOPASSIGN_Confirm = 2 };
+bool   sDevAssignOpen        = false;
+int    sDevAssignStep        = COOPASSIGN_WaitP1;
+int    sDevAssignChoice      = 0; // confirmación: 0 = Start, 1 = Reassign
+int    sDevAssignResult      = PC_DEVASSIGN_PENDING;
+Uint32 sDevAssignIgnoreUntil = 0;
+int    sDevAssignKind[2]     = { PC_INPUT_DEV_NONE, PC_INPUT_DEV_NONE };
+int    sDevAssignId[2]       = { -1, -1 };
+
+void devAssignRestart()
+{
+    sDevAssignStep = COOPASSIGN_WaitP1;
+    for (int p = 0; p < 2; p++) { sDevAssignKind[p] = PC_INPUT_DEV_NONE; sDevAssignId[p] = -1; }
+    pc_window_input_reset_assignment();
+    pc_window_discard_button_presses();
+    sDevAssignIgnoreUntil = SDL_GetTicks() + 300;
+    pc_menu_edge_reset();
+}
+
+const char* devAssignName(int player)
+{
+    if (sDevAssignKind[player] == PC_INPUT_DEV_KEYBOARD) return "Keyboard";
+    if (sDevAssignKind[player] == PC_INPUT_DEV_GAMEPAD) return pc_window_gamepad_name(sDevAssignId[player]);
+    return "-";
+}
+
+void pcDevAssignPromptInput()
+{
+    if (!sDevAssignOpen) return;
+
+    // Esc / B cancelan en cualquier paso (vuelven al selector 1P/2P).
+    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+
+    if (sDevAssignStep != COOPASSIGN_Confirm) {
+        const int player = sDevAssignStep == COOPASSIGN_WaitP1 ? 0 : 1;
+        int kind = PC_INPUT_DEV_NONE, id = -1;
+        bool pressed = pc_window_take_button_press(&kind, &id);
+#if PIKI_PC_TOUCH
+        // Táctil: un toque vale como "P1 = pantalla" (va al pad 0). P2 necesita un mando.
+        if (sTouchTapPending) {
+            sTouchTapPending = false;
+            if (player == 0 && !pressed) {
+                pressed = true;
+                kind    = PC_INPUT_DEV_KEYBOARD;
+                id      = -1;
+            }
+        }
+#endif
+        if (cancel) {
+            sDevAssignResult = PC_DEVASSIGN_CANCELLED;
+            sDevAssignOpen   = false;
+            return;
+        }
+        if (!pressed || SDL_GetTicks() < sDevAssignIgnoreUntil) return;
+        // B de un mando sin asignar también cancela.
+        if (kind == PC_INPUT_DEV_GAMEPAD) {
+            SDL_GameController* ctl = SDL_GameControllerFromInstanceID(id);
+            if (ctl && pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_B))) {
+                sDevAssignResult = PC_DEVASSIGN_CANCELLED;
+                sDevAssignOpen   = false;
+                return;
+            }
+        }
+        // El dispositivo de P1 no puede repetirse en P2.
+        if (player == 1 && kind == sDevAssignKind[0] && (kind != PC_INPUT_DEV_GAMEPAD || id == sDevAssignId[0])) return;
+        sDevAssignKind[player] = kind;
+        sDevAssignId[player]   = id;
+        pc_window_input_assign(player, kind, id);
+        pc_window_discard_button_presses();
+        sDevAssignIgnoreUntil = SDL_GetTicks() + 400;
+        sDevAssignStep        = player == 0 ? COOPASSIGN_WaitP2 : COOPASSIGN_Confirm;
+        sDevAssignChoice      = 0;
+        pc_menu_edge_reset();
+        return;
+    }
+
+    // Confirmación: con teclado y con los dos mandos. Los flancos van por
+    // acción, no por mando: se combina el estado de los dos y se detecta una vez.
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    SDL_GameController* pads[2] = { pc_window_get_controller(), pc_window_get_controller_p2() };
+    bool hLeft = false, hRight = false, hA = false, hB = false;
+    for (int i = 0; i < 2; i++) {
+        SDL_GameController* ctl = pads[i];
+        if (!ctl) continue;
+        hLeft  |= SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_LEFT) || menuStickHorizontal(ctl, -1);
+        hRight |= SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || menuStickHorizontal(ctl, 1);
+        hA     |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_A));
+        hB     |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_B));
+    }
+    if (padEdge(hLeft, 2))  left   = true;
+    if (padEdge(hRight, 3)) right  = true;
+    if (padEdge(hA, 4))     accept = true;
+    if (padEdge(hB, 5))     cancel = true;
+    pc_window_discard_button_presses();
+    // El botón con el que P2 se acaba de asignar sigue pulsado.
+    if (SDL_GetTicks() < sDevAssignIgnoreUntil) return;
+
+    if (left || right) sDevAssignChoice = sDevAssignChoice ? 0 : 1;
+    if (accept) {
+        if (sDevAssignChoice == 1) { devAssignRestart(); return; }
+        sDevAssignResult = PC_DEVASSIGN_OK;
+        sDevAssignOpen   = false;
+    } else if (cancel) {
+        sDevAssignResult = PC_DEVASSIGN_CANCELLED;
+        sDevAssignOpen   = false;
+    }
+}
+} // namespace
+
+void pc_devassign_prompt_open(void)
+{
+    sDevAssignOpen   = true;
+    sDevAssignChoice = 0;
+    sDevAssignResult = PC_DEVASSIGN_PENDING;
+    devAssignRestart();
+}
+
+bool pc_devassign_prompt_active(void) { return sDevAssignOpen; }
+
+int pc_devassign_prompt_result(void) { return sDevAssignResult; }
+
+void pc_devassign_prompt_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    if (!sDevAssignOpen) return;
+    if (!gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    int panelX, panelY;
+    coopBeginPanel(gfx, screenW, screenH, &panelX, &panelY, "Controllers");
+
+    const Colour gold(255, 207, 75, 255);
+    const Colour pale(205, 239, 250, 255);
+    const Colour dim(150, 170, 190, 255);
+    char line[160];
+    for (int p = 0; p < 2; p++) {
+        const bool waiting = sDevAssignStep == p;
+        snprintf(line, sizeof(line), "Player %d (%s):  %s", p + 1, p == 0 ? "Olimar" : "Louie",
+                 waiting ? "press a button" : devAssignName(p));
+        coopCentered(panelX, panelY + 80 + p * 30, line, waiting ? gold : pale);
+    }
+
+    if (sDevAssignStep == COOPASSIGN_Confirm) {
+        const char* labels[2] = { "Start", "Reassign" };
+        for (int i = 0; i < 2; i++) coopOption(gfx, coopBoxX(panelX, i), coopBoxY(panelY) + 20, labels[i], i == sDevAssignChoice);
+    } else {
+        const char* hint = sDevAssignStep == COOPASSIGN_WaitP2
+            ? (pc_window_num_gamepads() > 0 ? "Player 2: press a button on another controller."
+                                            : "Connect a controller for Player 2.")
+            : "Player 1: press a key or a controller button.";
+        coopCentered(panelX, panelY + 180, hint, dim);
+    }
+    drawHelpLine(panelX + kCoopPanelW / 2, panelY + kCoopPanelH - 46,
+                 sDevAssignStep == COOPASSIGN_Confirm ? "Left/Right: choose    A: confirm    B: back" : "B / Esc: back", dim,
+                 kCoopPanelW - 60);
+}
+
+// ─── Selector de capitanes de Pikmin 2 ───
+//
+// Como la selección de un juego de lucha: en el centro, una rejilla 3x3 con
+// los personajes (cada uno una vez, con su modelo 3D animado,
+// pc_p2_captain_preview.h); a la izquierda el panel del capitán 1 (rojo) y a
+// la derecha el del 2 (azul), con su modelo grande girando y su nombre. La
+// burbuja del capitán activo recorre la rejilla; la del otro queda sobre su
+// elección. A elige y pasa al otro capitán, L/R (Q/E) cambian de capitán,
+// Start sigue y B vuelve. Los modelos se dibujan después de las placas
+// (pc_captain_select_draw_3d), que se pintan al final del frame.
+namespace {
+bool sCapSelOpen   = false;
+bool sCapSelArmed  = false;
+int  sCapSelResult = PC_CAPSEL_PENDING;
+int  sCapSelActive = 0;     // capitán que elige: 0 = rojo, 1 = azul
+int  sCapSelIndex  = 0;     // tarjeta bajo la burbuja activa
+bool sCapSelStart  = false; // foco en el botón Start
+int  sCapSelChoice[2] = { PC_P2_CHAR_OLIMAR, -1 }; // -1 = original (solo capitán 2)
+// Co-op: cada jugador elige su capitán a la vez, con su cursor y su mando
+// (el teclado, de quien lo tenga). A elige y queda listo, B lo deshace (P1
+// sin elegir vuelve atrás) y con los dos listos A o Start empiezan.
+bool sCsCoop        = false;
+int  sCsCursor[2]   = { 0, 0 };
+bool sCsReady[2]    = { false, false };
+enum { CS_Left, CS_Right, CS_Up, CS_Down, CS_A, CS_B, CS_Start, CS_InputCount };
+bool sCsHeld[2][CS_InputCount];
+
+const int kCsPanelW = 636;
+const int kCsPanelH = 456;
+const int kCsCols   = 3;
+const int kCsCardW  = 92;
+const int kCsCardH  = 88;
+const int kCsGap    = 4;
+const int kCsGridW  = kCsCols * kCsCardW + (kCsCols - 1) * kCsGap;
+const int kCsGridH  = 3 * kCsCardH + 2 * kCsGap;
+const int kCsSideW  = 150;
+const int kCsSideH  = kCsGridH;
+const int kCsSpace  = 14;
+const int kCsStartW = 220;
+const int kCsStartH = 38;
+
+const Colour kCsRed(235, 70, 60, 255);
+const Colour kCsBlue(70, 130, 245, 255);
+
+int csCardIndex(int character) { return character < 0 ? PC_P2_CHAR_LOUIE : character; }
+// El original del capitán 2 (-1: Louie, o el Presidente con la deuda pagada)
+// se marca en la tarjeta de Louie y se conserva mientras no se elija otra.
+bool csCardChosen(int captain, int character)
+{
+    return character == sCapSelChoice[captain] || (sCapSelChoice[captain] < 0 && character == PC_P2_CHAR_LOUIE);
+}
+
+int csLeft(int panelX) { return panelX + (kCsPanelW - (2 * kCsSideW + kCsGridW + 2 * kCsSpace)) / 2; }
+int csSideX(int panelX, int captain) { return csLeft(panelX) + captain * (kCsSideW + kCsGridW + 2 * kCsSpace); }
+int csGridX(int panelX) { return csLeft(panelX) + kCsSideW + kCsSpace; }
+int csTop(int panelY) { return panelY + 70; }
+int csCardX(int panelX, int index) { return csGridX(panelX) + (index % kCsCols) * (kCsCardW + kCsGap); }
+int csCardY(int panelY, int index) { return csTop(panelY) + (index / kCsCols) * (kCsCardH + kCsGap); }
+int csStartX(int panelX) { return panelX + kCsPanelW / 2 - kCsStartW / 2; }
+int csStartY(int panelY) { return csTop(panelY) + kCsGridH + 14; }
+
+const char* csShortName(int character)
+{
+    static const char* const kNames[PC_P2_CHAR_COUNT] = { "Olimar", "Louie", "Pres.", "Red", "Yellow", "Blue", "Purple", "White", "Bulbmin" };
+    return kNames[csCardIndex(character)];
+}
+
+const char* csLongName(int character)
+{
+    static const char* const kNames[PC_P2_CHAR_COUNT] = { "Olimar", "Louie", "President", "Red Pikmin", "Yellow Pikmin",
+                                                          "Blue Pikmin", "Purple Pikmin", "White Pikmin", "Bulbmin" };
+    return kNames[csCardIndex(character)];
+}
+
+// Personaje que verá de verdad el capitán (Original del capitán 2 es Louie
+// o el Presidente; para la vista previa basta con Louie).
+int csResolved(int captain) { return sCapSelChoice[captain] >= 0 ? sCapSelChoice[captain] : (captain == 0 ? PC_P2_CHAR_OLIMAR : PC_P2_CHAR_LOUIE); }
+
+// El capitán 2 repetido (salvo Pikmin) se tiñe: azul, o rojo si ya es azul.
+bool csTinted(Colour* tint)
+{
+    const int c = csResolved(1);
+    if (c != csResolved(0) || pc_p2_character_is_pikmin(c)) return false;
+    const bool blueAlready = c == PC_P2_CHAR_LOUIE || c == PC_P2_CHAR_BLUE;
+    if (tint) *tint = blueAlready ? Colour(255, 120, 110, 255) : Colour(90, 150, 255, 255);
+    return true;
+}
+
+void csFill(DGXGraphics* gfx, int x, int y, int w, int h, const Colour& c)
+{
+    gfx->setColour(c, true);
+    gfx->setAuxColour(c);
+    gfx->fillRectangle(RectArea(x, y, x + w, y + h));
+}
+
+// Texto centrado que se encoge si no cabe en width.
+void csCenteredText(int cx, int y, int width, const char* text, const Colour& colour, int fontW, int fontH)
+{
+    while (fontW > 7 && f1TextW(text, fontW) > width) fontW--;
+    f1Text(cx - f1TextW(text, fontW) / 2, y, text, colour, fontW, fontH);
+}
+
+// Modelos del último dibujo, para pc_captain_select_draw_3d.
+struct CsCard {
+    int character;
+    int x, y, w, h;
+    bool spin;
+    bool tinted;
+};
+CsCard sCsCards[PC_P2_CHAR_COUNT + 2];
+int sCsCardCount = 0;
+int sCsScreenW = 640, sCsScreenH = 480;
+float sCsTint[3] = { 1.0f, 1.0f, 1.0f };
+
+void csSetActive(int captain)
+{
+    sCapSelActive = captain;
+    sCapSelIndex  = csCardIndex(sCapSelChoice[captain]);
+}
+
+// A sobre una tarjeta: es del capitán activo y la burbuja pasa al otro.
+void csAssign(int index)
+{
+    if (!csCardChosen(sCapSelActive, index)) sCapSelChoice[sCapSelActive] = index;
+    csSetActive(1 - sCapSelActive);
+}
+
+// Lo pulsado este frame por un jugador: su teclado (si es suyo) y su mando,
+// con flancos propios (pc_menu_edge es uno por acción y los mandos se pisarían).
+void csCoopPressed(int player, bool pressed[CS_InputCount])
+{
+    for (int i = 0; i < CS_InputCount; i++) pressed[i] = false;
+    if (pc_window_get_keyboard_owner() == player) {
+        pressed[CS_Left]  = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
+        pressed[CS_Right] = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+        pressed[CS_Up]    = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
+        pressed[CS_Down]  = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
+        pressed[CS_A]     = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+        pressed[CS_B]     = keyWentDown(SDL_SCANCODE_ESCAPE);
+        pressed[CS_Start] = keyWentDown(SDL_SCANCODE_TAB);
+    }
+    SDL_GameController* ctl = player == 0 ? pc_window_get_controller() : pc_window_get_controller_p2();
+    bool held[CS_InputCount] = {};
+    if (ctl) {
+        held[CS_Left]  = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_LEFT) || menuStickHorizontal(ctl, -1);
+        held[CS_Right] = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || menuStickHorizontal(ctl, 1);
+        held[CS_Up]    = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_UP) || menuStickVertical(ctl, -1);
+        held[CS_Down]  = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) || menuStickVertical(ctl, 1);
+        held[CS_A]     = pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_A));
+        held[CS_B]     = pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_B));
+        held[CS_Start] = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_START);
+    }
+    for (int i = 0; i < CS_InputCount; i++) {
+        if (held[i] && !sCsHeld[player][i]) pressed[i] = true;
+        sCsHeld[player][i] = held[i];
+    }
+}
+
+void csCoopStart()
+{
+    sConfig.p2Captain1 = sCapSelChoice[0];
+    sConfig.p2Captain2 = sCapSelChoice[1];
+    pc_p2_captain_set_choice(0, sCapSelChoice[0]);
+    pc_p2_captain_set_choice(1, sCapSelChoice[1]);
+    saveConfig();
+    sCapSelResult = PC_CAPSEL_START;
+    sCapSelOpen   = false;
+}
+
+void pcCaptainSelectCoopInput()
+{
+    sTouchTapPending = false;
+    bool pressed[2][CS_InputCount];
+    for (int p = 0; p < 2; p++) csCoopPressed(p, pressed[p]);
+    const bool bothReady = sCsReady[0] && sCsReady[1];
+    for (int p = 0; p < 2; p++) {
+        const bool* in = pressed[p];
+        if (bothReady && (in[CS_A] || in[CS_Start])) {
+            csCoopStart();
+            return;
+        }
+        if (in[CS_B]) {
+            if (sCsReady[p]) {
+                sCsReady[p] = false;
+            } else if (p == 0) {
+                sCapSelResult = PC_CAPSEL_BACK;
+                sCapSelOpen   = false;
+                return;
+            }
+            continue;
+        }
+        if (sCsReady[p]) continue;
+        int& cursor   = sCsCursor[p];
+        const int row = cursor / kCsCols, col = cursor % kCsCols;
+        if (in[CS_Left]) cursor = row * kCsCols + (col + kCsCols - 1) % kCsCols;
+        if (in[CS_Right]) cursor = row * kCsCols + (col + 1) % kCsCols;
+        if (in[CS_Up] && row > 0) cursor -= kCsCols;
+        if (in[CS_Down] && row < 2) cursor += kCsCols;
+        if (in[CS_A] || in[CS_Start]) {
+            if (!csCardChosen(p, cursor)) sCapSelChoice[p] = cursor;
+            sCsReady[p] = true;
+        }
+    }
+}
+
+void pcCaptainSelectInput()
+{
+    if (!sCapSelOpen) return;
+    if (sCsCoop) {
+        pcCaptainSelectCoopInput();
+        return;
+    }
+    if (!sCapSelArmed) {
+        SDL_GameController* pad = pc_window_get_controller();
+        const bool padHeld = pad && (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)
+                                     || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B));
+        const Uint8* keys = SDL_GetKeyboardState(nullptr);
+        const bool keyHeld = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_ESCAPE]);
+        sTouchTapPending = false;
+        if (padHeld || keyHeld || sTouchFrameButtons != 0) return;
+        sCapSelArmed = true;
+        pc_menu_edge_reset();
+        return;
+    }
+
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool prevCaptain = keyWentDown(SDL_SCANCODE_Q);
+    bool nextCaptain = keyWentDown(SDL_SCANCODE_E);
+
+    left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    up     |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    down   |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+
+    if (sTouchTapPending) {
+        sTouchTapPending = false;
+        int sw, sh;
+        ngScreen(&sw, &sh);
+        float x = sTouchTapX * sw;
+        float y = sTouchTapY * sh;
+        {
+            // La pantalla es un 4:3 centrado (ver pc_settings_p2_begin_frame):
+            // en ventanas más anchas, bandas a los lados.
+            const float window  = pc_gfx_get_window_aspect_ratio();
+            const float uiWidth = window > float(sw) / float(sh) ? (float(sw) / float(sh)) / window : 1.0f;
+            x = (sTouchTapX - (0.5f - uiWidth * 0.5f)) / uiWidth * sw;
+        }
+        const int panelX = sw / 2 - kCsPanelW / 2;
+        const int panelY = sh / 2 - kCsPanelH / 2;
+        // Un toque en una tarjeta la asigna al capitán activo; en un panel de
+        // capitán, ese pasa a ser el activo; el de Start empieza.
+        for (int i = 0; i < PC_P2_CHAR_COUNT; ++i) {
+            const float cx = float(csCardX(panelX, i)), cy = float(csCardY(panelY, i));
+            if (x >= cx && x <= cx + kCsCardW && y >= cy && y <= cy + kCsCardH) {
+                sCapSelStart = false;
+                csAssign(i);
+            }
+        }
+        for (int captain = 0; captain < 2; ++captain) {
+            const float px = float(csSideX(panelX, captain)), py = float(csTop(panelY));
+            if (x >= px && x <= px + kCsSideW && y >= py && y <= py + kCsSideH) {
+                sCapSelStart = false;
+                csSetActive(captain);
+            }
+        }
+        const float sx = float(csStartX(panelX)), sy = float(csStartY(panelY));
+        if (x >= sx && x <= sx + kCsStartW && y >= sy && y <= sy + kCsStartH) {
+            sCapSelStart = true;
+            accept       = true;
+        }
+    }
+
+    SDL_GameController* ctl = pc_window_get_controller();
+    bool start = keyWentDown(SDL_SCANCODE_TAB);
+    if (ctl) {
+        if (padNavLeft(ctl))  left   = true;
+        if (padNavRight(ctl)) right  = true;
+        if (padNavUp(ctl))    up     = true;
+        if (padNavDown(ctl))  down   = true;
+        if (promptPadA(ctl))  accept = true;
+        if (promptPadB(ctl))  cancel = true;
+    }
+    // Start, L y R del mando: flancos propios (pc_menu_edge no tiene huecos libres).
+    static bool sStartWasHeld = true, sLWasHeld = true, sRWasHeld = true;
+    const bool startHeld = ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_START);
+    const bool lHeld     = ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+    const bool rHeld     = ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+    if (startHeld && !sStartWasHeld) start = true;
+    if (lHeld && !sLWasHeld) prevCaptain = true;
+    if (rHeld && !sRWasHeld) nextCaptain = true;
+    sStartWasHeld = startHeld;
+    sLWasHeld     = lHeld;
+    sRWasHeld     = rHeld;
+
+    if (prevCaptain || nextCaptain) {
+        sCapSelStart = false;
+        csSetActive(prevCaptain ? 0 : 1);
+    }
+
+    if (sCapSelStart) {
+        if (up) {
+            // A la fila de abajo, en la columna de la tarjeta que tenía el foco.
+            sCapSelStart = false;
+            sCapSelIndex = 2 * kCsCols + sCapSelIndex % kCsCols;
+        }
+    } else {
+        const int row = sCapSelIndex / kCsCols, col = sCapSelIndex % kCsCols;
+        if (left)  sCapSelIndex = row * kCsCols + (col + kCsCols - 1) % kCsCols;
+        if (right) sCapSelIndex = row * kCsCols + (col + 1) % kCsCols;
+        if (up && row > 0) sCapSelIndex -= kCsCols;
+        if (down) {
+            if (row < 2) sCapSelIndex += kCsCols;
+            else sCapSelStart = true;
+        }
+    }
+
+    if (accept && !sCapSelStart) {
+        csAssign(sCapSelIndex);
+    } else if (accept || start) {
+        sConfig.p2Captain1 = sCapSelChoice[0];
+        sConfig.p2Captain2 = sCapSelChoice[1];
+        pc_p2_captain_set_choice(0, sCapSelChoice[0]);
+        pc_p2_captain_set_choice(1, sCapSelChoice[1]);
+        saveConfig();
+        sCapSelResult = PC_CAPSEL_START;
+        sCapSelOpen   = false;
+    } else if (cancel) {
+        sCapSelResult = PC_CAPSEL_BACK;
+        sCapSelOpen   = false;
+    }
+}
+} // namespace
+
+void pc_captain_select_open(void)
+{
+    sCapSelOpen      = true;
+    sCapSelArmed     = false;
+    sCapSelResult    = PC_CAPSEL_PENDING;
+    sCapSelChoice[0] = sConfig.p2Captain1 >= 0 && sConfig.p2Captain1 < PC_P2_CHAR_COUNT ? sConfig.p2Captain1 : PC_P2_CHAR_OLIMAR;
+    sCapSelChoice[1] = sConfig.p2Captain2 >= -1 && sConfig.p2Captain2 < PC_P2_CHAR_COUNT ? sConfig.p2Captain2 : -1;
+    // El cursor empieza sobre Start: lo normal es repetir la última elección.
+    sCapSelStart     = true;
+    csSetActive(0);
+    // Co-op: cada uno con su cursor sobre su elección; el botón que abrió la
+    // pantalla sigue pulsado (los flancos empiezan como pulsados).
+    sCsCoop = pc_p2_coop_pending() != 0;
+    for (int p = 0; p < 2; p++) {
+        sCsCursor[p] = csCardIndex(sCapSelChoice[p]);
+        sCsReady[p]  = false;
+        for (int i = 0; i < CS_InputCount; i++) sCsHeld[p][i] = true;
+    }
+    if (sCsCoop) sCapSelStart = false;
+    sCsCardCount     = 0;
+    pc_menu_edge_reset();
+}
+
+bool pc_captain_select_active(void) { return sCapSelOpen; }
+
+int pc_captain_select_result(void) { return sCapSelResult; }
+
+void pc_captain_select_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    sCsCardCount = 0;
+    if (!sCapSelOpen) return;
+    if (!gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
+    sCsScreenW = screenW;
+    sCsScreenH = screenH;
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+
+    const int panelX = screenW / 2 - kCsPanelW / 2;
+    const int panelY = screenH / 2 - kCsPanelH / 2;
+    drawPikminPanel(gfx, panelX, panelY, kCsPanelW, kCsPanelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, kCsPanelW, "Captains");
+
+    const Colour gold(255, 207, 75, 255);
+    const Colour white(255, 255, 255, 255);
+    const Colour dim(150, 170, 190, 255);
+    Colour tint;
+    const bool tinted = csTinted(&tint);
+    sCsTint[0] = tint.r / 255.0f;
+    sCsTint[1] = tint.g / 255.0f;
+    sCsTint[2] = tint.b / 255.0f;
+    const float angle = SDL_GetTicks() * 0.004f;
+    const bool atlas  = pc_settings_p2d_active();
+
+    // Paneles de los capitanes: el activo se ilumina con su color.
+    for (int captain = 0; captain < 2; ++captain) {
+        const int px = csSideX(panelX, captain), py = csTop(panelY);
+        const bool active = sCsCoop ? !sCsReady[captain] : !sCapSelStart && captain == sCapSelActive;
+        const Colour colour = captain == 0 ? kCsRed : kCsBlue;
+        if (atlas) {
+            const u8 alpha = active ? 200 : 90;
+            const Colour top(colour.r, colour.g, colour.b, alpha);
+            const Colour bottom(colour.r * 2 / 3, colour.g * 2 / 3, colour.b * 2 / 3, alpha);
+            pc_settings_p2d_tinted_plate(px + 3, py + 3, kCsSideW - 6, kCsSideH - 6, top, bottom);
+            pc_settings_p2d_plate(px, py, kCsSideW, kCsSideH, 1);
+        } else {
+            csFill(gfx, px, py, kCsSideW, kCsSideH, Colour(colour.r / 3, colour.g / 3, colour.b / 3, 230));
+        }
+        csCenteredText(px + kCsSideW / 2, py + 18, kCsSideW - 16, captain == 0 ? "Captain 1" : "Captain 2", active ? gold : white, 15,
+                       21);
+        csCenteredText(px + kCsSideW / 2, py + kCsSideH - 30, kCsSideW - 16, csLongName(csResolved(captain)), white, 12, 17);
+        if (sCsCoop) {
+            // Co-op: de quién es cada panel y si ya ha elegido.
+            const char* who = sCsReady[captain] ? (captain == 0 ? "P1 ready" : "P2 ready") : (captain == 0 ? "P1" : "P2");
+            csCenteredText(px + kCsSideW / 2, py + 38, kCsSideW - 16, who, sCsReady[captain] ? gold : dim, 11, 15);
+        }
+        if (sCsCardCount < int(sizeof(sCsCards) / sizeof(sCsCards[0]))) {
+            CsCard& card = sCsCards[sCsCardCount++];
+            card.character = csResolved(captain);
+            card.x = px + 8, card.y = py + 46, card.w = kCsSideW - 16, card.h = kCsSideH - 84;
+            card.spin   = true;
+            card.tinted = captain == 1 && tinted;
+        }
+    }
+
+    // Rejilla: el fondo de la tarjeta elegida, rojo (1), azul (2) o morado (los dos).
+    for (int i = 0; i < PC_P2_CHAR_COUNT; ++i) {
+        const bool by1 = csCardChosen(0, i), by2 = csCardChosen(1, i);
+        const int cx = csCardX(panelX, i), cy = csCardY(panelY, i);
+        if (atlas) {
+            if (by1 || by2) {
+                const Colour top = by1 && by2 ? Colour(170, 90, 200, 235) : by1 ? Colour(240, 95, 80, 235) : Colour(80, 140, 245, 235);
+                const Colour bottom(top.r * 3 / 4, top.g * 3 / 4, top.b * 3 / 4, 235);
+                pc_settings_p2d_tinted_plate(cx + 3, cy + 3, kCsCardW - 6, kCsCardH - 6, top, bottom);
+            }
+            // La tarjeta bajo el cursor se tiñe con el color del capitán que elige.
+            for (int captain = 0; captain < 2; ++captain) {
+                const bool hovering = sCsCoop ? !sCsReady[captain] && i == sCsCursor[captain]
+                                              : captain == sCapSelActive && !sCapSelStart && i == sCapSelIndex;
+                if (hovering) {
+                    const Colour hover = captain == 0 ? Colour(255, 120, 105, 170) : Colour(110, 165, 255, 170);
+                    const Colour hoverBottom(hover.r * 3 / 4, hover.g * 3 / 4, hover.b * 3 / 4, 170);
+                    pc_settings_p2d_tinted_plate(cx + 3, cy + 3, kCsCardW - 6, kCsCardH - 6, hover, hoverBottom);
+                }
+            }
+            pc_settings_p2d_plate(cx, cy, kCsCardW, kCsCardH, 1);
+        } else {
+            csFill(gfx, cx, cy, kCsCardW, kCsCardH, by1 || by2 ? Colour(48, 60, 96, 230) : Colour(26, 30, 48, 220));
+        }
+        csCenteredText(cx + kCsCardW / 2, cy + kCsCardH - 22, kCsCardW - 8, csShortName(i), by1 || by2 ? white : dim, 11, 15);
+        if (sCsCardCount < int(sizeof(sCsCards) / sizeof(sCsCards[0]))) {
+            CsCard& card = sCsCards[sCsCardCount++];
+            card.character = i;
+            card.x = cx + 10, card.y = cy + 4, card.w = kCsCardW - 20, card.h = kCsCardH - 26;
+            card.spin   = false;
+            card.tinted = false;
+        }
+    }
+
+    // Burbujas en las esquinas de arriba de la tarjeta: la roja (capitán 1) a
+    // la izquierda y la azul (2) a la derecha. La del capitán activo va con el
+    // cursor y gira; la otra queda quieta sobre su elección.
+    if (atlas) {
+        for (int captain = 0; captain < 2; ++captain) {
+            const bool moving = sCsCoop ? !sCsReady[captain] : captain == sCapSelActive && !sCapSelStart;
+            const int card    = !moving ? csCardIndex(sCapSelChoice[captain]) : sCsCoop ? sCsCursor[captain] : sCapSelIndex;
+            const int bx      = csCardX(panelX, card) + (captain == 0 ? 12 : kCsCardW - 12);
+            pc_settings_p2d_cursor_tinted(bx, csCardY(panelY, card) + 12, moving ? 17 : 13, moving ? angle : 0.0f,
+                                          captain == 0 ? kCsRed : kCsBlue);
+        }
+    }
+
+    // Botón Start (co-op: se enciende con los dos listos).
+    const bool pcStartLit = sCsCoop ? sCsReady[0] && sCsReady[1] : sCapSelStart;
+    {
+        const bool sCapSelStart = pcStartLit;
+        const int bx = csStartX(panelX), by = csStartY(panelY);
+        if (sCapSelStart) f1Text(bx - 16, by + 9, ">", gold, 14, 20);
+        if (atlas) {
+            if (sCapSelStart) pc_settings_p2d_plate(bx, by, kCsStartW, kCsStartH, 2);
+            pc_settings_p2d_plate(bx, by, kCsStartW, kCsStartH, 1);
+        } else {
+            csFill(gfx, bx, by, kCsStartW, kCsStartH, sCapSelStart ? Colour(70, 92, 150, 240) : Colour(26, 30, 48, 220));
+        }
+        f1Text(bx + kCsStartW / 2 - f1TextW("Start", 14) / 2, by + 9, "Start", sCapSelStart ? white : dim, 14, 20);
+    }
+
+    drawHelpLine(panelX + kCsPanelW / 2, panelY + kCsPanelH - 46,
+                 sCsCoop ? "Each player: A: pick    B: change    Both ready: A / Start"
+#if PIKI_PC_TOUCH
+                 : pc_touch_visible() ? "Tap a card: pick    Tap a captain: switch    Start: go"
+#endif
+                         : "A: pick    L/R: switch captain    Start: go    B: back",
+                 dim, kCsPanelW - 60);
+}
+
+void pc_captain_select_draw_3d(void)
+{
+    if (!sCapSelOpen || sCsCardCount == 0) return;
+    if (!pc_p2_captain_preview_begin()) return;
+    for (int i = 0; i < sCsCardCount; ++i) {
+        const CsCard& card = sCsCards[i];
+        pc_p2_captain_preview_draw(card.character, card.x, card.y, card.w, card.h, sCsScreenW, sCsScreenH, card.spin,
+                                   card.tinted ? sCsTint : nullptr);
+    }
+    pc_p2_captain_preview_end();
+}
+
+// ─── Menú del modo Speedrun de Pikmin 2 ───
+//
+// Lo abre la selección de partida al entrar por la opción Speedrun del
+// título. Una run es una sola sentada: no hay ranuras ni guardado. Start Run
+// empieza la partida y el reloj; B vuelve al título. Mismo estilo que la
+// ventana New Game (placas y fuente del atlas de Pikmin 2).
+namespace {
+enum SrPage { SR_Menu, SR_How, SR_Settings, SR_Times, SR_ConfirmReset };
+enum SrRow { SRM_Start, SRM_Category, SRM_Practice, SRM_Times, SRM_How, SRM_Settings, SRM_Splits, SRM_LiveSplit, SRM_LsHideClock };
+const int kSrMainRows[]     = { SRM_Start, SRM_Category, SRM_Practice, SRM_Times, SRM_How, SRM_Settings };
+const int kSrSettingsRows[] = { SRM_Splits, SRM_LiveSplit, SRM_LsHideClock };
+const char* const kSrRowLabels[] = { "Start Run", "Category", "Practice", "Best Times", "How It Works", "Settings",
+                                     "Splits shown", "LiveSplit", "Hide game clock" };
+// Posición de una fila en la página principal (para volver a ella).
+int srMainIndex(int row)
+{
+    for (int i = 0; i < int(sizeof(kSrMainRows) / sizeof(kSrMainRows[0])); i++)
+        if (kSrMainRows[i] == row) return i;
+    return 0;
+}
+// Aviso de la exportación a LiveSplit, unos segundos en Best Times.
+char   sSrExportMsg[96] = "";
+Uint32 sSrExportMsgAt   = 0;
+
+bool sSrMenuOpen   = false;
+bool sSrMenuArmed  = false; // como New Game: espera a soltar lo que abrió el menú
+int  sSrMenuResult = PC_SPEEDRUN_MENU_PENDING;
+int  sSrPage       = SR_Menu;
+int  sSrSel        = 0;
+
+const int kSrPanelW = 560;
+const int kSrRowH   = 52;
+const int kSrBoxW   = 300;
+const int kSrBoxH   = 40;
+
+const int* srRows(int& count)
+{
+    if (sSrPage == SR_Settings) {
+        count = int(sizeof(kSrSettingsRows) / sizeof(kSrSettingsRows[0]));
+        return kSrSettingsRows;
+    }
+    count = int(sizeof(kSrMainRows) / sizeof(kSrMainRows[0]));
+    return kSrMainRows;
+}
+int srPanelH(int count) { return 84 + count * kSrRowH + 70; }
+int srRowY(int panelY, int i) { return panelY + 76 + i * kSrRowH; }
+
+void srCategoryStep(int dir)
+{
+    int c = sConfig.speedrunCategory;
+    c = (c + (dir < 0 ? PC_SR_CAT_COUNT - 1 : 1)) % PC_SR_CAT_COUNT;
+    sConfig.speedrunCategory = sPending.speedrunCategory = c;
+    saveConfig();
+}
+
+void srSplitsStep(int dir)
+{
+    int n = sConfig.speedrunSplitsShown;
+    n = dir < 0 ? std::max(1, n - 1) : dir > 0 ? std::min(10, n + 1) : n % 10 + 1;
+    sConfig.speedrunSplitsShown = sPending.speedrunSplitsShown = n;
+    saveConfig();
+}
+
+void pcSpeedrunMenuInput()
+{
+    if (!sSrMenuOpen) return;
+    if (!sSrMenuArmed) {
+        SDL_GameController* pad = pc_window_get_controller();
+        const bool padHeld = pad && (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)
+                                     || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B));
+        const Uint8* keys = SDL_GetKeyboardState(nullptr);
+        const bool keyHeld = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_ESCAPE]);
+        sTouchTapPending = false;
+        if (padHeld || keyHeld || sTouchFrameButtons != 0) return;
+        sSrMenuArmed = true;
+        pc_menu_edge_reset();
+        return;
+    }
+
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool xPress = keyWentDown(SDL_SCANCODE_X);
+    bool yPress = keyWentDown(SDL_SCANCODE_E);
+
+    left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    up     |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    down   |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+    xPress |= (sTouchFrameButtons & PAD_BUTTON_X) != 0;
+    yPress |= (sTouchFrameButtons & PAD_BUTTON_Y) != 0;
+
+    int count = 0;
+    const int* rows = srRows(count);
+    if (sTouchTapPending) {
+        sTouchTapPending = false;
+        // En las listas, un toque elige la fila; en la explicación, vuelve.
+        if (sSrPage != SR_Menu && sSrPage != SR_Settings) {
+            accept = true;
+        } else {
+            int sw, sh;
+            ngScreen(&sw, &sh);
+            const float y = sTouchTapY * sh;
+            const int panelY = sh / 2 - srPanelH(count) / 2;
+            for (int i = 0; i < count; i++) {
+                const float rowY = float(srRowY(panelY, i));
+                if (y >= rowY - 6.0f && y <= rowY + kSrBoxH + 6.0f) {
+                    sSrSel = i;
+                    accept = true;
+                }
+            }
+        }
+    }
+
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl) {
+        if (padNavLeft(ctl))  left   = true;
+        if (padNavRight(ctl)) right  = true;
+        if (padNavUp(ctl))    up     = true;
+        if (padNavDown(ctl))  down   = true;
+        if (promptPadA(ctl))  accept = true;
+        if (promptPadB(ctl))  cancel = true;
+        // X e Y del mando por flanco, como las demás pulsaciones.
+        static bool sPadXWas = false, sPadYWas = false;
+        const bool padX = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_X) != 0;
+        const bool padY = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_Y) != 0;
+        if (padX && !sPadXWas) xPress = true;
+        if (padY && !sPadYWas) yPress = true;
+        sPadXWas = padX;
+        sPadYWas = padY;
+    }
+
+    if (sSrPage == SR_How) {
+        if (accept || cancel) {
+            sSrPage = SR_Menu;
+            sSrSel  = srMainIndex(SRM_How);
+        }
+        return;
+    }
+    if (sSrPage == SR_Times) {
+        if (yPress) {
+            // Exportar los splits a LiveSplit; el resultado sale en la página.
+            char name[64];
+            if (pc_speedrun_export_lss(name, sizeof(name)))
+                snprintf(sSrExportMsg, sizeof(sSrExportMsg), "Saved save/speedrun/%s", name);
+            else
+                snprintf(sSrExportMsg, sizeof(sSrExportMsg), "Nothing to export: finish a run first");
+            sSrExportMsgAt = SDL_GetTicks();
+        } else if (xPress && pc_speedrun_has_pb()) {
+            sSrPage = SR_ConfirmReset;
+        } else if (accept || cancel) {
+            sSrPage = SR_Menu;
+            sSrSel  = srMainIndex(SRM_Times);
+        }
+        return;
+    }
+    if (sSrPage == SR_ConfirmReset) {
+        if (accept) {
+            pc_speedrun_reset_records();
+            sSrPage = SR_Times;
+        } else if (cancel) {
+            sSrPage = SR_Times;
+        }
+        return;
+    }
+
+    if (up)   sSrSel = (sSrSel + count - 1) % count;
+    if (down) sSrSel = (sSrSel + 1) % count;
+    const int row = rows[sSrSel];
+    if (row == SRM_Category && (left || right || accept)) {
+        srCategoryStep(left ? -1 : 1);
+        pc_speedrun_set_practice_day(0); // los puntos de práctica son de cada categoría
+    } else if (row == SRM_Practice && (left || right || accept)) {
+        // Off, día 1 y los días con punto de práctica.
+        pc_speedrun_set_practice_day(pc_speedrun_next_practice_day(pc_speedrun_practice_day(), left ? -1 : 1));
+    } else if (row == SRM_Splits && (left || right || accept)) {
+        srSplitsStep(left ? -1 : right ? 1 : 0);
+    } else if ((row == SRM_LiveSplit || row == SRM_LsHideClock) && (left || right || accept)) {
+        int& v = row == SRM_LiveSplit ? sConfig.speedrunLiveSplit : sConfig.speedrunLsHideClock;
+        v = !v;
+        (row == SRM_LiveSplit ? sPending.speedrunLiveSplit : sPending.speedrunLsHideClock) = v;
+        saveConfig();
+    } else if (accept) {
+        if (row == SRM_Start) {
+            sSrMenuResult = PC_SPEEDRUN_MENU_START;
+            sSrMenuOpen   = false;
+        } else if (row == SRM_How) {
+            sSrPage = SR_How;
+        } else if (row == SRM_Times) {
+            sSrPage = SR_Times;
+            sSrExportMsg[0] = '\0';
+        } else if (row == SRM_Settings) {
+            sSrPage = SR_Settings;
+            sSrSel  = 0;
+        }
+    } else if (cancel) {
+        if (sSrPage == SR_Settings) {
+            sSrPage = SR_Menu;
+            sSrSel  = srMainIndex(SRM_Settings);
+        } else {
+            sSrMenuResult = PC_SPEEDRUN_MENU_BACK;
+            sSrMenuOpen   = false;
+        }
+    }
+}
+
+// Texto centrado, una línea por cada '\n'. Devuelve la y siguiente.
+int srCenteredLines(int cx, int y, const char* text, Colour c, int lineH)
+{
+    for (const char* p = text; *p;) {
+        const char* end = std::strchr(p, '\n');
+        char line[160];
+        snprintf(line, sizeof(line), "%.*s", end ? (int)(end - p) : (int)std::strlen(p), p);
+        f1Text(cx - f1TextW(line, 12) / 2, y, line, c, 12, 18);
+        y += lineH;
+        p = end ? end + 1 : p + std::strlen(p);
+    }
+    return y;
+}
+
+// Best Times de la categoría: PB con sus splits (hasta tres columnas: una run
+// completa de Pikmin 2 lleva un split por día y por cueva), Sum of Best y las
+// últimas runs.
+void srDrawTimes(DGXGraphics* gfx, int screenW, int screenH, bool confirm)
+{
+    const int panelW = 720, panelH = 440;
+    const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    char header[64];
+    snprintf(header, sizeof(header), "Best Times: %s", pc_speedrun_category_name(pc_speedrun_category()));
+    drawPikminHeader(gfx, panelX, panelY, panelW, header);
+    const Colour title(255, 207, 75, 255), body(205, 239, 250, 255), dim(150, 170, 190, 255);
+    const int lx = panelX + 36, rx = panelX + panelW - 36;
+    auto right = [](int x, int y, const char* t, Colour c, int fw, int fh) { f1Text(x - f1TextW(t, fw), y, t, c, fw, fh); };
+    char buf[96], t[32];
+
+    if (!pc_speedrun_has_pb()) {
+        const char* none = "No finished runs yet.";
+        f1Text(panelX + panelW / 2 - f1TextW(none, 14) / 2, panelY + panelH / 2 - 20, none, body, 14, 20);
+    } else {
+        pc_speedrun_format_time(pc_speedrun_pb_ms(), t, sizeof(t));
+        f1Text(lx, panelY + 62, "Personal Best", title, 14, 20);
+        right(rx, panelY + 62, t, title, 14, 20);
+        if (pc_speedrun_category_is_challenge()) snprintf(buf, sizeof(buf), "%s", pc_speedrun_pb_date());
+        else snprintf(buf, sizeof(buf), "%d days   %s", pc_speedrun_pb_days(), pc_speedrun_pb_date());
+        f1Text(lx, panelY + 88, buf, dim, 10, 15);
+        pc_speedrun_format_time(pc_speedrun_sum_of_best(), t, sizeof(t));
+        snprintf(buf, sizeof(buf), "Sum of Best  %s", t);
+        right(rx, panelY + 88, buf, dim, 10, 15);
+
+        const int n = pc_speedrun_pb_split_count();
+        const int perCol = 12, cols = n > perCol * 2 ? 3 : n > perCol ? 2 : 1;
+        const int colW = (rx - lx) / (cols > 1 ? cols : 2);
+        for (int i = 0; i < n && i < perCol * 3; i++) {
+            const int cx = lx + (i / perCol) * colW, y = panelY + 114 + (i % perCol) * 16;
+            f1Text(cx, y, pc_speedrun_pb_split_name(i), body, 8, 13);
+            pc_speedrun_format_time(pc_speedrun_pb_split_ms(i), t, sizeof(t));
+            right(cx + colW - 12, y, t, body, 8, 13);
+        }
+        if (n > perCol * 3) {
+            snprintf(buf, sizeof(buf), "... %d more", n - perCol * 3);
+            right(rx, panelY + 114 + perCol * 16, buf, dim, 8, 13);
+        }
+
+        f1Text(lx, panelY + 322, "Recent Runs", title, 11, 16);
+        for (int i = 0; i < pc_speedrun_recent_count(); i++) {
+            unsigned long long ms = 0;
+            int days = 0;
+            const char* date = "";
+            pc_speedrun_recent(i, &ms, &days, &date);
+            pc_speedrun_format_time(ms, t, sizeof(t));
+            if (pc_speedrun_category_is_challenge()) snprintf(buf, sizeof(buf), "%s   %s", t, date);
+            else snprintf(buf, sizeof(buf), "%s   %dd   %s", t, days, date);
+            f1Text(lx + (i % 3) * ((rx - lx) / 3), panelY + 344 + (i / 3) * 18, buf, body, 8, 13);
+        }
+    }
+
+    if (confirm) {
+        drawHelpLine(panelX + panelW / 2, panelY + panelH - 46, "Erase all records of this category?    A: erase    B: keep",
+                     Colour(255, 160, 120, 255), panelW - 60);
+    } else if (sSrExportMsg[0] && SDL_GetTicks() - sSrExportMsgAt < 4000) {
+        drawHelpLine(panelX + panelW / 2, panelY + panelH - 46, sSrExportMsg, title, panelW - 60);
+    } else {
+        drawHelpLine(panelX + panelW / 2, panelY + panelH - 46,
+                     pc_speedrun_has_pb() ? "B: back    X: erase records    Y / E: export to LiveSplit" : "B: back",
+                     dim, panelW - 60);
+    }
+}
+} // namespace
+
+void pc_speedrun_menu_open(void)
+{
+    sSrMenuOpen   = true;
+    sSrMenuArmed  = false;
+    sSrMenuResult = PC_SPEEDRUN_MENU_PENDING;
+    sSrSel        = 0;
+    // La explicación se abre sola solo la primera vez.
+    sSrPage = sConfig.speedrunIntroHidden ? SR_Menu : SR_How;
+    if (!sConfig.speedrunIntroHidden) {
+        sConfig.speedrunIntroHidden = sPending.speedrunIntroHidden = 1;
+        saveConfig();
+    }
+    pc_menu_edge_reset();
+}
+
+bool pc_speedrun_menu_active(void) { return sSrMenuOpen; }
+
+int pc_speedrun_menu_result(void) { return sSrMenuResult; }
+
+void pc_speedrun_menu_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    if (!sSrMenuOpen) return;
+    if (!gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+
+    const Colour gold(255, 207, 75, 255);
+    const Colour pale(205, 239, 250, 255);
+    const Colour dim(150, 170, 190, 255);
+
+    if (sSrPage == SR_How) {
+        const int panelW = 640, panelH = 420;
+        const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2;
+        drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+        drawPikminHeader(gfx, panelX, panelY, panelW, "Speedrun");
+        srCenteredLines(panelX + panelW / 2, panelY + 70,
+                        "A real-time timer runs from New Game to the end\n"
+                        "of the category, loads included, with a split\n"
+                        "for every day and every cave.\n"
+                        "\n"
+                        "Everything plays like the original game: the\n"
+                        "gameplay mods in F1 are off, cutscenes only skip\n"
+                        "where they could on GameCube, and nothing is saved.\n"
+                        "\n"
+                        "Your best times are kept for each category, and\n"
+                        "Practice replays a single day from where a run got.",
+                        pale, 24);
+        drawHelpLine(panelX + panelW / 2, panelY + panelH - 46, "A / B: back", dim, panelW - 60);
+        return;
+    }
+    if (sSrPage == SR_Times || sSrPage == SR_ConfirmReset) {
+        srDrawTimes(gfx, screenW, screenH, sSrPage == SR_ConfirmReset);
+        return;
+    }
+
+    int count = 0;
+    const int* rows = srRows(count);
+    const int panelW = kSrPanelW, panelH = srPanelH(count);
+    const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, panelW, sSrPage == SR_Settings ? "Speedrun Settings" : "Speedrun");
+
+    for (int i = 0; i < count; i++) {
+        const int row  = rows[i];
+        const bool sel = i == sSrSel;
+        const int boxX = panelX + panelW / 2 - kSrBoxW / 2;
+        const int boxY = srRowY(panelY, i);
+        if (sel) f1Text(boxX - 16, boxY + 10, ">", gold, 14, 20);
+        if (pc_settings_p2d_active()) {
+            if (sel) pc_settings_p2d_plate(boxX, boxY, kSrBoxW, kSrBoxH, 2);
+            pc_settings_p2d_plate(boxX, boxY, kSrBoxW, kSrBoxH, 1);
+        } else {
+            const Colour fill = sel ? Colour(70, 92, 150, 240) : Colour(26, 30, 48, 220);
+            gfx->setColour(fill, true);
+            gfx->setAuxColour(fill);
+            gfx->fillRectangle(RectArea(boxX, boxY, boxX + kSrBoxW, boxY + kSrBoxH));
+        }
+        char label[64];
+        if (row == SRM_Start && pc_speedrun_practice_day() > 0) {
+            snprintf(label, sizeof(label), "Start Practice");
+        } else if (row == SRM_Category) {
+            snprintf(label, sizeof(label), "< %s >", pc_speedrun_category_name(sConfig.speedrunCategory));
+        } else if (row == SRM_Practice && pc_speedrun_practice_day() == 0) {
+            snprintf(label, sizeof(label), "%s: < Off >", kSrRowLabels[row]);
+        } else if (row == SRM_Practice) {
+            snprintf(label, sizeof(label), "%s: < Day %d >", kSrRowLabels[row], pc_speedrun_practice_day());
+        } else if (row == SRM_Splits) {
+            snprintf(label, sizeof(label), "%s: < %d >", kSrRowLabels[row], sConfig.speedrunSplitsShown);
+        } else if (row == SRM_LiveSplit) {
+            snprintf(label, sizeof(label), "%s: < %s >", kSrRowLabels[row],
+                     !sConfig.speedrunLiveSplit ? "Off" : pc_livesplit_connected() ? "Connected" : "Waiting");
+        } else if (row == SRM_LsHideClock) {
+            snprintf(label, sizeof(label), "%s: < %s >", kSrRowLabels[row], sConfig.speedrunLsHideClock ? "On" : "Off");
+        } else {
+            snprintf(label, sizeof(label), "%s", kSrRowLabels[row]);
+        }
+        const Colour tc = sel ? Colour(255, 255, 255, 255) : dim;
+        f1Text(boxX + kSrBoxW / 2 - f1TextW(label, 14) / 2, boxY + 10, label, tc, 14, 20);
+    }
+
+    const char* help = sSrPage == SR_Settings ? "Arrows: change    B: back"
+                                              : "Arrows: move    A: select    B: title screen";
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 46, help, dim, panelW - 60);
+}
+
 bool pc_captain_prompt_active(void) { return false; }
 #endif // !PIKI_P2_HOST (pantallas de Pikmin 1: permadeath, cooperativo, capitan)
 
@@ -4548,14 +6515,10 @@ bool pc_captain_prompt_active(void) { return false; }
 // aparece cuando hay alguno, como en Pikmin 3 y 4: un cero permanente se
 // vuelve ruido y se deja de mirar.
 static Uint32 sLastGameplayFrameMs = 0;
-static int sLockOnActive = 0;
-
-void pc_settings_note_lock_on(int hasTarget) {
-    sLockOnActive = hasTarget;
-}
 
 #if PIKI_P2_HOST
 void pc_p2_cheats_poll(void);
+void pc_p2_touch_context_poll(void);
 void pc_p2_count_idle_pikis(void);
 void pc_p2_trace_pikis(void);
 #endif
@@ -4570,34 +6533,13 @@ void pc_settings_note_gameplay_frame(void) {
     sLastGameplayFrameMs = SDL_GetTicks();
 #if PIKI_P2_HOST
     pc_p2_cheats_poll();    // zonas y cebollas (pc_p2_cheats.cpp)
+#if PIKI_PC_TOUCH
+    pc_p2_touch_context_poll(); // botones táctiles de contexto (pc_p2_cheats.cpp)
+#endif
     pc_p2_count_idle_pikis();
     pc_p2_trace_pikis();
     pc_achievements_poll(); // Pikmin 2: los logros salen de la partida (mira 1 vez/s)
 #endif
-}
-
-// Aviso de objetivo fijado. Provisional hasta que haya un anillo sobre el
-// enemigo: sin nada en pantalla no hay forma de saber si el mod responde.
-void pc_settings_draw_lock_on(void) {
-    PC_SETTINGS_HOST_ALLOC();
-    if (!sLockOnActive || !pc_settings_get_lock_on()) return;
-    if (sMenuOpen || pc_glass_menu_active()) return;
-    if (!gsys || !gsys->mDGXGfx) return;
-    if (sLastGameplayFrameMs == 0 || SDL_GetTicks() - sLastGameplayFrameMs > 250) return;
-
-    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
-    ensureFont();
-    if (!sFont) return;
-
-    const int screenW = gfx->mScreenWidth;
-    const int screenH = gfx->mScreenHeight;
-    PcSettingsP2DFrame nativeFrame(screenW, screenH);
-    Matrix4f ortho;
-    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
-
-    const char* txt = "LOCK ON";
-    drawTextOutline(screenW / 2 - menuTextWidth(txt) / 2, (int)(screenH * 0.12f),
-                    "%s", Colour(255, 90, 60, 255), Colour(30, 0, 0, 255), txt);
 }
 
 void pc_settings_draw_idle_counter(void) {
@@ -4616,8 +6558,10 @@ void pc_settings_draw_idle_counter(void) {
     ensureFont();
     if (!sFont) return;
 
-    const int screenW = gfx->mScreenWidth;
-    const int screenH = gfx->mScreenHeight;
+    // Tamaño real de la ventana, como el resto de capas (mScreenWidth es el
+    // del render y deformaba/encogía el texto).
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
     PcSettingsP2DFrame nativeFrame(screenW, screenH);
 
     Matrix4f ortho;
@@ -4627,9 +6571,19 @@ void pc_settings_draw_idle_counter(void) {
     snprintf(buf, sizeof(buf), "IDLE %d", idle);
     // Justo encima del total del HUD (la tercera cifra del contador), para
     // que se lea como una cifra más del bloque y no como un aviso suelto.
+#if PIKI_P2_HOST
+    // Pikmin 2: con la fuente del juego (atlas de P2), no la de consola de P1.
+    // Pegado al borde derecho (alineado por la derecha, con un margen).
+    const int fw = screenH / 40 > 15 ? screenH / 40 : 15;
+    const int fh = fw * 4 / 3;
+    const int x  = (int)(screenW * 0.975f) - f1TextW(buf, fw);
+    const int y  = (int)(screenH * 0.775f);
+    f1Text(x, y, buf, Colour(255, 207, 75, 255), fw, fh);
+#else
     const int x = (int)(screenW * 0.917f) - menuTextWidth(buf) / 2;
     const int y = (int)(screenH * 0.790f);
     drawTextOutline(x, y, "%s", Colour(255, 190, 28, 255), Colour(24, 12, 0, 255), buf);
+#endif
 }
 
 #if PIKI_P2_HOST
@@ -5127,7 +7081,7 @@ void pc_settings_draw_achievement_toast(void) {
     char head[48], title[96];
     if (id >= 0) {
         const PcAchievementInfo& info = pc_achievement_info(id);
-        snprintf(head, sizeof(head), "Achievement unlocked  (%d pts)", info.points);
+        snprintf(head, sizeof(head), "Achievement unlocked");
         snprintf(title, sizeof(title), "%s", info.title);
     } else {
         snprintf(head, sizeof(head), "Achievements");
@@ -5171,6 +7125,27 @@ void pc_settings_draw_achievement_toast(void) {
     }
     (void)screenH;
 }
+
+#if PIKI_P2_HOST
+// Pikmin 2: lo que se dibuja encima del juego (F1, avisos, ventanas) va en un
+// lote que se envía con las medidas del DGXGraphics del shim. En Android el F1
+// usa un lienzo del ancho de la pantalla y 400 de alto (f1Layout): las
+// medidas tienen que ser esas para todo el frame, o el menú sale descolocado.
+void pc_settings_p2_begin_frame(void) {
+#ifdef __ANDROID__
+    f1Layout();
+    if (gsys && gsys->mDGXGfx) {
+        DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+        // El selector de capitanes va siempre en 4:3 (640x480 centrado): su
+        // panel no cabe en el lienzo bajo del móvil y los modelos 3D de las
+        // tarjetas se colocan suponiendo ese 4:3.
+        const bool force43 = pc_captain_select_active();
+        gfx->mScreenWidth  = force43 ? 640 : kF1CanvasW;
+        gfx->mScreenHeight = force43 ? 480 : kF1CanvasH;
+    }
+#endif
+}
+#endif
 
 void pc_settings_draw(void) {
     PC_SETTINGS_HOST_ALLOC();
@@ -5599,38 +7574,49 @@ void pc_settings_draw(void) {
 }
 
 int pc_settings_get_fps_mode(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.fpsMode;
 }
 
 int pc_settings_get_chain_actions(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.chainActions;
 }
 
 int pc_settings_get_better_pathfinding(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.betterPathfinding;
 }
 
 int pc_settings_get_blues_only_water(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.bluesOnlyWater;
 }
 
 int pc_settings_get_idle_counter(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.idleCounter;
 }
 
+int pc_settings_get_fireflies(void) { return sConfig.fireflies; }
+
 int pc_settings_get_eternal_night(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.eternalNight;
 }
 
 int pc_settings_get_navi_health_pct(void) {
+    if (pc_speedrun_active()) return 100;
     return pc_hardmode_active() ? 100 : sConfig.naviHealthPct;
 }
 
 int pc_settings_get_teki_health_pct(void) {
+    if (pc_speedrun_active()) return 100;
     return pc_hardmode_active() ? 100 : sConfig.tekiHealthPct;
 }
 
 int pc_settings_get_infinite_day(void) {
+    if (pc_speedrun_active()) return 0;
     // VS: el día no avanza; la partida la cierra su propio reloj.
     if (pc_vs_active()) return 1;
     return pc_hardmode_active() ? 0 : sConfig.infiniteDay;
@@ -5639,49 +7625,61 @@ int pc_settings_get_infinite_day(void) {
 float pc_settings_get_free_camera_pad_scale(void) { return sConfig.freeCamPadPct / 100.0f; }
 
 int pc_settings_get_free_camera(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.freeCamera;
 }
 
 int pc_settings_get_whistle_radius_pct(void) {
+    if (pc_speedrun_active()) return 100;
     return sConfig.whistleRadiusPct;
 }
 
 float pc_settings_get_throw_speed_scale(void) {
+    if (pc_speedrun_active()) return 1.0f;
     return sConfig.throwSpeedPct / 100.0f;
 }
 
 int pc_settings_get_throw_cancel_b(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.throwCancelB;
 }
 
 int pc_settings_get_quick_grab(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.quickGrab;
 }
 
 int pc_settings_get_no_trip(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.noTrip;
 }
 
 int pc_settings_get_onion_step10(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.onionStep10;
 }
 
-int pc_settings_get_piki_invincible(void) { return pc_hardmode_active() ? 0 : sConfig.pikiInvincible; }
-int pc_settings_get_all_flowers(void) { return pc_hardmode_active() ? 0 : sConfig.allFlowers; }
-float pc_settings_get_carry_speed_scale(void) { return pc_hardmode_active() ? 1.0f : sConfig.carrySpeedPct / 100.0f; }
-float pc_settings_get_navi_speed_scale(void) { return pc_hardmode_active() ? 1.0f : sConfig.naviSpeedPct / 100.0f; }
-int pc_settings_get_unlock_zones(void) { return pc_hardmode_active() ? 0 : sConfig.unlockZones; }
-int pc_settings_get_no_day_advance(void) { return pc_hardmode_active() ? 0 : sConfig.noDayAdvance; }
-int pc_settings_get_all_onions(void) { return pc_hardmode_active() ? 0 : sConfig.allOnions; }
+int pc_settings_get_piki_invincible(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.pikiInvincible; }
+int pc_settings_get_all_flowers(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.allFlowers; }
+float pc_settings_get_carry_speed_scale(void) { if (pc_speedrun_active()) return 1.0f; return pc_hardmode_active() ? 1.0f : sConfig.carrySpeedPct / 100.0f; }
+float pc_settings_get_navi_speed_scale(void) { if (pc_speedrun_active()) return 1.0f; return pc_hardmode_active() ? 1.0f : sConfig.naviSpeedPct / 100.0f; }
+int pc_settings_get_unlock_zones(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.unlockZones; }
+int pc_settings_get_no_day_advance(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.noDayAdvance; }
+int pc_settings_get_all_onions(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.allOnions; }
 
 int pc_settings_get_instant_whistle(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.instantWhistle;
 }
+
+int pc_settings_get_whistle_pluck(void) { if (pc_speedrun_active()) return 0; return sConfig.whistlePluck; }
+int pc_settings_get_hide_olimar_text(void) { if (pc_speedrun_active()) return 0; return sConfig.hideOlimarText; }
 
 int pc_settings_get_gyro_enabled(void) {
 #ifdef __EMSCRIPTEN__
     return 0;
 #else
+    if (pc_speedrun_active()) return 0;
     return sConfig.gyroEnabled;
 #endif
 }
@@ -5708,14 +7706,17 @@ void pc_settings_set_gyro_bias(const float bias[3]) {
 }
 
 int pc_settings_get_lock_on(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.lockOn;
 }
 
 int pc_settings_get_throw_while_moving(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.throwWhileMoving;
 }
 
 int pc_settings_get_first_person(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.firstPerson;
 }
 
@@ -5725,12 +7726,12 @@ int pc_settings_get_first_person(void) {
 static int sFirstPersonActive[2] = { 0, 0 };
 
 int pc_first_person_active_for(int player) {
-    if (!sConfig.firstPerson) sFirstPersonActive[0] = sFirstPersonActive[1] = 0;
+    if (!pc_settings_get_first_person()) sFirstPersonActive[0] = sFirstPersonActive[1] = 0;
     return player == 1 ? sFirstPersonActive[1] : sFirstPersonActive[0];
 }
 
 void pc_first_person_toggle_for(int player) {
-    if (!sConfig.firstPerson) return;
+    if (!pc_settings_get_first_person()) return;
     int& fp = sFirstPersonActive[player == 1 ? 1 : 0];
     fp = !fp;
 }
@@ -5739,6 +7740,7 @@ int pc_first_person_active(void) { return pc_first_person_active_for(0); }
 void pc_first_person_toggle(void) { pc_first_person_toggle_for(0); }
 
 int pc_settings_get_charge(void) {
+    if (pc_speedrun_active()) return 0;
     // El charge no significa nada sin un objetivo fijado.
     return sConfig.lockOn ? sConfig.charge : 0;
 }
@@ -5751,14 +7753,17 @@ float pc_mods_teki_damage(float damage) {
 }
 
 int pc_settings_get_hold_to_pluck(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.holdToPluck;
 }
 
 int pc_settings_get_mouse_wheel_action(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.mouseWheelAction;
 }
 
 int pc_settings_get_piki_limit(void) {
+    if (pc_speedrun_active()) return 100;
     if (pc_hardmode_active() && sConfig.pikiLimit > PC_HARDMODE_PIKI_LIMIT)
         return PC_HARDMODE_PIKI_LIMIT;
 #if PIKI_P2_HOST
@@ -5769,6 +7774,7 @@ int pc_settings_get_piki_limit(void) {
 }
 
 int pc_settings_get_day_minutes(void) {
+    if (pc_speedrun_active()) return 0;
     if (pc_hardmode_active() && (sConfig.dayMinutes == 0 || sConfig.dayMinutes > PC_HARDMODE_DAY_MINUTES))
         return PC_HARDMODE_DAY_MINUTES;
     return sConfig.dayMinutes;
@@ -5803,8 +7809,51 @@ int pc_settings_get_hd_model_enabled(int row) {
     return row < 0 || row >= 6 || !(sConfig.hdModelsDisabled & (1 << row));
 }
 
+int pc_settings_get_speedrun_category(void) { return sConfig.speedrunCategory; }
+int pc_settings_get_speedrun_splits_shown(void) { return sConfig.speedrunSplitsShown; }
+int pc_settings_get_speedrun_livesplit(void) { return sConfig.speedrunLiveSplit; }
+int pc_settings_get_speedrun_ls_hide_clock(void) { return sConfig.speedrunLsHideClock; }
+const char* pc_settings_get_speedrun_ls_host(void) { return sConfig.speedrunLsHost; }
+int pc_settings_get_speedrun_ls_port(void) { return sConfig.speedrunLsPort; }
+
 int pc_settings_get_debug_keys(void) {
+    if (pc_speedrun_active()) return 0;
     return sConfig.debugKeys;
+}
+
+void pc_settings_record_original_look(int original) {
+    // Copia de lo que había antes de pasar al aspecto original; se repone tal cual.
+    static PcConfig sBefore;
+    static bool sInOriginal = false;
+    if (original && !sInOriginal) {
+        sBefore = sConfig;
+        sConfig.shadows = 0;
+        sConfig.ssao = 0;
+        sConfig.bloom = 0;
+        sConfig.dof = 0;
+        sConfig.antialiasing = 0;
+        sConfig.perPixelLighting = 0;
+        sConfig.anisotropy = 0;
+        sConfig.colourGrading = 0;
+        sConfig.fog = 1;
+        sConfig.hdModelsDisabled = 0x3F; // todas las filas del selector de modelos HD
+        sInOriginal = true;
+    } else if (!original && sInOriginal) {
+        sConfig.shadows = sBefore.shadows;
+        sConfig.ssao = sBefore.ssao;
+        sConfig.bloom = sBefore.bloom;
+        sConfig.dof = sBefore.dof;
+        sConfig.antialiasing = sBefore.antialiasing;
+        sConfig.perPixelLighting = sBefore.perPixelLighting;
+        sConfig.anisotropy = sBefore.anisotropy;
+        sConfig.colourGrading = sBefore.colourGrading;
+        sConfig.fog = sBefore.fog;
+        sConfig.hdModelsDisabled = sBefore.hdModelsDisabled;
+        sInOriginal = false;
+    }
+    applyGraphics(sConfig);
+    fprintf(stderr, "[RECORD] graphics: %s\n", sInOriginal ? "original" : "Open Nectar");
+    fflush(stderr);
 }
 
 // ---------------------------------------------------------------------------
@@ -5854,7 +7903,7 @@ const char* pc_settings_group_summary(int group) {
 #ifdef __EMSCRIPTEN__
     case PC_SET_GROUP_DATA: return "Export or restore saves, reset settings";
 #else
-    case PC_SET_GROUP_DATA: return "Save transfer, reset settings";
+    case PC_SET_GROUP_DATA: return "Saves, reset settings";
 #endif
     case PC_SET_GROUP_ACHIEVEMENTS: return "Unlocked achievements and how to get the rest";
     default: return "";
@@ -5870,14 +7919,14 @@ void graphicsRowValue(int i, char* value, size_t n) {
     const char* levels[4] = { "Off", "Subtle", "Normal", "Strong" };
     auto level = [&](int v) { return levels[(v >= 0 && v <= 3) ? v : 0]; };
     switch (i) {
-    case 0: snprintf(value, n, "%s", sPending.antialiasing ? "FXAA" : "Off"); break;
+    case 0: snprintf(value, n, "%s", sPending.antialiasing ? "On" : "Off"); break;
     case 1: snprintf(value, n, "%s", sPending.fog ? "On  (original)" : "Off"); break;
     case 2: snprintf(value, n, "%s", level(sPending.bloom)); break;
     case 3: snprintf(value, n, "%s", level(sPending.ssao)); break;
     case 4: snprintf(value, n, "%s", level(sPending.dof)); break;
     case 5:
-        if (sPending.anisotropy <= 1) snprintf(value, n, "Trilinear");
-        else snprintf(value, n, "Anisotropic %dx", sPending.anisotropy);
+        if (sPending.anisotropy <= 1) snprintf(value, n, "Standard");
+        else snprintf(value, n, "Sharp %dx", sPending.anisotropy);
         break;
     case 6: snprintf(value, n, "%s", gradingOn ? "On" : "Off"); break;
     case 7: if (!gradingOn) snprintf(value, n, "--"); else snprintf(value, n, sPending.gamma == 1.0f ? "%.2f  (neutral)" : "%.2f", sPending.gamma); break;
@@ -5897,7 +7946,7 @@ void graphicsRowValue(int i, char* value, size_t n) {
         snprintf(value, n, "%d / %d files  >", installed, (int)PC_HD_MODEL_COUNT);
         break;
     }
-    case 12: snprintf(value, n, "%s", sPending.perPixelLighting ? "Per-pixel" : "Per-vertex (original)"); break;
+    case 12: snprintf(value, n, "%s", sPending.perPixelLighting ? "Smooth" : "Original"); break;
     case 13: {
         const char* names[4] = { "Off (original)", "Soft", "Normal", "Strong" };
         snprintf(value, n, "%s", names[(sPending.shadows >= 0 && sPending.shadows <= 3) ? sPending.shadows : 0]);
@@ -5937,6 +7986,7 @@ void modsRowValue(int i, char* value, size_t n) {
     case 9: snprintf(value, n, "%s", sPending.bluesOnlyWater ? "On" : "Off (original)"); break;
     case 10: snprintf(value, n, "%s", sPending.idleCounter ? "On" : "Off (original)"); break;
     case 40: snprintf(value, n, "%s", sPending.eternalNight ? "On" : "Off (original)"); break;
+    case 41: snprintf(value, n, "%s", sPending.fireflies ? "On" : "Off (original)"); break;
     case 11: healthPctLabel(sPending.naviHealthPct, "Infinite", value, n); break;
     case 12: healthPctLabel(sPending.tekiHealthPct, "Insta Kill", value, n); break;
     case 13:
@@ -5944,7 +7994,7 @@ void modsRowValue(int i, char* value, size_t n) {
         else snprintf(value, n, "%s", sPending.infiniteDay ? "On" : "Off (original)");
         break;
     case 14: snprintf(value, n, "%s", sPending.freeCamera ? "On" : "Off (original)"); break;
-    case 15: snprintf(value, n, "%s", sPending.lockOn ? "On" : "Off (original)"); break;
+    case 15: snprintf(value, n, "%s", sPending.lockOn == 2 ? "Automatic" : sPending.lockOn == 1 ? "Manual" : "Off (original)"); break;
     case 16:
         if (!sPending.lockOn) snprintf(value, n, "Needs Lock-On");
         else snprintf(value, n, "%s", sPending.charge ? "On" : "Off (original)");
@@ -5960,6 +8010,8 @@ void modsRowValue(int i, char* value, size_t n) {
     case 23: snprintf(value, n, "%s", sPending.noTrip ? "On" : "Off (original)"); break;
     case 24: snprintf(value, n, "%s", sPending.onionStep10 ? "On" : "Off (original)"); break;
     case 25: snprintf(value, n, "%s", sPending.instantWhistle ? "On" : "Off (original)"); break;
+    case 34: snprintf(value, n, "%s", sPending.whistlePluck ? "On" : "Off (original)"); break;
+    case 36: snprintf(value, n, "%s", sPending.hideOlimarText ? "On" : "Off (original)"); break;
     case 28: speedPctLabel(sPending.carrySpeedPct, value, n); break;
     case 29: speedPctLabel(sPending.naviSpeedPct, value, n); break;
     case 26: case 27: case 30: case 31: case 32: {
@@ -6038,102 +8090,105 @@ const GroupRow kDisplayRows[] = {
     { SRC_MAIN, ROW_DISPLAY_MODE, "Fullscreen", "Enter or leave browser fullscreen. Escape leaves it." },
     { SRC_MAIN, ROW_RESOLUTION, "Render Resolution", "Internal render size. The canvas follows the browser window." },
 #else
-    { SRC_MAIN, ROW_DISPLAY_MODE, "Display Mode", "Windowed, exclusive fullscreen, or a borderless window at desktop size." },
-    { SRC_MAIN, ROW_RESOLUTION, "Resolution", "Window or fullscreen size. A opens the full list; Left/Right steps through it." },
+    { SRC_MAIN, ROW_DISPLAY_MODE, "Display Mode", "Windowed, fullscreen, or a borderless window that fills the screen." },
+    { SRC_MAIN, ROW_RESOLUTION, "Resolution", "Size of the window or the fullscreen picture. A: full list. Left/Right: next size." },
 #endif
-    { SRC_MAIN, ROW_ASPECT_RATIO, "Aspect Ratio", "Auto fills the window. The others keep that shape and add bars." },
-    { SRC_MAIN, ROW_RENDER_SCALE, "3D Resolution", "Detail of the 3D scene. Higher is sharper, lower is faster." },
+    { SRC_MAIN, ROW_ASPECT_RATIO, "Aspect Ratio", "Auto fills the window. The others keep that shape and add black bars." },
+    { SRC_MAIN, ROW_RENDER_SCALE, "3D Resolution", "Detail of the 3D world. Higher looks sharper, lower runs faster." },
 #ifndef __EMSCRIPTEN__
-    { SRC_MAIN, ROW_REFRESH_RATE, "Refresh Rate", "Fullscreen refresh rate. Auto keeps the monitor's current rate." },
-    { SRC_MAIN, ROW_VSYNC, "Frame Sync (VSync)", "Waits for the monitor between frames. Stops tearing, adds a little lag." },
+    { SRC_MAIN, ROW_REFRESH_RATE, "Refresh Rate", "How often the screen updates in fullscreen. Auto keeps your monitor's setting." },
+    { SRC_MAIN, ROW_VSYNC, "Frame Sync (VSync)", "Waits for the screen before showing each frame. Stops tearing (a picture split in two), adds a little input delay." },
 #endif
-    { SRC_MAIN, ROW_FPS_MODE, "FPS Mode", "30 is the original and the most stable. 60 and 120 are smoother but experimental." },
+    { SRC_MAIN, ROW_FPS_MODE, "FPS Mode", "Frames per second. 30 is the original and the most stable. 60, 120 and Monitor (your screen's refresh rate) are smoother but experimental." },
 #if defined(VERSION_GPIP01)
     { SRC_MAIN, ROW_LANGUAGE, "Language", "Language of the game's text. Takes effect after a restart." },
 #endif
 };
 
 const GroupRow kGraphicsRows[] = {
-    { SRC_GFX, 0, "Antialiasing", "Smooths jagged edges (FXAA). Small performance cost." },
-    { SRC_GFX, 5, "Texture Filtering", "Keeps textures sharp at steep angles. Anisotropic costs a little GPU." },
-    { SRC_GFX, 12, "Lighting", "Per-pixel gives smoother light on models than the original per-vertex." },
+    { SRC_GFX, 0, "Antialiasing", "Smooths jagged edges on characters and scenery. Small performance cost." },
+    { SRC_GFX, 5, "Texture Filtering", "Keeps the ground and walls sharp when seen at an angle. Higher costs a little performance." },
+    { SRC_GFX, 12, "Lighting", "Smooth: softer, more detailed light on characters. Original: as on GameCube." },
     { SRC_GFX, 13, "Shadows", "Real-time shadows cast by characters and objects." },
     { SRC_GFX, 1, "Fog", "The game's own distance fog. On is how the original looks." },
-    { SRC_GFX, 2, "Bloom", "Soft glow around bright areas." },
-    { SRC_GFX, 3, "Ambient Occlusion", "Contact shadows in corners and under objects." },
-    { SRC_GFX, 4, "Depth of Field", "Blurs the far distance so the action stands out." },
-    { SRC_GFX, 6, "Colour Grading", "Turns on the Gamma, Brightness and Saturation controls below." },
-    { SRC_GFX, 7, "Gamma", "Brightness of the mid-tones. 1.00 is neutral." },
-    { SRC_GFX, 8, "Brightness", "Lifts or darkens the whole image. 0.00 is neutral." },
-    { SRC_GFX, 9, "Saturation", "Colour intensity. 1.00 is neutral, 0.00 is black and white." },
+    { SRC_GFX, 2, "Bloom", "Soft glow around bright lights and bright areas." },
+    { SRC_GFX, 3, "Ambient Occlusion", "Soft shadows in corners and where objects meet the ground." },
+    { SRC_GFX, 4, "Depth of Field", "Blurs the far distance so what is close to you stands out." },
+    { SRC_GFX, 6, "Colour Adjustments", "Turns on the Gamma, Brightness and Saturation sliders below. Off shows the original colours." },
+    { SRC_GFX, 7, "Gamma", "Lightens or darkens the middle shades, leaving the darkest and brightest parts alone. 1.00 is neutral." },
+    { SRC_GFX, 8, "Brightness", "Makes the whole picture lighter or darker. 0.00 is neutral." },
+    { SRC_GFX, 9, "Saturation", "Colour strength. 1.00 is neutral, 0.00 is black and white." },
 #ifdef __EMSCRIPTEN__
     { SRC_GFX, 10, "Texture Packs", "Choose a texture pack ZIP. Installs and applies without restarting." },
 #else
-    { SRC_GFX, 10, "Texture Packs", "Install or switch replacement texture packs. Needs a restart." },
+    { SRC_GFX, 10, "Texture Packs", "Replacement textures made by the community. Install one from its zip or switch between them. Changes need a restart." },
 #endif
 #if !PIKI_P2_HOST // los modelos HD son de Pikmin 1
-    { SRC_GFX, 11, "HD Models", "Install HD character models from their zips. Needs a restart." },
+    { SRC_GFX, 11, "HD Models", "High-detail character models. Install each one from its zip, then turn it On or Off." },
 #endif
 };
 
 const GroupRow kControlsRows[] = {
 #if PIKI_P2_HOST
-    { SRC_MODS, 0, "Control Scheme", "Classic: the stick moves the cursor, as on GameCube. Mouse Cursor: aim with the mouse." },
-    { SRC_ADV, 0, "Mouse Sensitivity", "How far the cursor moves for each movement of the mouse." },
-    { SRC_MODS, 3, "Mouse Wheel", "What the wheel does: change the colour of the Pikmin in hand, or zoom the camera." },
-    { SRC_MODS, 2, "Hold to Pluck", "Keep the button held to pluck sprouts one after another." },
-    { SRC_MODS, 22, "Cancel Throw With B", "While holding a Pikmin with A, press B to put it back in the squad." },
-    { SRC_MODS, 33, "Quick Grab", "Any Pikmin in the squad goes straight to the captain's hand, however far behind it is." },
-    { SRC_MODS, 24, "Onion: Y for Steps of 10", "In the Onion menu, hold Y while moving up or down to move 10 Pikmin at a time." },
-    { SRC_MODS, 15, "Lock-On", "Target the enemy under the cursor with the Lock-On button (R / R3). Press again to release." },
-    { SRC_ADV, 1, "Stick Dead Zone", "Ignores small stick movements. Raise it if a worn stick drifts." },
-    { SRC_ADV, 2, "Stick Invert (X/Y)", "Inverts the movement stick." },
-    { SRC_ADV, 3, "C-Stick Invert (X/Y)", "Inverts the right stick (C-Stick)." },
-    { SRC_ADV, 4, "Gyro Aiming", "Aim the cursor by turning a gyro pad or the phone. In first person it looks around." },
-    { SRC_ADV, 5, "Gyro Sensitivity", "How far the cursor moves when you turn the pad." },
-    { SRC_ADV, 6, "Gyro Invert (X/Y)", "Inverts gyro aiming: none, horizontal, vertical or both." },
-    { SRC_ADV, 7, "Gyro Calibrate", "Put the pad or phone down, keep it still and press A. Fixes a drifting cursor." },
-    { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of the captain. A: assign it." },
-    { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key, Right: second key, Left: defaults. While waiting, Del clears the slot. Shift, Ctrl and Alt can be bound." },
-    { SRC_PADS, 0, "Gamepad Bindings", "Choose the pad button for each action." },
+    { SRC_MODS, 0, "Control Scheme", "Classic: the stick moves the cursor, as on GameCube. Mouse Cursor: aim the cursor with the mouse." },
+    { SRC_ADV, 0, "Mouse Sensitivity", "How far the cursor moves when you move the mouse." },
+    { SRC_MODS, 3, "Mouse Wheel", "What the mouse wheel does: change the colour of the Pikmin in hand, or zoom the camera." },
+    { SRC_MODS, 2, "Hold to Pluck", "Hold the pluck button to pull up sprouts one after another." },
+    { SRC_MODS, 22, "Cancel a Throw", "While holding a Pikmin ready to throw, press B (the cancel button) to put it back in the squad." },
+    { SRC_MODS, 33, "Quick Grab", "Any Pikmin in the squad jumps straight into the captain's hand, however far behind it is." },
+    { SRC_MODS, 24, "Onion: Move 10 at a Time", "In the Onion menu, hold Y while pressing up or down to move 10 Pikmin at a time." },
+    { SRC_MODS, 15, "Lock-On", "Automatic: locks onto the nearest enemy or object as you approach. Manual: press the Lock-On button (set it in Controls)." },
+    { SRC_MODS, 16, "Charge", "With a target locked, send the whole squad at it." },
+    { SRC_ADV, 1, "Stick Dead Zone", "Ignores tiny stick movements. Raise it if the cursor or the captain moves on its own (stick drift)." },
+    { SRC_ADV, 2, "Stick Invert", "Flips the movement stick: horizontal, vertical or both." },
+    { SRC_ADV, 3, "Camera Stick Invert", "Flips the right stick (the GameCube C-Stick): horizontal, vertical or both." },
+    { SRC_ADV, 4, "Gyro Aiming", "Aim the cursor by tilting a controller with motion sensors, or your phone. In first person it looks around." },
+    { SRC_ADV, 5, "Gyro Sensitivity", "How far the cursor moves when you tilt the controller." },
+    { SRC_ADV, 6, "Gyro Invert", "Flips gyro aiming: none, horizontal, vertical or both." },
+    { SRC_ADV, 7, "Gyro Calibrate", "Put the controller or phone down, keep it still and press A. Fixes a cursor that drifts on its own." },
+    { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of the captain. A: choose the button." },
+    { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key. Right: second key. Left: back to default. While waiting, Delete clears it. Shift, Ctrl and Alt can be used." },
+    { SRC_PADS, 0, "Controller Bindings", "Choose the controller button for each action." },
 #else
-    { SRC_MODS, 0, "Control Scheme", "Classic: the stick moves the cursor, as on GameCube. Mouse Cursor: aim with the mouse." },
-    { SRC_ADV, 0, "Mouse Sensitivity", "How far the cursor moves for each movement of the mouse." },
+    { SRC_MODS, 0, "Control Scheme", "Classic: the stick moves the cursor, as on GameCube. Mouse Cursor: aim the cursor with the mouse." },
+    { SRC_ADV, 0, "Mouse Sensitivity", "How far the cursor moves when you move the mouse." },
     { SRC_MODS, 3, "Mouse Wheel", "What the wheel does: change the Pikmin colour to throw, or zoom the camera." },
-    { SRC_MODS, 2, "Hold to Pluck", "Keep the button held to pluck sprouts one after another." },
+    { SRC_MODS, 2, "Hold to Pluck", "Hold the pluck button to pull up sprouts one after another." },
     { SRC_MODS, 34, "Whistle Pluck", "Hold the whistle over sprouts to pluck them one after another." },
     { SRC_MODS, 17, "Throw While Moving", "Throw Pikmin while running, instead of Olimar stopping first." },
-    { SRC_MODS, 22, "Cancel Throw With B", "While holding a Pikmin with A, press B to put it back in the squad." },
+    { SRC_MODS, 22, "Cancel a Throw", "While holding a Pikmin ready to throw, press B (the cancel button) to put it back in the squad." },
     { SRC_MODS, 33, "Quick Grab", "The Pikmin to throw appears in Olimar's hand at once, so throwing is just as fast with the squad behind him." },
     { SRC_MODS, 39, "Pikmin 2 Selection", "D-pad as in Pikmin 2: Left/Right keeps the chosen colour for every throw, and with A held Up/Down picks leaf, bud, flower or a Yellow with a bomb rock. Off: Left/Right only picks the next throw." },
-    { SRC_MODS, 24, "Onion: Y for Steps of 10", "In the Onion menu, hold Y while moving up or down to move 10 Pikmin at a time." },
+    { SRC_MODS, 24, "Onion: Move 10 at a Time", "In the Onion menu, hold Y while pressing up or down to move 10 Pikmin at a time." },
     { SRC_MODS, 35, "Bomb Control", "Bomb button (B / assign on a pad): a Yellow with a bomb rock throws it at the cursor, or drops it lit at its feet if the cursor is too close. Ones already thrown go first." },
-    { SRC_MODS, 15, "Lock-On", "Automatic: locks onto the nearest enemy or object as you approach. Manual: lock with the Lock-On button (bindable in Controls)." },
+    { SRC_MODS, 15, "Lock-On", "Automatic: locks onto the nearest enemy or object as you approach. Manual: press the Lock-On button (set it in Controls)." },
     { SRC_MODS, 16, "Charge", "With a target locked, send the whole squad at it." },
-    { SRC_ADV, 1, "Stick Dead Zone", "Ignores small stick movements. Raise it if a worn stick drifts." },
-    { SRC_ADV, 2, "Stick Invert (X/Y)", "Inverts the movement stick." },
-    { SRC_ADV, 3, "C-Stick Invert (X/Y)", "Inverts the right stick (C-Stick)." },
+    { SRC_ADV, 1, "Stick Dead Zone", "Ignores tiny stick movements. Raise it if the cursor or the captain moves on its own (stick drift)." },
+    { SRC_ADV, 2, "Stick Invert", "Flips the movement stick: horizontal, vertical or both." },
+    { SRC_ADV, 3, "Camera Stick Invert", "Flips the right stick (the GameCube C-Stick): horizontal, vertical or both." },
 #ifndef __EMSCRIPTEN__
-    { SRC_ADV, 4, "Gyro Aiming", "Aim the cursor by turning a gyro pad or the phone. In first person it looks around." },
-    { SRC_ADV, 5, "Gyro Sensitivity", "How far the cursor moves when you turn the pad." },
-    { SRC_ADV, 6, "Gyro Invert (X/Y)", "Inverts gyro aiming: none, horizontal, vertical or both." },
-    { SRC_ADV, 7, "Gyro Calibrate", "Put the pad or phone down, keep it still and press A. Fixes a drifting cursor." },
-    { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of Olimar. A: assign it." },
+    { SRC_ADV, 4, "Gyro Aiming", "Aim the cursor by tilting a controller with motion sensors, or your phone. In first person it looks around." },
+    { SRC_ADV, 5, "Gyro Sensitivity", "How far the cursor moves when you tilt the controller." },
+    { SRC_ADV, 6, "Gyro Invert", "Flips gyro aiming: none, horizontal, vertical or both." },
+    { SRC_ADV, 7, "Gyro Calibrate", "Put the controller or phone down, keep it still and press A. Fixes a cursor that drifts on its own." },
+    { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of the captain. A: choose the button." },
 #endif
-    { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key, Right: second key, Left: defaults. While waiting, Del clears the slot. Shift, Ctrl and Alt can be bound." },
-    { SRC_PADS, 0, "Gamepad Bindings", "Choose the pad button for each action." },
+    { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key. Right: second key. Left: back to default. While waiting, Delete clears it. Shift, Ctrl and Alt can be used." },
+    { SRC_PADS, 0, "Controller Bindings", "Choose the controller button for each action." },
 #endif
 };
 
 const GroupRow kCameraRows[] = {
 #if PIKI_P2_HOST
-    { SRC_MODS, 14, "Free Camera", "Turn the camera with the mouse or right stick, as in Pikmin 3. Swarm gets its own button." },
-    { SRC_MODS, 38, "Free Camera Pad Sensitivity", "How fast the right stick turns the free camera on a controller. 100% is the default." },
-    { SRC_MODS, 18, "First Person", "Allows a view from the captain's helmet. Switch in game with its button (V / L3)." },
+    { SRC_MODS, 14, "Free Camera", "Turn the camera freely, as in Pikmin 3. Mouse: push the cursor against the edge of its circle. Controller: right stick. L puts the camera back behind the captain. Swarming moves to its own Swarm button: bind it in Controls (on the pad every D-pad direction is a Pikmin 2 action)." },
+    { SRC_MODS, 38, "Free Camera Speed", "How fast the right stick turns the free camera. 100% is the default." },
+    { SRC_MODS, 18, "First Person", "Look at the world from inside the captain's helmet. Switch in game with the First Person button (V on keyboard, L3 on a controller)." },
+    { SRC_MODS, 6, "Co-op Split Screen", "How the screen divides in two-player co-op (Coop on the title screen). 2-Player Battle keeps its own top/bottom split." },
+    { SRC_MODS, 7, "Co-op Merged Camera", "Joins both halves into one view while the captains are close, and splits smoothly when they move apart." },
 #else
-    { SRC_MODS, 14, "Free Camera", "Turn the camera as in Pikmin 3: hold Left Shift and move the mouse, or use the right stick on a controller. Swarm gets its own button." },
-    { SRC_MODS, 38, "Free Camera Pad Sensitivity", "How fast the right stick turns the free camera on a controller. 100% is the default." },
-    { SRC_MODS, 18, "First Person", "Allows a view from Olimar's helmet. Switch in game with its button (V / L3)." },
+    { SRC_MODS, 14, "Free Camera", "Turn the camera freely, as in Pikmin 3. Mouse: push the cursor against the edge of its circle. Controller: right stick. L puts the camera back behind the captain. Swarming moves to its own Swarm button: bind it in Controls (on the pad every D-pad direction is a Pikmin 2 action)." },
+    { SRC_MODS, 38, "Free Camera Speed", "How fast the right stick turns the free camera. 100% is the default." },
+    { SRC_MODS, 18, "First Person", "Look at the world from inside the captain's helmet. Switch in game with the First Person button (V on keyboard, L3 on a controller)." },
     { SRC_MODS, 6, "Co-op Split Screen", "How the screen divides in two-player co-op." },
     { SRC_MODS, 7, "Co-op Merged Camera", "Joins both halves into one view while the captains are close." },
 #endif
@@ -6141,18 +8196,21 @@ const GroupRow kCameraRows[] = {
 
 const GroupRow kGameplayRows[] = {
 #if PIKI_P2_HOST
+    { SRC_MODS, 34, "Whistle Pluck", "Hold the whistle over sprouts to pluck them one after another." },
+    { SRC_MODS, 36, "Hide Drake Texts", "Cutscene texts in story mode fly by and advance on their own." },
     { SRC_MODS, 25, "Instant Whistle Response", "Whistled Pikmin join the squad at once, without stopping to turn and look first." },
     { SRC_MODS, 23, "No Tripping", "Pikmin running in the squad never trip and fall behind." },
-    { SRC_MODS, 40, "Eternal Night", "Always night above ground, whatever the day length. Fireflies fly around the field." },
-    { SRC_MODS, 10, "Idle Pikmin Counter", "Shows how many Pikmin are standing idle." },
+    { SRC_MODS, 40, "Eternal Night", "Always night above ground, whatever the day length." },
+    { SRC_MODS, 41, "Fireflies", "Fireflies drift around the field, by day or by night." },
+    { SRC_MODS, 10, "Idle Pikmin Counter", "Shows how many Pikmin are standing around with nothing to do." },
 #else
     { SRC_MODS, 25, "Instant Whistle Response", "Whistled Pikmin join the squad at once, without stopping to turn and look first." },
     { SRC_MODS, 1, "Chain Pikmin Actions", "Pikmin that finish a task go on to the next one nearby." },
-    { SRC_MODS, 8, "Better Pathfinding", "Gets Pikmin moving again when they stall on their route." },
+    { SRC_MODS, 8, "Better Pathfinding", "Smarter Pikmin: a carrying team that gets stuck finds a new route even when it is not against a wall, and thrown Pikmin with nothing to do run back to the squad." },
     { SRC_MODS, 9, "Blues Only In Water", "Only blue Pikmin walk into water on their own." },
     { SRC_MODS, 23, "No Tripping", "Pikmin running in the squad never trip and fall behind." },
     { SRC_MODS, 40, "Eternal Night", "Always night, whatever the day length: night lighting, and the moon crosses the day bar instead of the sun." },
-    { SRC_MODS, 10, "Idle Pikmin Counter", "Shows how many Pikmin are standing idle." },
+    { SRC_MODS, 10, "Idle Pikmin Counter", "Shows how many Pikmin are standing around with nothing to do." },
     { SRC_MODS, 36, "Hide Olimar's Texts", "Skip the text boxes Olimar shows while you play: first Pikmin, ship parts, tips. The ending texts stay." },
 #endif
 };
@@ -6164,7 +8222,7 @@ const GroupRow kCheatsRows[] = {
     { SRC_MODS, 11, "Captain Health", "The captains' toughness, as a share of the original." },
     { SRC_MODS, 12, "Enemy Health", "Enemy toughness, as a share of the original." },
     { SRC_MODS, 4, "Pikmin Limit", "Most Pikmin on the field at once, up to 500. 100 is the original; more costs performance." },
-    { SRC_MODS, 21, "Throw Speed", "Speed of the captain's grab and throw, so how fast you can throw. 100% is the original." },
+    { SRC_MODS, 21, "Throw Speed", "How fast the captain grabs and throws Pikmin. 100% is the original." },
     { SRC_MODS, 20, "Whistle Radius", "Size of the whistle circle at full charge. 100% is the original." },
     { SRC_MODS, 26, "Invincible Pikmin", "Pikmin never die: no attacks, fire, water, gas, electricity, bombs or crushing." },
     { SRC_MODS, 27, "All Flowers", "Every coloured Pikmin wears a flower (Bulbmin have none)." },
@@ -6178,7 +8236,7 @@ const GroupRow kCheatsRows[] = {
     { SRC_MODS, 11, "Olimar Health", "Olimar's toughness, as a share of the original. Infinite takes no damage." },
     { SRC_MODS, 12, "Enemy Health", "Enemy toughness, as a share of the original. Insta Kill drops them in one hit." },
     { SRC_MODS, 4, "Pikmin Limit", "Most Pikmin on the field at once. 100 is the original; more costs performance." },
-    { SRC_MODS, 21, "Throw Speed", "Speed of Olimar's grab and throw, so how fast you can throw. 100% is the original." },
+    { SRC_MODS, 21, "Throw Speed", "How fast the captain grabs and throws Pikmin. 100% is the original." },
     { SRC_MODS, 20, "Whistle Radius", "Size of the whistle circle at full charge. 100% is the original." },
     { SRC_MODS, 26, "Invincible Pikmin", "Pikmin never die: no attacks, fire, water, gas or crushing." },
     { SRC_MODS, 27, "All Flowers", "Every Pikmin grows a flower as soon as it is plucked or born." },
@@ -6192,7 +8250,7 @@ const GroupRow kCheatsRows[] = {
     { SRC_MODS, 19, "Debug Keys (F5/F6)", "Developer shortcuts on F5 and F6." },
 #endif
 #if PIKI_P2_HOST
-    { SRC_MODS, 19, "Debug Keys (F6)", "F6: advance the clock by one in-game hour, capped just before sunset (with Infinite Day it only moves the lighting)." },
+    { SRC_MODS, 19, "Skip Time Key (F6)", "F6 moves the clock forward one in-game hour, stopping just before sunset. With Infinite Day it only changes the lighting." },
 #endif
 };
 
@@ -6204,8 +8262,7 @@ const GroupRow kDataRows[] = {
     { SRC_DATA, 0, "Export save to ZIP", "Copies your memory card to a ZIP file you choose." },
     { SRC_DATA, 1, "Import save from ZIP", "Replaces your memory card with one from a ZIP file." },
 #else
-    { SRC_DATA, 0, "Export save to ZIP", "Desktop saves are plain files in the 'save' folder. Copy it to back up." },
-    { SRC_DATA, 1, "Import save from ZIP", "Desktop saves are plain files in the 'save' folder. Replace it to restore." },
+    { SRC_DATA, 0, "Open Save Folder", "Opens the folder with your saves (card0, card1). Copy it to back up your progress or move it to another computer." },
 #endif
     { SRC_DATA, 2, "Reset all settings to defaults", "Puts every setting back to its default. Saves are not touched." },
 };
@@ -6389,7 +8446,7 @@ const char* disabledReason(const GroupRow& r) {
         if (!sPending.gyroEnabled) return "Turn on Gyro Aiming first.";
         break;
     case SRC_GFX:
-        if (r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading) return "Turn on Colour Grading first.";
+        if (r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading) return "Turn on Colour Adjustments first.";
         break;
     case SRC_MODS:
         if (r.idx == 16 && !sPending.lockOn) return "Turn on Lock-On first.";
@@ -6486,9 +8543,8 @@ const char* pc_settings_row_help(int group, int row) {
         static char help[320];
         const PcAchievementInfo& info = pc_achievement_info(r->idx);
         const char* blocked = pc_achievements_blocked_reason();
-        snprintf(help, sizeof(help), "%s\n\n%s  %d pts.  Total: %d / %d  (%d / %d pts)%s%s", info.description,
-                 pc_achievement_unlocked(r->idx) ? "Unlocked." : "Locked.", info.points, pc_achievements_unlocked_count(),
-                 (int)PC_ACH_COUNT, pc_achievements_points(), pc_achievements_total_points(), blocked ? "\n\n" : "",
+        snprintf(help, sizeof(help), "%s\n\n%s%s%s", info.description,
+                 pc_achievement_unlocked(r->idx) ? "Unlocked." : "Locked.", blocked ? "\n\n" : "",
                  blocked ? blocked : "");
         return help;
     }
@@ -6575,11 +8631,11 @@ void pc_settings_row_value(int group, int row, char* out, unsigned long n) {
 #elif defined(__ANDROID__)
             if (r->idx < 2) snprintf(out, n, "%s", sSaveTransferActive ? "Opening picker..." : "A: choose file");
 #else
-            if (r->idx < 2) snprintf(out, n, "save / card0, card1");
+            if (r->idx < 2) snprintf(out, n, "A: open");
 #endif
             else snprintf(out, n, "A: reset");
             break;
-        case SRC_ACH: snprintf(out, n, "%d pts", pc_achievement_info(r->idx).points); break;
+        case SRC_ACH: break;
         case SRC_KEYS:
         case SRC_PADS: snprintf(out, n, "Open  >"); break;
         case SRC_RECENTER: {
@@ -6912,6 +8968,7 @@ int pc_settings_cli(int argc, char** argv) {
     SDL_InitSubSystem(SDL_INIT_VIDEO);
     sHeadless = true;
     loadConfig();
+    applyLauncherPackActivation();
     sPending = sConfig;
     rebuildResolutionList();
     int idx = sHadConfigFile ? resolutionIndexFor(sPending.windowWidth, sPending.windowHeight) : -1;

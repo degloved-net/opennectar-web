@@ -1,6 +1,9 @@
 #include "PikiAI.h"
+#include "Game/pcCoop.h"
 #ifdef PIKI_PC_PORT
 extern "C" int pc_settings_get_no_trip(void);
+extern "C" int pc_settings_get_blues_only_water(void);
+#include "Game/MapMgr.h"
 #endif
 #include "Game/Piki.h"
 #include "Game/PikiMgr.h"
@@ -158,7 +161,12 @@ void ActFormation::setFormed()
 			piki->movie_begin(false);
 		}
 
+#ifdef PIKI_PC_PORT
+		// Co-op: la protagoniza el capitán cuyo grupo se ha formado.
+		Game::Navi* navi = pc_p2_coop_active() && mNavi ? mNavi : Game::naviMgr->getActiveNavi();
+#else
 		Game::Navi* navi = Game::naviMgr->getActiveNavi();
+#endif
 		P2ASSERTLINE(438, navi);
 
 		Game::playData->setDemoFlag(Game::DEMO_Meet_Red_Pikmin);
@@ -264,6 +272,48 @@ void ActFormation::cleanup()
 	mSlotID = -1;
 }
 
+#ifdef PIKI_PC_PORT
+/**
+ * @brief ¿Hay agua cerca, entre el Pikmin y su capitán?
+ *
+ * Sondea el suelo en línea recta hacia el capitán hasta kShoreDistance: así
+ * solo se paran los que ya están junto a la orilla, no los que vienen de
+ * lejos.
+ */
+bool PikiAI::ActFormation::pcWaterAhead()
+{
+	const f32 kShoreDistance = 60.0f;
+	const int kProbes        = 4;
+
+	Vector3f pikiPos = mParent->getPosition();
+	Vector3f dir     = mParent->mNavi->getPosition() - pikiPos;
+	dir.y            = 0.0f;
+	f32 len          = dir.length();
+	if (len < 0.001f) {
+		return true;
+	}
+	dir = dir * (1.0f / len);
+
+	for (int i = 1; i <= kProbes; i++) {
+		f32 d = kShoreDistance * i / kProbes;
+		if (d > len) {
+			d = len;
+		}
+		Sys::Sphere probe;
+		probe.mPosition   = pikiPos + dir * d;
+		probe.mPosition.y = Game::mapMgr->getMinY(probe.mPosition);
+		probe.mRadius     = 4.0f;
+		if (Game::mapMgr->findWater(probe)) {
+			return true;
+		}
+		if (d >= len) {
+			break;
+		}
+	}
+	return false;
+}
+#endif
+
 // honestly with how huge this function is, I believe this being a real used pragma here
 #pragma inline_max_total_size(16384)
 /**
@@ -313,6 +363,26 @@ int PikiAI::ActFormation::exec()
 	if (!mParent->mNavi) {
 		return ACTEXEC_Fail;
 	}
+
+#ifdef PIKI_PC_PORT
+	// Mod "Blues Only In Water": mientras el capitán está en el agua, los que
+	// no son azules siguen andando hasta acercarse a la orilla y ahí se paran
+	// en vez de meterse. En cuanto sale vuelven a seguirlo.
+	const int pcKind = mParent->getKind();
+	if (pc_settings_get_blues_only_water() && pcKind != Game::Blue && pcKind != Game::Bulbmin && mParent->mNavi->mWaterBox
+	    && (mPcWaitAshore || pcWaterAhead())) {
+		mParent->mTargetVelocity = Vector3f(0.0f);
+		if (!mPcWaitAshore) {
+			mPcWaitAshore = true;
+			mParent->startMotion(Game::IPikiAnims::WAIT, Game::IPikiAnims::WAIT, nullptr, nullptr);
+		}
+		return ACTEXEC_Continue;
+	}
+	if (mPcWaitAshore) {
+		mPcWaitAshore = false;
+		mParent->startMotion(Game::IPikiAnims::WALK, Game::IPikiAnims::WALK, nullptr, nullptr);
+	}
+#endif
 
 	bool isCStickNeutral = mParent->mNavi->isCStickNetural();
 	JUT_ASSERTLINE(661, mCPlate->validSlot(mSlotID), "invalid slotId!\n");

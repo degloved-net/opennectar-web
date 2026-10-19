@@ -10,6 +10,7 @@
 #include "JSystem/JAudio/JAS/JASResArcLoader.h"
 #include "JSystem/JKernel/JKRArchive.h"
 #ifdef PIKI_PC_PORT
+#include "JSystem/JAudio/JAS/JASMutexLock.h"
 #include <cstdio>
 #include <cstdlib>
 #endif
@@ -77,9 +78,9 @@ void init()
  * @note Address: 0x800B0DEC
  * @note Size: 0x12C
  */
-} // namespace SequenceMgr
+} // namespace SequenceMgr (el constructor es de JAInter, no de SequenceMgr)
 
-SeqUpdateData::SeqUpdateData()
+JAInter::SeqUpdateData::SeqUpdateData()
     : mPauseMode(SOUNDPAUSE_Unk0)
     , mPauseVolume(0)
     , mPrepareFlag(0)
@@ -96,12 +97,12 @@ SeqUpdateData::SeqUpdateData()
 	_44           = new (JAIBasic::getCurrentJAIHeap(), 0x20) u32[JAIGlobalParameter::getParamSeqTrackMax() + 1];
 }
 
+namespace SequenceMgr {
+
 /**
  * @note Address: 0x800B1028
  * @note Size: 0x6C
  */
-namespace SequenceMgr {
-
 void getArchiveName(char* path)
 {
 	path[0] = '\0';
@@ -330,6 +331,9 @@ void checkPlayingSeq()
 			for (u8 j = 0; j < JAIGlobalParameter::getParamSeqTrackMax() + 1; j++) {
 				if (info->_44[j] != 0) {
 					if (j == 32 || (1 << j & info->mSequence->mSeqParameter.mUpdateData->_04) != 0) {
+						if (info->mPlayerParams[j].mCommand.mCommand == nullptr) {
+							SystemInterface::outerInit(info, &info->mSequence->mSeqParameter.mTrack, j, 0xFFFF, 0);
+						}
 						SystemInterface::setSeqPortargsU32(info, j, 2, info->_44[j]);
 						info->mPlayerParams[j].mCommand.addPortCmdOnce();
 					}
@@ -366,6 +370,10 @@ void checkStartedSeq()
  */
 void checkReadSeq()
 {
+#ifdef PIKI_PC_PORT
+	// Keep the stopped-track check and its reuse in one audio critical section.
+	JASCriticalSection criticalSection;
+#endif
 	JAISequence* seq;
 	for (u32 i = 0; i < JAIGlobalParameter::getParamSeqPlayTrackMax(); i++) {
 		SeqUpdateData* info = &seqTrackInfo[i];
@@ -774,7 +782,11 @@ void stopSeq(JAISequence* seq)
  * @note Address: 0x800B2D18
  * @note Size: 0xE4
  */
+#ifdef PIKI_PC_PORT
 void checkDvdLoadArc(u32 p1, uintptr_t p2)
+#else
+void checkDvdLoadArc(u32 p1, u32 p2)
+#endif
 {
 	u32 playTrackNo = p2 & 0xFF;
 	u32 seqOffset   = (p2 >> 16) & 0x3FF;

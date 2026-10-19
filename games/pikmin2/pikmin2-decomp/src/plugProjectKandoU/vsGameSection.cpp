@@ -1,3 +1,7 @@
+#ifdef PIKI_PC_PORT
+#include "pc_speedrun.h"
+#endif
+#include "GameFlow.h"
 #include "Dolphin/rand.h"
 #include "efx/TEnemyApsmoke.h"
 #include "Game/Cave/RandMapMgr.h"
@@ -250,6 +254,14 @@ int VsGameSection::getCurrFloor()
  */
 bool VsGameSection::doUpdate()
 {
+#ifdef PIKI_PC_PORT
+	// Reset rápido del modo Speedrun (Desafío): como en la historia, se termina
+	// la sección y la de juego siguiente empieza otra run (que vuelve aquí).
+	if (!mIsMenuRunning && pc_speedrun_take_reset()) {
+		GameFlow::mActiveSectionFlag = GameFlow::SN_SingleGame;
+		mIsMenuRunning               = true;
+	}
+#endif
 	if (mIsMenuRunning) {
 		mIsMainActive = false;
 		return false;
@@ -436,7 +448,7 @@ void VsGameSection::loadChallengeStageList()
 	// If KFesVersion is enabled, use the alternate stage list config
 	void* file = JKRDvdRipper::loadToMainRAM(
 	    gGameConfig.mParms.mKFesVersion() ? "/user/Matoba/challenge/kfes-stages.txt" : "/user/Matoba/challenge/stages.txt", nullptr,
-	    Switch_0, nullptr, nullptr, JKRDvdRipper::ALLOC_DIR_BOTTOM, nullptr, nullptr, nullptr);
+	    Switch_0, 0, nullptr, JKRDvdRipper::ALLOC_DIR_BOTTOM, 0, nullptr, nullptr);
 
 	if (!file) {
 		return;
@@ -453,8 +465,8 @@ void VsGameSection::loadChallengeStageList()
  */
 void VsGameSection::loadVsStageList()
 {
-	void* file = JKRDvdRipper::loadToMainRAM("/user/abe/vs/stages.txt", nullptr, Switch_0, nullptr, nullptr, JKRDvdRipper::ALLOC_DIR_BOTTOM,
-	                                         nullptr, nullptr, nullptr);
+	void* file = JKRDvdRipper::loadToMainRAM("/user/abe/vs/stages.txt", nullptr, Switch_0, 0, nullptr, JKRDvdRipper::ALLOC_DIR_BOTTOM,
+	                                         0, nullptr, nullptr);
 	if (!file) {
 		return;
 	}

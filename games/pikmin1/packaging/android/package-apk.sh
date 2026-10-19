@@ -58,7 +58,17 @@ fi
 if (( clean )); then
     (cd "${android_dir}" && ./gradlew clean -q)
 fi
-(cd "${android_dir}" && ./gradlew assembleRelease -q)
+# Online de Pikmin 1 fuera de las releases hasta que funcione (Co-op y VS sólo
+# locales). NECTAR_RELEASE_ONLINE=1 lo vuelve a compilar, con el mismo
+# identificador que las releases de PC.
+version="$(python3 -c "import json;print(json.load(open('${repo_root}/../../versions.json'))['release'])")"
+gradle_online=()
+if [[ "${NECTAR_RELEASE_ONLINE:-0}" == "1" ]]; then
+    online_deps="${NECTAR_DEPS_CACHE:-${HOME}/.cache/open-nectar/netplay-deps}/install/android-arm64"
+    [[ -d "${online_deps}" ]] || bash "${repo_root}/../../scripts/netplay-deps.sh" android-arm64 "${online_deps}"
+    gradle_online=(-PnectarOnlineDeps="${online_deps}" -PnectarSourceId="release-${version}")
+fi
+(cd "${android_dir}" && ./gradlew assembleRelease -q "${gradle_online[@]}")
 
 apk="$(ls -1 "${android_dir}"/app/build/outputs/apk/release/open_nectar_*.apk | head -n1)"
 [[ -f "${apk}" ]] || { printf 'Gradle no ha producido el APK\n' >&2; exit 1; }

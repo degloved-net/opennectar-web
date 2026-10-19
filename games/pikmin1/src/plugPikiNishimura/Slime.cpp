@@ -168,6 +168,11 @@ void Slime::refresh(Graphics& gfx)
  */
 void Slime::drawShape(Graphics& gfx)
 {
+#if defined(PIKI_PC_PORT)
+	// doAnimation() steps the body spring and rewrites mSRT.t (sim state), so
+	// it runs once per tick, in the authoritative pass.
+	if (pc_render_is_authoritative())
+#endif
 	doAnimation();
 	gfx.useMatrix(Matrix4f::ident, 0);
 	if (mAppearanceScale > 0.0f) {

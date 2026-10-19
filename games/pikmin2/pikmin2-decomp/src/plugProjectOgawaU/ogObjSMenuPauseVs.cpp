@@ -6,6 +6,10 @@
 #include "System.h"
 #include "Controller.h"
 #include "trig.h"
+#if PIKI_PC_TOUCH
+extern "C" void pc_touch_claim_game_menu(void);
+extern "C" bool pc_touch_take_game_menu_tap(float* x, float* y);
+#endif
 
 namespace og {
 namespace newScreen {
@@ -136,6 +140,25 @@ bool ObjSMenuPauseVS::menu()
 	}
 
 	u32 input = getGamePad()->getButtonDown();
+#if PIKI_PC_TOUCH
+	// Táctil: tocar una opción la elige; tocar la elegida es A.
+	pc_touch_claim_game_menu();
+	{
+		float tx = 0.0f, ty = 0.0f;
+		const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+		const int opt     = mMenuMgr->pcTouchTappedOption(tapped, tx, ty);
+		if (opt >= 0 && opt <= 1) {
+			if (opt == (int)mCurrMenuSel) {
+				input |= Controller::PRESS_A;
+			} else {
+				mCurrMenuSel = opt;
+				mMenuMgr->select(mCurrMenuSel);
+				blink_Menu(mCurrMenuSel);
+				input = 0;
+			}
+		}
+	}
+#endif
 	if (input & Controller::PRESS_UP) {
 		if (mCurrMenuSel > 0) {
 			mCurrMenuSel--;

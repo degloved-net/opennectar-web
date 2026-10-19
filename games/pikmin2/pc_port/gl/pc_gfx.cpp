@@ -1,4 +1,5 @@
 #include "pc_gfx.h"
+#include "pc_gx_vertex_decode.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -175,6 +176,8 @@ static PFNGLUNIFORM1FPROC glUniform1f_ptr = nullptr;
 static PFNGLUNIFORM4FPROC glUniform4f_ptr = nullptr;
 static PFNGLUNIFORM4FVPROC glUniform4fv_ptr = nullptr;
 static PFNGLUNIFORM3FPROC glUniform3f_ptr = nullptr;
+static PFNGLUNIFORM3FVPROC glUniform3fv_ptr = nullptr;
+static PFNGLUNIFORM1FVPROC glUniform1fv_ptr = nullptr;
 static PFNGLUNIFORM2FPROC glUniform2f_ptr = nullptr;
 static PFNGLUNIFORM2IPROC glUniform2i_ptr = nullptr;
 static PFNGLUNIFORM4IPROC glUniform4i_ptr = nullptr;
@@ -201,8 +204,8 @@ static PCGLGETQUERYOBJECTIVPROC glGetQueryObjectiv_ptr = nullptr;
 static PCGLGETQUERYOBJECTUI64VPROC glGetQueryObjectui64v_ptr = nullptr;
 
 #include <unistd.h>
-#include <sys/syscall.h>
 #include <pthread.h>
+#include "pikmin2_backtrace.h"
 #include <SDL2/SDL.h>
 
 // Trazas de diagnostico del renderer: solo con PIKMIN_VERBOSE=1.
@@ -262,6 +265,8 @@ static void load_gl_functions() {
     glUniform4f_ptr = (PFNGLUNIFORM4FPROC)SDL_GL_GetProcAddress("glUniform4f");
     glUniform4fv_ptr = (PFNGLUNIFORM4FVPROC)SDL_GL_GetProcAddress("glUniform4fv");
     glUniform3f_ptr = (PFNGLUNIFORM3FPROC)SDL_GL_GetProcAddress("glUniform3f");
+    glUniform3fv_ptr = (PFNGLUNIFORM3FVPROC)SDL_GL_GetProcAddress("glUniform3fv");
+    glUniform1fv_ptr = (PFNGLUNIFORM1FVPROC)SDL_GL_GetProcAddress("glUniform1fv");
     glUniform2f_ptr = (PFNGLUNIFORM2FPROC)SDL_GL_GetProcAddress("glUniform2f");
     glUniform2i_ptr = (PFNGLUNIFORM2IPROC)SDL_GL_GetProcAddress("glUniform2i");
     glUniform4i_ptr = (PFNGLUNIFORM4IPROC)SDL_GL_GetProcAddress("glUniform4i");
@@ -348,6 +353,10 @@ static bool uniform_cache_disabled() {
     static const bool disabled = std::getenv("PIKMIN_NO_UNIFORM_CACHE") != nullptr;
     return disabled;
 }
+// Una textura creada con glTexImage2D(..., nullptr) trae lo que hubiera en esa
+// VRAM: en NVIDIA, restos de fotogramas anteriores troceados en los bloques de
+// la GPU (la selección de partida con píxeles y colores raros antes del vídeo
+// de apertura). Todo destino de render se deja en negro transparente al crearlo.
 static void invalidate_uniform_cache() {
     if (++sUniformGeneration == 0) sUniformGeneration = 1;
 }
@@ -509,8 +518,11 @@ struct Vertex {
     // them in every streamed vertex only inflated the upload by 32 bytes.
     float tex[4][2];
     float matrixSlot;
+    // TEXnMTXIDX de las generaciones 0-2: (idx0+1) + (idx1+1)*128 + (idx2+1)*16384,
+    // 0 = el vértice no elige matriz de textura.
+    float texMtxPacked;
 };
-static_assert(sizeof(Vertex) == 76, "Keep the streamed GX vertex compact");
+static_assert(sizeof(Vertex) == 80, "Keep the streamed GX vertex compact");
 
 // Decoded display-list geometry is immutable for the model paths that use a
 // PNMTXIDX palette. Keep raw vertices so repeated draws can skip GX parsing.
@@ -535,9 +547,29 @@ struct TexCoordGen {
     int type = 1;      // GX_TG_MTX3X4
     int src = 4;       // GX_TG_TEX0
     u32 mtxIdx = 0;
+    // Segunda transformación (dual tex): GX_PTTEXMTX0..19 = 64..121,
+    // GX_PTIDENTITY = 125. normalize: normaliza antes de aplicarla.
+    u32 postIdx = 125;
+    bool normalize = false;
 };
 static TexCoordGen sTexCoordGen[8];
 static float sTexMatrices[64][16];
+// Memoria de matrices de post-transformación: 64 filas de 4 floats (XF
+// 0x500-0x5FF). La matriz con id N ocupa las filas N-64..N-62; las filas
+// 61-63 (GX_PTIDENTITY) son identidad.
+static float sPostRows[64][4];
+static uint32_t sPostMtxGen = 0;
+static bool sPostRowsInit = [] {
+    for (int r = 61; r < 64; ++r)
+        for (int c = 0; c < 4; ++c) sPostRows[r][c] = (c == r - 61) ? 1.0f : 0.0f;
+    return true;
+}();
+// Revisión conjunta de las matrices de textura 30..59, que los vértices pueden
+// elegir uno a uno con TEXnMTXIDX (reflejos de modelos con esqueleto).
+static uint32_t sTexPaletteGen = 0;
+// Generaciones (0-3) cuya coordenada con fuente NRM ya calculó el decodificador
+// de listas de display en la CPU (ver bake_nrm_texgen): el shader la usa tal cual.
+static int sTexBakedMask = 0;
 // Matrix contents change far less often than they are drawn with, so the batch
 // key hashes a revision number per slot rather than the floats themselves.
 // That removes ~600 of the ~2 KB the key used to walk on every primitive.
@@ -793,6 +825,8 @@ struct ProgramLocations {
 	GLint tevReg2 = -1;
 	GLint konst[4] = {-1, -1, -1, -1};
 	GLint tevKonst[GX_MAXTEVSTAGE] = {};
+	GLint indMtx = -1;   // uIndMtx[0] (vec3[6])
+	GLint indScale = -1; // uIndScale[0] (float[3])
 	GLint tevCSel[GX_MAXTEVSTAGE] = {};
 	GLint tevASel[GX_MAXTEVSTAGE] = {};
 	GLint tevCOps[GX_MAXTEVSTAGE] = {};
@@ -840,6 +874,11 @@ struct ProgramLocations {
 	GLint tcMode[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 	GLint tcMtx[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 	GLint tcProj = -1;
+	GLint tcPost = -1;     // uTcPost[0] (vec4[12])
+	GLint tcPostOn = -1;
+	GLint tcNorm = -1;
+	GLint tc2x4 = -1;
+	GLint texPalette = -1; // uTexPalette[0] (vec4[30])
 };
 
 static ProgramLocations sLoc;
@@ -851,6 +890,7 @@ enum : GLuint {
     kAttrNormalIndex    = 2,
     kAttrTexCoord0Index = 3, // through 6; the Vertex carries four of them
     kAttrMatrixSlotIndex = 7,
+    kAttrTexMtxIndex     = 8,
 };
 static constexpr int kVertexTexCoordCount = 4;
 static GLint sAttrNormal = GLint(kAttrNormalIndex);
@@ -1187,6 +1227,21 @@ static_assert(decode_tev_alpha_c(0x29CF) == GXTevAlphaArg(3));
 static_assert(decode_tev_alpha_d(0x29CF) == GXTevAlphaArg(4));
 
 static TevStageState sTevStages[GX_MAXTEVSTAGE];
+
+// Texturas indirectas (GXBump): estado por etapa TEV, etapas indirectas y las
+// tres matrices. Se alimenta igual desde la API GX y desde los registros BP de
+// las listas de display (IND_MTX, IND_CMD, RAS1_SS, RAS1_IREF, GEN_MODE).
+struct TevIndState {
+	u8 indStage = 0, fmt = 0, bias = 0, mtx = 0, wrapS = 0, wrapT = 0, addPrev = 0;
+};
+struct IndStageState {
+	u8 texCoord = 0, texMap = 0, scaleS = 0, scaleT = 0;
+};
+static TevIndState sTevInd[GX_MAXTEVSTAGE];
+static IndStageState sIndStages[4];
+static u8 sNumIndStages = 0;
+static float sIndMtx[3][2][3] = {};
+static int sIndMtxScale[3] = { 0, 0, 0 };
 static float sTevRegisters[4][4] = {
 	{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}
 };
@@ -1345,8 +1400,19 @@ struct PcTextureSource {
     char packName[96] = {};
 #endif
 };
+// Varias versiones por GXTexObj. Las fuentes del juego reutilizan un único
+// GXTexObj y lo reinicializan con la página de glifos de cada letra: con una
+// textura GL por objeto, cada cambio de página volvía a subirla (155 subidas
+// por frame en el selector de partidas; en un móvil, la mitad de FPS). Aquí se
+// guardan las últimas versiones (por contenido) de las texturas pequeñas y una
+// página ya vista se enlaza sin subir nada.
+struct PcTexVariant { u64 hash = 0; GLuint tex = 0; u64 lastUse = 0; };
+static PcGfxHostMap<uintptr_t, PcGfxHostVector<PcTexVariant>> sTexVariants;
+static u64 sTexVariantClock = 0;
+constexpr size_t kTexVariantsPerObj = 16;
+constexpr u16 kTexVariantMaxSide = 256;
 // GXCopyTex: direccion de destino -> textura GL con la copia del framebuffer.
-struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; };
+struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; unsigned hits = 0; };
 static PcGfxHostMap<uintptr_t, PcEfbCopy> sEfbCopies;
 static PcGfxHostMap<uintptr_t, PcTlut> sTlutObjects;
 static PcGfxHostMap<u32, PcTlut> sLoadedTluts;
@@ -2024,6 +2090,9 @@ void pc_gfx_ui_set_atlas(const unsigned char* rgba, int w, int h, unsigned gener
     sUiAtlasGen    = generation;
 }
 
+// Algo escribió en el framebuffer nativo desde la última presentación.
+static bool sNativeWrittenThisFrame = false;
+
 void pc_gfx_ui_draw(const PcUiVertex* verts, int count, int virtW, int virtH,
                     const unsigned char* fontI8, int fontW, int fontH)
 {
@@ -2034,6 +2103,10 @@ void pc_gfx_ui_draw(const PcUiVertex* verts, int count, int virtW, int virtH,
 
     pc_gfx_note_gl_state_change();
     invalidate_gl_pipeline_guards();
+    // Lo que dibuja la capa de menús también cuenta: sin esto, en GLES un
+    // frame sin dibujo del juego (la ventana de partida nueva) se limpiaba a
+    // negro al presentar y el menú no llegaba a verse.
+    sNativeWrittenThisFrame = true;
     if (sNativeFramebufferReady && glBindFramebuffer_ptr) {
         glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
     }
@@ -2297,6 +2370,9 @@ static const char* vShaderHead =
     "in vec2 aTexCoord2;\n"
     "in vec2 aTexCoord3;\n"
     "in float aMatrixSlot;\n"
+    // Índices de matriz de textura por vértice (TEXnMTXIDX) de las
+    // generaciones 0-2, empaquetados: (idx0+1) + (idx1+1)*128 + (idx2+1)*16384.
+    "in float aTexMtxPacked;\n"
     "uniform mat4 uProjMtx;\n"
     "uniform mat4 uPosMtx;\n"
     "uniform mat3 uNrmMtx;\n"
@@ -2312,6 +2388,20 @@ static const char* vShaderHead =
     "uniform int uTcMode[8];\n"      // 0=direct uv, 1=position, 2=normal
     "uniform mat4 uTcMtx[8];\n"
     "uniform int uTcProj;\n"        // bit per slot: MTX3x4 texgen (STQ, divide by q)
+    // Dual tex: matriz de post-transformación (filas) de las generaciones
+    // 0-3, y por bits: si se aplica, si se normaliza antes, y si la primera
+    // matriz es 2x4 (entonces entra (s, t, 1)).
+    "uniform vec4 uTcPost[12];\n"
+    "uniform int uTcPostOn;\n"
+    "uniform int uTcNorm;\n"
+    "uniform int uTc2x4;\n"
+#if !PIKI_USE_GLES
+    // Matrices de textura 30..59 (TEXMTX0..9) por filas, para TEXnMTXIDX por
+    // vértice con geometría en espacio de modelo (paleta). En GLES no cabe en
+    // el presupuesto de uniforms; allí solo hay la ruta de CPU.
+    "#define PC_TEX_PALETTE 1\n"
+    "uniform vec4 uTexPalette[30];\n"
+#endif
     "out vec4 vTcQ;\n"
     "out vec3 vLit0;\n"
     "out vec3 vLit1;\n"
@@ -2340,14 +2430,38 @@ static const char* vShaderTail =
     // useMatrixQuick). Passing the transformed normal rotates it twice and
     // pushes the sphere-map coordinates off the useful range, which is what
     // made the gloss on Olimar, the pellets and the ship disappear.
-    "vec3 genTc(int slot, vec4 viewPos, vec3 nrm, vec2 uvIn, vec2 tc0, vec2 tc1, vec2 tc2, vec2 tc3) {\n"
+    "vec3 genTc(int slot, vec4 viewPos, vec3 nrm, vec2 uvIn, vec2 tc0, vec2 tc1, vec2 tc2, vec2 tc3, int vIdx) {\n"
     "    int mode = uTcMode[slot];\n"
     "    if (mode == 0) return vec3(uvIn, 1.0);\n"
+    // CPU-baked JPA screen coordinates retain Q through interpolation.
+    // Q is -view Z for this narrowly identified projection; reconstruct S/T
+    // before rasterization and let the fragment shader perform the divide.
+    "    if (mode == 15) { float q = abs(viewPos.z) > 1e-6 ? -viewPos.z : 1.0; return vec3(uvIn * q, q); }\n"
     "    vec4 src = (mode == 1) ? viewPos\n"
     "             : (mode == 2) ? vec4(nrm, 1.0)\n"
     "             : (mode >= 11) ? vec4((mode == 11) ? tc0 : (mode == 12) ? tc1 : (mode == 13) ? tc2 : tc3, 0.0, 1.0)\n"
     "             : vec4(rawTc(mode - 3), 0.0, 1.0);\n"
     "    vec4 r = uTcMtx[slot] * src;\n"
+    // Matriz de textura elegida por el vértice. En la ruta de CPU la posición y
+    // la normal ya vienen transformadas por la matriz de su hueso, que es la
+    // que J3D carga como matriz de textura del reflejo (sTexMtxLoadType 0x2000).
+    "    if (vIdx >= 30 && vIdx <= 57) {\n"
+    // Excepto la proyección a pantalla (STQ desde la posición, el cuerpo del
+    // Waterwraith): su matriz no es la del hueso sino la de la cámara, y la
+    // posición ya está en espacio de cámara, así que se aplica tal cual.
+    "        if (uUsePalette == 0 && (mode == 1 || mode == 2)) { if (((uTcProj >> slot) & 1) == 0) r = vec4(src.xyz, 1.0); }\n"
+    "#ifdef PC_TEX_PALETTE\n"
+    "        else { int b = vIdx - 30; r = vec4(dot(uTexPalette[b], src), dot(uTexPalette[b + 1], src), dot(uTexPalette[b + 2], src), 1.0); }\n"
+    "#endif\n"
+    "    }\n"
+    // Dual tex: normalizar (si toca) y la matriz de post-transformación.
+    "    if (slot < 4 && ((uTcPostOn >> slot) & 1) != 0) {\n"
+    "        vec3 x = r.xyz;\n"
+    "        if (((uTc2x4 >> slot) & 1) != 0) x.z = 1.0;\n"
+    "        if (((uTcNorm >> slot) & 1) != 0) x = normalize(x);\n"
+    "        vec4 x4 = vec4(x, 1.0);\n"
+    "        r.xyz = vec3(dot(uTcPost[slot * 3], x4), dot(uTcPost[slot * 3 + 1], x4), dot(uTcPost[slot * 3 + 2], x4));\n"
+    "    }\n"
     // GX interpolates S, T and Q and divides per pixel (the water's screen
     // projection); the fragment shader does the divide with vTcQ.
     "    return vec3(r.xy, ((uTcProj >> slot) & 1) != 0 && abs(r.z) > 1e-6 ? r.z : 1.0);\n"
@@ -2371,10 +2485,13 @@ static const char* vShaderTail =
     // GX permits later texgens to use the output of an earlier texgen as
     // their source (GX_TG_TEXCOORD0..6). Evaluate in hardware order instead
     // of falling back to the usually absent raw attribute for that slot.
-    "    vec3 g0 = genTc(0, aPos4, aNormal, aTexCoord0, vec2(0.0), vec2(0.0), vec2(0.0), vec2(0.0));\n"
-    "    vec3 g1 = genTc(1, aPos4, aNormal, aTexCoord1, g0.xy, vec2(0.0), vec2(0.0), vec2(0.0));\n"
-    "    vec3 g2 = genTc(2, aPos4, aNormal, aTexCoord2, g0.xy, g1.xy, vec2(0.0), vec2(0.0));\n"
-    "    vec3 g3 = genTc(3, aPos4, aNormal, aTexCoord3, g0.xy, g1.xy, g2.xy, vec2(0.0));\n"
+    "    int ti0 = int(mod(aTexMtxPacked, 128.0) + 0.5) - 1;\n"
+    "    int ti1 = int(mod(floor(aTexMtxPacked / 128.0), 128.0) + 0.5) - 1;\n"
+    "    int ti2 = int(floor(aTexMtxPacked / 16384.0) + 0.5) - 1;\n"
+    "    vec3 g0 = genTc(0, aPos4, aNormal, aTexCoord0, vec2(0.0), vec2(0.0), vec2(0.0), vec2(0.0), ti0);\n"
+    "    vec3 g1 = genTc(1, aPos4, aNormal, aTexCoord1, g0.xy, vec2(0.0), vec2(0.0), vec2(0.0), ti1);\n"
+    "    vec3 g2 = genTc(2, aPos4, aNormal, aTexCoord2, g0.xy, g1.xy, vec2(0.0), vec2(0.0), ti2);\n"
+    "    vec3 g3 = genTc(3, aPos4, aNormal, aTexCoord3, g0.xy, g1.xy, g2.xy, vec2(0.0), -1);\n"
     "    vec2 tc0 = g0.xy, tc1 = g1.xy, tc2 = g2.xy, tc3 = g3.xy;\n"
     "    vTcQ = vec4(g0.z, g1.z, g2.z, g3.z);\n"
     "    vTexCoord0 = tc0;\n"
@@ -2442,6 +2559,11 @@ static const char* fShaderTail =
     "uniform float uAlphaRef0;\n"
     "uniform float uAlphaRef1;\n"
     "uniform vec3 uOutTint;\n" // multiplicador final (HUD de J2 en coop)
+    "// uOutTint negativo: gris y luego el color (cursores del selector de capitanes de P2).\n"
+    "vec3 applyOutTint(vec3 c) {\n"
+    "    if (uOutTint.r < 0.0) return vec3(dot(c, vec3(0.299, 0.587, 0.114))) * -uOutTint;\n"
+    "    return c * uOutTint;\n"
+    "}\n"
     "uniform ivec4 uTevCSel[16];\n"
     "uniform ivec4 uTevASel[16];\n"
     "uniform ivec4 uTevCOps[16];\n"
@@ -2566,7 +2688,7 @@ static const char* fShaderTail =
     "                        (uAlphaOp == 1) ? (fastTest0 || fastTest1) :\n"
     "                        (uAlphaOp == 2) ? (fastTest0 != fastTest1) : (fastTest0 == fastTest1);\n"
     "        if (!fastPass) discard;\n"
-    "        fragColor = vec4(fastCol.rgb * uOutTint, fastCol.a);\n"
+    "        fragColor = vec4(applyOutTint(fastCol.rgb), fastCol.a);\n"
     "        return;\n"
     "    }\n"
     // TEVPREV is a real programmable TEV register (BP E0/E1), not an
@@ -2637,7 +2759,7 @@ static const char* fShaderTail =
     "                (uAlphaOp == 1) ? (test0 || test1) :\n"
     "                (uAlphaOp == 2) ? (test0 != test1) : (test0 == test1);\n"
     "    if (!pass) discard;\n"
-    "    fragColor = vec4(col.rgb * uOutTint, col.a);\n"
+    "    fragColor = vec4(applyOutTint(col.rgb), col.a);\n"
     "}\n";
 
 static const std::string& fragment_shader_source() {
@@ -2723,6 +2845,22 @@ void pc_gfx_set_out_tint(float r, float g, float b) {
 
 void pc_gfx_clear_out_tint(void) { pc_gfx_set_out_tint(1.0f, 1.0f, 1.0f); }
 
+// Profundidad del destino actual a vacío, entera (sin tijera). Para dibujar
+// en 3D encima de un frame ya terminado (modelos del selector de capitanes).
+void pc_gfx_clear_depth(void) {
+    pc_gfx_flush_batch();
+    glDisable(GL_SCISSOR_TEST);
+    glDepthMask(GL_TRUE);
+#if PIKI_USE_GLES
+    glClearDepthf(sReplayClearDepth);
+#else
+    glClearDepth(sReplayClearDepth);
+#endif
+    glClear(GL_DEPTH_BUFFER_BIT);
+    state_touched();
+    invalidate_gl_pipeline_guards();
+}
+
 void pc_gfx_set_proj_offset(float ndcX, float ndcY) {
     if (ndcX != sProjOffX || ndcY != sProjOffY) {
         sProjOffX = ndcX;
@@ -2806,6 +2944,7 @@ static void bind_fixed_attrib_locations(GLuint program) {
     glBindAttribLocation_ptr(program, kAttrColorIndex, "aColor");
     glBindAttribLocation_ptr(program, kAttrNormalIndex, "aNormal");
     glBindAttribLocation_ptr(program, kAttrMatrixSlotIndex, "aMatrixSlot");
+    glBindAttribLocation_ptr(program, kAttrTexMtxIndex, "aTexMtxPacked");
     for (int i = 0; i < kVertexTexCoordCount; ++i) {
         char name[32];
         snprintf(name, sizeof(name), "aTexCoord%d", i);
@@ -2861,6 +3000,8 @@ static void query_program_locations(GLuint program, ProgramLocations& out) {
         snprintf(buf, sizeof(buf), "uTevKonst[%d]", i);
         out.tevKonst[i] = glGetUniformLocation_ptr(program, buf);
     }
+    out.indMtx   = glGetUniformLocation_ptr(program, "uIndMtx[0]");
+    out.indScale = glGetUniformLocation_ptr(program, "uIndScale[0]");
     for (int i = 0; i < 4; i++) {
         char buf[32];
         snprintf(buf, sizeof(buf), "uTevSwapTable[%d]", i);
@@ -2891,6 +3032,11 @@ static void query_program_locations(GLuint program, ProgramLocations& out) {
         out.tcMtx[i] = glGetUniformLocation_ptr(program, name);
     }
     out.tcProj = glGetUniformLocation_ptr(program, "uTcProj");
+    out.tcPost = glGetUniformLocation_ptr(program, "uTcPost[0]");
+    out.tcPostOn = glGetUniformLocation_ptr(program, "uTcPostOn");
+    out.tcNorm = glGetUniformLocation_ptr(program, "uTcNorm");
+    out.tc2x4 = glGetUniformLocation_ptr(program, "uTc2x4");
+    out.texPalette = glGetUniformLocation_ptr(program, "uTexPalette[0]");
     out.nrmMtx = glGetUniformLocation_ptr(program, "uNrmMtx");
     out.numLights = glGetUniformLocation_ptr(program, "uNumLights");
     out.ambColor = glGetUniformLocation_ptr(program, "uAmbColor");
@@ -3098,13 +3244,22 @@ static void program_binary_store(GLuint program, uint64_t key) {
 // ── Fase 5: GPU móvil ───────────────────────────────────────────────────────
 // PIKMIN_FB_INVALIDATE=0 keeps every attachment resolved to memory each
 // frame (the pre-phase-5 behaviour) for A/B comparison.
+// Solo en GLES (GPU de móvil por tiles, donde ahorra ancho de banda). En
+// escritorio no aporta nada y era dañino: un fotograma en el que el juego no
+// dibuja nada (cargando el vídeo de apertura) presentaba el framebuffer
+// invalidado, memoria indefinida que en NVIDIA son restos de imágenes viejas
+// troceados (la selección de partida con píxeles y colores raros).
+// PIKMIN_FB_INVALIDATE=1/0 lo fuerza.
 static bool fb_invalidate_enabled() {
     static const bool enabled = [] {
         const char* v = std::getenv("PIKMIN_FB_INVALIDATE");
-        return !(v && v[0] == '0');
+        if (v) return v[0] != '0';
+        return PIKI_USE_GLES != 0;
     }();
     return enabled;
 }
+// Algo escribió en el framebuffer nativo desde la última presentación.
+// (declarada antes de pc_gfx_ui_draw, que también la marca)
 // The port never touches the stencil buffer (no glStencil* anywhere), so on
 // GLES the depth attachment is plain 24-bit depth: less tile memory and
 // bandwidth than packed depth-stencil. PIKMIN_DEPTH_STENCIL=1 restores the
@@ -3141,6 +3296,9 @@ static void setup_vertex_attribs() {
     glEnableVertexAttribArray_ptr(kAttrMatrixSlotIndex);
     glVertexAttribPointer_ptr(kAttrMatrixSlotIndex, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                               (void*)offsetof(Vertex, matrixSlot));
+    glEnableVertexAttribArray_ptr(kAttrTexMtxIndex);
+    glVertexAttribPointer_ptr(kAttrTexMtxIndex, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                              (void*)offsetof(Vertex, texMtxPacked));
     for (int i = 0; i < 8; ++i) {
         if (sAttrTexCoord[i] >= 0) {
             glEnableVertexAttribArray_ptr(sAttrTexCoord[i]);
@@ -3238,12 +3396,15 @@ void pc_gfx_init(void) {
             sPosMatrix[m][i] = (i % 5 == 0) ? 1.0f : 0.0f;
             sTexMatrices[m][i] = (i % 5 == 0) ? 1.0f : 0.0f;
         }
+        for (int c = 0; c < 4; c++) sPostRows[m][c] = (m >= 61 && c == m - 61) ? 1.0f : 0.0f;
         sTexMtxLoaded[m] = false;
         for (int c = 0; c < 8; c++) {
             sTexCoordGen[c].active = false;
             sTexCoordGen[c].type = 1;
             sTexCoordGen[c].src = 4;
             sTexCoordGen[c].mtxIdx = 0;
+            sTexCoordGen[c].postIdx = 125;
+            sTexCoordGen[c].normalize = false;
         }
     }
 
@@ -4459,6 +4620,14 @@ static bool sPostRanThisFrame = false;
 static PcGfxPipelineState sPipelineState = { GX_TRUE, GX_LEQUAL, GX_TRUE, GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_COPY, GX_CULL_BACK };
 static constexpr int kPaletteSlots = 21;
 static int sPaletteSlotsNeeded = kPaletteSlots;
+// Último viewport GX aplicado, en píxeles del render target (origen abajo).
+// Las sombras lo usan para separar las vistas de la pantalla partida.
+static GLint sLastViewportX = 0, sLastViewportY = 0;
+static GLsizei sLastViewportW = 0, sLastViewportH = 0;
+// Último scissor GX aplicado, igual: con la cámara fusionada del co-op las dos
+// vistas comparten viewport (pantalla completa) y solo las separa el recorte.
+static GLint sLastScissorX = 0, sLastScissorY = 0;
+static GLsizei sLastScissorW = 0, sLastScissorH = 0;
 #include "pc_gfx_shadows.inc"
 
 static GLuint post_apply(bool allowDof)
@@ -4796,6 +4965,25 @@ static void post_apply_before_interface()
 }
 
 // Pikmin 2: el juego llama aqui al terminar draw3D, antes de cualquier 2D.
+#if PIKI_P2_HOST
+static bool sP2FrameInterface = false;
+#endif
+extern "C" void pc_gfx_world_done(void);
+
+// Pikmin 2: la interfaz (J2D) empieza. Si ya hubo mundo 3D en el frame y el
+// postproceso no ha corrido (pantallas sin pc_gfx_world_done: dialogos,
+// menus sobre la escena), se aplica ahora, debajo de la interfaz.
+extern "C" void pc_gfx_p2_interface_begin(void)
+{
+#if PIKI_P2_HOST
+    // Solo en el primer setPort del frame: despues ya se han dibujado cosas
+    // 2D con perspectiva y contarian como "mundo".
+    if (sP2FrameInterface) return;
+    sP2FrameInterface = true;
+    if (!sPostRanThisFrame) pc_gfx_world_done();
+#endif
+}
+
 extern "C" void pc_gfx_world_done(void)
 {
     persp_account_draws();
@@ -4815,6 +5003,78 @@ extern "C" int pc_gfx_trace_j3d(void) {
     return f && sFrameSerial == f;
 }
 
+// Cinematicos a 30 Hz con presentacion a 60/120: el frame intermedio no se
+// vuelve a dibujar, se presenta otra vez la imagen exacta del ultimo tick.
+// Volver a dibujar la escena desde el estado guardado no daba la misma imagen
+// (Louie y la nave alternaban entre dos poses cada frame).
+static GLuint sHeldFrameFbo = 0, sHeldFrameTex = 0;
+static int sHeldFrameW = 0, sHeldFrameH = 0;
+static bool sHeldFrameValid = false;
+
+bool pc_gfx_held_frame_capture(void)
+{
+    sHeldFrameValid = false;
+    if (!sNativeFramebufferReady || !glBlitFramebuffer_ptr || !glBindFramebuffer_ptr || !glGenFramebuffers_ptr
+        || !glFramebufferTexture2D_ptr)
+        return false;
+    if (sInPrimitive) pc_gfx_end();
+    pc_gfx_flush_batch();
+    if (!sHeldFrameFbo) glGenFramebuffers_ptr(1, &sHeldFrameFbo);
+    if (!sHeldFrameTex) glGenTextures(1, &sHeldFrameTex);
+    if (sHeldFrameW != sRenderWidth || sHeldFrameH != sRenderHeight) {
+        glBindTexture(GL_TEXTURE_2D, sHeldFrameTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sRenderWidth, sRenderHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindFramebuffer_ptr(GL_FRAMEBUFFER, sHeldFrameFbo);
+        glFramebufferTexture2D_ptr(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sHeldFrameTex, 0);
+        sHeldFrameW = sRenderWidth;
+        sHeldFrameH = sRenderHeight;
+    }
+    pc_gfx_note_gl_state_change();
+    invalidate_gl_pipeline_guards();
+    glDisable(GL_SCISSOR_TEST);
+    glBindFramebuffer_ptr(GL_READ_FRAMEBUFFER, sNativeFramebuffer);
+    glBindFramebuffer_ptr(GL_DRAW_FRAMEBUFFER, sHeldFrameFbo);
+    glBlitFramebuffer_ptr(0, 0, sRenderWidth, sRenderHeight, 0, 0, sRenderWidth, sRenderHeight, GL_COLOR_BUFFER_BIT,
+                          GL_NEAREST);
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+    glEnable(GL_SCISSOR_TEST);
+    sHeldFrameValid = true;
+    return true;
+}
+
+bool pc_gfx_held_frame_restore(void)
+{
+    if (!sHeldFrameValid || sHeldFrameW != sRenderWidth || sHeldFrameH != sRenderHeight || !sNativeFramebufferReady)
+        return false;
+    if (sInPrimitive) pc_gfx_end();
+    pc_gfx_flush_batch();
+    pc_gfx_note_gl_state_change();
+    invalidate_gl_pipeline_guards();
+    glDisable(GL_SCISSOR_TEST);
+    glBindFramebuffer_ptr(GL_READ_FRAMEBUFFER, sHeldFrameFbo);
+    glBindFramebuffer_ptr(GL_DRAW_FRAMEBUFFER, sNativeFramebuffer);
+    glBlitFramebuffer_ptr(0, 0, sRenderWidth, sRenderHeight, 0, 0, sRenderWidth, sRenderHeight, GL_COLOR_BUFFER_BIT,
+                          GL_NEAREST);
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+    glEnable(GL_SCISSOR_TEST);
+    sNativeWrittenThisFrame = true; // contenido valido: no limpiarlo a negro al presentar
+    return true;
+}
+
+unsigned int pc_gfx_begin_swap_framebuffer(void) {
+    GLint bound = 0;
+    if (!glBindFramebuffer_ptr) return 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, 0);
+    return static_cast<unsigned int>(bound);
+}
+
+void pc_gfx_end_swap_framebuffer(unsigned int bound) {
+    if (glBindFramebuffer_ptr) glBindFramebuffer_ptr(GL_FRAMEBUFFER, GLuint(bound));
+}
+
 void pc_gfx_present(void) {
 #ifdef __EMSCRIPTEN__
     pc_gfx_process_texture_uploads();
@@ -4828,6 +5088,18 @@ void pc_gfx_present(void) {
     } hostAllocScope;
     if (sInPrimitive) pc_gfx_end(); // the frame's last primitive, if GXEnd never came
     pc_gfx_flush_batch();
+    if (fb_invalidate_enabled() && !sNativeWrittenThisFrame && sNativeFramebufferReady && glBindFramebuffer_ptr) {
+        // El color se invalidó al presentar el anterior y nadie ha dibujado
+        // desde entonces: su contenido es indefinido. Negro, no basura.
+        glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+        const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (scissor) glEnable(GL_SCISSOR_TEST);
+        invalidate_gl_pipeline_guards();
+    }
+    sNativeWrittenThisFrame = false;
     ++sFrameSerial;
 #ifdef GL_TIME_ELAPSED
     if (sPerfGpuSceneActive) {
@@ -4889,7 +5161,15 @@ void pc_gfx_present(void) {
     if (sFileSelDebugReport && latePost) {
         filesel_debug_probe_now("present_before_post", sNativeFramebuffer);
     }
-    const GLuint sourceFramebuffer = sPostRanThisFrame ? sNativeFramebuffer : post_apply(false);
+#if PIKI_P2_HOST
+    // Con interfaz en el frame y sin postproceso aun (no hubo mundo 3D antes
+    // de ella), aplicarlo ahora lo pondria encima de los textos y el HUD.
+    const bool skipLatePost = sP2FrameInterface && !sPostRanThisFrame;
+    sP2FrameInterface = false;
+#else
+    const bool skipLatePost = false;
+#endif
+    const GLuint sourceFramebuffer = (sPostRanThisFrame || skipLatePost) ? sNativeFramebuffer : post_apply(false);
     if (sFileSelDebugReport) {
         filesel_debug_on_present(latePost, sourceFramebuffer);
     }
@@ -5021,6 +5301,7 @@ static float sCurProjNear = 1.0f, sCurProjFar = 10000.0f;
 #if PIKI_P2_HOST
 static bool sP2LastOrtho;
 static void p2_update_ui43();
+extern "C" void pc_gfx_p2_set_2d_widen(float k);
 #endif
 // Una primitiva inmediata ya completa pero sin GXEnd (el juego a veces lo
 // omite, p.ej. TRenderingProcessor::drawImage) debe dibujarse con la matriz y
@@ -5028,8 +5309,7 @@ static void p2_update_ui43();
 // siguiente cambio de estado la dibujaba gigante (iconos de los mensajes).
 static void close_complete_immediate() {
     if (!sInPrimitive) return;
-    const size_t have = sVertexStream.size() + (sHaveVertex ? 1 : 0);
-    if (have >= sExpectedVerts && have > 0) pc_gfx_end();
+    if (pc_gx_imm_primitive_complete(u32(sVertexStream.size()), sHaveVertex, sExpectedVerts)) pc_gfx_end();
 }
 
 void pc_gfx_set_projection(const Mtx44 mtx, GXProjectionType type) {
@@ -5038,6 +5318,7 @@ void pc_gfx_set_projection(const Mtx44 mtx, GXProjectionType type) {
 #if PIKI_P2_HOST
     sP2LastOrtho = type != GX_PERSPECTIVE;
     p2_update_ui43();
+    pc_gfx_p2_set_2d_widen(0.0f); // J2DPerspGraph lo vuelve a poner tras esta llamada
 #endif
     // The orthographic ones matter as much as the perspective ones: the point
     // of this trace is to find where the world stops and the interface starts,
@@ -5144,10 +5425,6 @@ void pc_gfx_set_current_mtx(u32 id) {
     if (id < 64) sCurrentPosMtxId = id;
 }
 
-// Último viewport GX aplicado, en píxeles del render target (origen abajo).
-static GLint sLastViewportX = 0, sLastViewportY = 0;
-static GLsizei sLastViewportW = 0, sLastViewportH = 0;
-
 bool pc_gfx_project_current(float x, float y, float z, float* winX, float* winY)
 {
     // Igual que un vértice del juego: matriz de posición actual, proyección,
@@ -5174,6 +5451,27 @@ bool pc_gfx_project_current(float x, float y, float z, float* winX, float* winY)
     return true;
 }
 
+// Como pc_gfx_project_current, con una matriz 3x4 de GX (filas) en vez de la
+// cargada: la capa táctil sabe dónde cae en la ventana un panel 2D aunque no
+// haya dibujado nada propio (cajas de texto, paneles contenedor).
+bool pc_gfx_project_mtx34(const float (*m)[4], float x, float y, float* winX, float* winY)
+{
+    const float mx = m[0][0] * x + m[0][1] * y + m[0][3];
+    const float my = m[1][0] * x + m[1][1] * y + m[1][3];
+    const float mz = m[2][0] * x + m[2][1] * y + m[2][3];
+    const float cx = sProjMatrix[0] * mx + sProjMatrix[4] * my + sProjMatrix[8] * mz + sProjMatrix[12];
+    const float cy = sProjMatrix[1] * mx + sProjMatrix[5] * my + sProjMatrix[9] * mz + sProjMatrix[13];
+    const float cw = sProjMatrix[3] * mx + sProjMatrix[7] * my + sProjMatrix[11] * mz + sProjMatrix[15];
+    if (fabsf(cw) < 1.0e-8f || sLastViewportW <= 0 || sLastViewportH <= 0 || sRenderWidth <= 0 || sRenderHeight <= 0) return false;
+    const float rtX = sLastViewportX + (cx / cw * 0.5f + 0.5f) * sLastViewportW;
+    const float rtY = sLastViewportY + (cy / cw * 0.5f + 0.5f) * sLastViewportH; // origen abajo
+    GLint outX, outY, outW, outH;
+    calculate_output_area(sDrawableWidth, sDrawableHeight, sCurrentAspectRatio, outX, outY, outW, outH);
+    if (winX) *winX = outX + rtX / float(sRenderWidth) * outW;
+    if (winY) *winY = float(sDrawableHeight) - (outY + rtY / float(sRenderHeight) * outH); // ventana: origen arriba
+    return true;
+}
+
 // Ultimos viewport/scissor en coordenadas GX, para reaplicarlos cuando cambia
 // el mapeo 640x480 -> render (HUD 4:3 automatico de Pikmin 2).
 static float sGxVp[4] = { 0.0f, 0.0f, 640.0f, 480.0f };
@@ -5196,10 +5494,302 @@ void pc_gfx_set_viewport(f32 xOrig, f32 yOrig, f32 wd, f32 ht, f32 nearZ, f32 fa
     glViewport(x, y, width, height);
 }
 
+#if PIKI_P2_HOST
+// 2D en perspectiva sin deformar (J2DPerspGraph ensancha su proyeccion k
+// veces): los recortes que el juego calcula en coordenadas de paneles se
+// llevan a donde quedan ahora esos paneles, y el recorte de pantalla completa
+// se limita a la zona 4:3 original para no destapar lo que estaba fuera de
+// pantalla. Los fondos ensanchados y el HUD anclado piden no recortar.
+static float sP2Widen = 0.0f;
+static int sP2WidenNoClip = 0;
+
+static void p2_widen_scissor(float& x, float& w) {
+    if (sP2Widen <= 1.0f || sUi43) return;
+    const float cx = sGxW * 0.5f;
+    // Casi toda la pantalla cuenta como pantalla completa (hay pantallas que
+    // recortan a 600 o 640 de ancho en vez de exactamente sGxW).
+    if (x <= 0.05f * sGxW && x + w >= 0.95f * sGxW) {
+        if (sP2WidenNoClip > 0) return;
+        x = cx - cx / sP2Widen;
+        w = sGxW / sP2Widen;
+        return;
+    }
+    x = cx + (x - cx) / sP2Widen;
+    w = w / sP2Widen;
+}
+
+static void p2_reapply_scissor() {
+    pc_gfx_flush_batch();
+    invalidate_gl_pipeline_guards();
+    pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
+}
+
+extern "C" void pc_gfx_p2_set_2d_widen(float k) {
+    if (k == sP2Widen) return;
+    sP2Widen = k;
+    p2_reapply_scissor();
+}
+
+extern "C" void pc_gfx_p2_2d_widen_noclip(int on) {
+    sP2WidenNoClip += on ? 1 : -1;
+    if (sP2WidenNoClip < 0) sP2WidenNoClip = 0;
+    if (sP2Widen > 1.0f) p2_reapply_scissor();
+}
+#endif
+
+#if PIKI_P2_HOST
+// Los vectores de estas funciones no deben salir del heap JKR del juego: se
+// llaman desde secciones con heaps distintos y un buffer reservado en una se
+// liberaria en otra (Bad Block). Mismo criterio que pc_gfx_present.
+struct P2HostAllocScope {
+    bool prev = pc_host_alloc_active();
+    P2HostAllocScope() { pc_host_alloc_set(true); }
+    ~P2HostAllocScope() { pc_host_alloc_set(prev); }
+};
+
+// Color medio de cada fila de una region del render target, suavizado en
+// vertical para quitar el dibujo de las texturas y quedarse con el degradado.
+static void p2_measure_rows(int x, int y, int w, int h, std::vector<float>& out) {
+    static std::vector<unsigned char> px;
+    px.resize(size_t(w) * size_t(h) * 4);
+    glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    std::vector<float> rows(size_t(h) * 3, 0.0f);
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++)
+            for (int c = 0; c < 3; c++) rows[size_t(j) * 3 + c] += px[(size_t(j) * w + i) * 4 + c] / float(w);
+    const int win = h / 40 < 2 ? 2 : h / 40;
+    out.assign(size_t(h) * 3, 0.0f);
+    for (int j = 0; j < h; j++)
+        for (int c = 0; c < 3; c++) {
+            float sum = 0.0f;
+            int n = 0;
+            for (int k = j - win; k <= j + win; k++) {
+                if (k < 0 || k >= h) continue;
+                sum += rows[size_t(k) * 3 + c];
+                n++;
+            }
+            out[size_t(j) * 3 + c] = sum / float(n);
+        }
+}
+
+// Rectangulo del 4:3 original en el render target para [gxY0, gxY1].
+static bool p2_box_rows(float gxY0, float gxY1, GLint& bx, GLint& by, GLsizei& bw, GLsizei& bh) {
+    const float boxW = sGxW / sP2Widen, boxX = sGxW * 0.5f - boxW * 0.5f;
+    map_gx_rect(boxX, gxY0, boxW, gxY1 - gxY0, bx, by, bw, bh);
+    return bw > 0 && bh > 0 && bx > 0;
+}
+
+// Pinta los laterales fila a fila: dst = color (blend off) o dst *= color.
+static void p2_paint_sides(GLint bx, GLint by, GLsizei bw, GLsizei bh, const std::vector<float>* colors[2], bool multiply) {
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_SCISSOR_TEST);
+    if (multiply) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ZERO, GL_SRC_COLOR);
+    } else {
+        glDisable(GL_BLEND);
+    }
+    glUseProgram_ptr(sDimProgram);
+    glBindVertexArray_ptr(sDimVAO);
+    const int right = bx + bw;
+    for (int side = 0; side < 2; side++) {
+        const std::vector<float>& c = *colors[side];
+        const int x0 = side == 0 ? 0 : right, w0 = side == 0 ? bx : sRenderWidth - right;
+        for (int j = 0; j < bh; j += 2) {
+            const int h = j + 2 <= bh ? 2 : 1;
+            glScissor(x0, by + j, w0, h);
+            glUniform4f_ptr(sDimColorLoc, c[size_t(j) * 3], c[size_t(j) * 3 + 1], c[size_t(j) * 3 + 2], 1.0f);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+    }
+    restore_stream_vao();
+    glUseProgram_ptr(0);
+    for (int i = 0; i < 8; i++) sBoundTextures[i] = 0;
+    gl_program_cache_invalidate();
+    invalidate_uniform_cache();
+    invalidate_gl_pipeline_guards();
+    // El recorte GL quedo en la ultima fila: se repone el del juego.
+    pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
+}
+#endif
+
+#if PIKI_P2_HOST
+// Fondos que solo existen en el 4:3 (la banda oscura de Opciones): se lleva
+// a los laterales su sombreado, no sus pixeles. Por cada fila de [gxY0, gxY1]
+// se divide el color medio de la franja interior del 4:3 (stripW de ancho)
+// por el de la franja igual justo fuera del borde. Ese factor multiplica el
+// lateral entero, que conserva su propia textura.
+extern "C" void pc_gfx_p2_extend_shade(float gxY0, float gxY1, float stripW) {
+    P2HostAllocScope hostAlloc;
+    if (sP2Widen <= 1.0f || !sNativeFramebufferReady || !glBindFramebuffer_ptr || !ensure_dim_program()
+        || !glUseProgram_ptr || !glBindVertexArray_ptr) return;
+    pc_gfx_flush_batch();
+    GLint bx, by;
+    GLsizei bw, bh;
+    if (!p2_box_rows(gxY0, gxY1, bx, by, bw, bh)) return;
+    const int s = int(lroundf(stripW * float(bw) / sGxW));
+    if (s < 1 || bx < s) return;
+    const int right = bx + bw;
+    pc_gfx_note_gl_state_change();
+    invalidate_gl_pipeline_guards();
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+    std::vector<float> factor[2];
+    for (int side = 0; side < 2; side++) {
+        const int inX = side == 0 ? bx : right - s, outX = side == 0 ? bx - s : right;
+        std::vector<float> inner, outer;
+        p2_measure_rows(inX, by, s, bh, inner);
+        p2_measure_rows(outX, by, s, bh, outer);
+        factor[side].resize(inner.size());
+        for (size_t i = 0; i < inner.size(); i++) {
+            const float f = outer[i] > 1.0f ? inner[i] / outer[i] : 1.0f;
+            factor[side][i] = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+        }
+    }
+    const std::vector<float>* colors[2] = { &factor[0], &factor[1] };
+    p2_paint_sides(bx, by, bw, bh, colors, true);
+}
+
+// Fondos periodicos (rejillas) que solo existen en el 4:3: se copia un periodo
+// pegado a cada borde interior y se repite hacia fuera, asi el dibujo
+// continua sin cortes. period y [gxY0, gxY1] en unidades de la pantalla.
+// maxLuma (0-1, <=0 sin limite): si la franja a copiar es mas clara (un
+// destello que pasa por el centro) no se copia. Devuelve 1 si se copio.
+extern "C" int pc_gfx_p2_tile_edges(float gxY0, float gxY1, float period, float maxLuma) {
+    if (sP2Widen <= 1.0f || !sNativeFramebufferReady || !glBlitFramebuffer_ptr || !glBindFramebuffer_ptr) return 0;
+    P2HostAllocScope hostAlloc;
+    pc_gfx_flush_batch();
+    GLint bx, by;
+    GLsizei bw, bh;
+    if (!p2_box_rows(gxY0, gxY1, bx, by, bw, bh)) return 0;
+    const float pp = period * float(bw) / sGxW; // periodo en pixeles
+    if (pp < 2.0f) return 0;
+    const int ps = int(lroundf(pp));
+    const int right = bx + bw;
+    if (maxLuma > 0.0f) {
+        glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+        std::vector<float> rows[2];
+        p2_measure_rows(bx, by, ps, bh, rows[0]);
+        p2_measure_rows(right - ps, by, ps, bh, rows[1]);
+        float sum = 0.0f;
+        for (int side = 0; side < 2; side++)
+            for (size_t i = 0; i + 2 < rows[side].size(); i += 3)
+                sum += 0.299f * rows[side][i] + 0.587f * rows[side][i + 1] + 0.114f * rows[side][i + 2];
+        const float luma = sum / (2.0f * float(bh) * 255.0f);
+        if (luma > maxLuma) return 0;
+    }
+    pc_gfx_note_gl_state_change();
+    invalidate_gl_pipeline_guards();
+    glDisable(GL_SCISSOR_TEST);
+    glBindFramebuffer_ptr(GL_READ_FRAMEBUFFER, sNativeFramebuffer);
+    glBindFramebuffer_ptr(GL_DRAW_FRAMEBUFFER, sNativeFramebuffer);
+    for (int n = 1; float(bx) - (n - 1) * pp > 0.0f; n++) {
+        const int d0 = int(lroundf(float(bx) - n * pp)), d1 = int(lroundf(float(bx) - (n - 1) * pp));
+        glBlitFramebuffer_ptr(bx, by, bx + ps, by + bh, d0, by, d1, by + bh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    for (int n = 1; float(right) + (n - 1) * pp < float(sRenderWidth); n++) {
+        const int d0 = int(lroundf(float(right) + (n - 1) * pp)), d1 = int(lroundf(float(right) + n * pp));
+        glBlitFramebuffer_ptr(right - ps, by, right, by + bh, d0, by, d1, by + bh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+    glEnable(GL_SCISSOR_TEST);
+    invalidate_gl_pipeline_guards();
+    pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
+    return 1;
+}
+
+// Laterales congelados: con capture=1 (o si no hay copia valida) se guardan
+// los dos laterales del frame actual; si no, se reponen los guardados. Para
+// pantallas cuyas transiciones solo existen en el 4:3.
+static GLuint sSidesFbo = 0, sSidesTex = 0;
+static int sSidesW = 0, sSidesH = 0;
+static bool sSidesValid = false;
+
+extern "C" void pc_gfx_p2_sides_static_reset(void) { sSidesValid = false; }
+
+extern "C" void pc_gfx_p2_sides_static(int capture) {
+    if (sP2Widen <= 1.0f || !sNativeFramebufferReady || !glBlitFramebuffer_ptr || !glBindFramebuffer_ptr
+        || !glGenFramebuffers_ptr || !glFramebufferTexture2D_ptr) return;
+    pc_gfx_flush_batch();
+    GLint bx, by;
+    GLsizei bw, bh;
+    if (!p2_box_rows(0.0f, sGxH, bx, by, bw, bh)) return;
+    const int W = sRenderWidth, H = sRenderHeight, right = bx + bw;
+    pc_gfx_note_gl_state_change();
+    invalidate_gl_pipeline_guards();
+    if (!sSidesFbo) glGenFramebuffers_ptr(1, &sSidesFbo);
+    if (!sSidesTex) glGenTextures(1, &sSidesTex);
+    if (sSidesW != W || sSidesH != H) {
+        glBindTexture(GL_TEXTURE_2D, sSidesTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindFramebuffer_ptr(GL_FRAMEBUFFER, sSidesFbo);
+        glFramebufferTexture2D_ptr(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sSidesTex, 0);
+        for (int i = 0; i < 8; i++) sBoundTextures[i] = 0;
+        sSidesW = W;
+        sSidesH = H;
+        sSidesValid = false;
+    }
+    glDisable(GL_SCISSOR_TEST);
+    const bool save = capture || !sSidesValid;
+    glBindFramebuffer_ptr(GL_READ_FRAMEBUFFER, save ? sNativeFramebuffer : sSidesFbo);
+    glBindFramebuffer_ptr(GL_DRAW_FRAMEBUFFER, save ? sSidesFbo : sNativeFramebuffer);
+    glBlitFramebuffer_ptr(0, 0, bx, H, 0, 0, bx, H, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBlitFramebuffer_ptr(right, 0, W, H, right, 0, W, H, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    sSidesValid = true;
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+    glEnable(GL_SCISSOR_TEST);
+    invalidate_gl_pipeline_guards();
+    pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
+}
+
+// Fondos con vineta que oscurece hacia el borde del 4:3: los laterales se
+// rellenan, fila a fila, con el color medio de la franja interior del borde.
+extern "C" void pc_gfx_p2_extend_edge_color(float gxY0, float gxY1, float stripW) {
+    P2HostAllocScope hostAlloc;
+    if (sP2Widen <= 1.0f || !sNativeFramebufferReady || !glBindFramebuffer_ptr || !ensure_dim_program()
+        || !glUseProgram_ptr || !glBindVertexArray_ptr) return;
+    pc_gfx_flush_batch();
+    GLint bx, by;
+    GLsizei bw, bh;
+    if (!p2_box_rows(gxY0, gxY1, bx, by, bw, bh)) return;
+    const int s = int(lroundf(stripW * float(bw) / sGxW));
+    if (s < 1) return;
+    pc_gfx_note_gl_state_change();
+    invalidate_gl_pipeline_guards();
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+    std::vector<float> col[2];
+    p2_measure_rows(bx, by, s, bh, col[0]);
+    p2_measure_rows(bx + bw - s, by, s, bh, col[1]);
+    for (int side = 0; side < 2; side++)
+        for (float& v : col[side]) v /= 255.0f;
+    const std::vector<float>* colors[2] = { &col[0], &col[1] };
+    p2_paint_sides(bx, by, bw, bh, colors, false);
+}
+#endif
+
+extern "C" void pc_gfx_get_scissor(u32* l, u32* t, u32* w, u32* h) {
+    *l = sGxSc[0]; *t = sGxSc[1]; *w = sGxSc[2]; *h = sGxSc[3];
+}
+
 void pc_gfx_set_scissor(u32 xOrig, u32 yOrig, u32 wd, u32 ht) {
     sGxSc[0] = xOrig; sGxSc[1] = yOrig; sGxSc[2] = wd; sGxSc[3] = ht;
     GLint x, y; GLsizei width, height;
-    map_gx_rect((float)xOrig, (float)yOrig, (float)wd, (float)ht, x, y, width, height);
+    // El hardware enmascara el origen, así que un origen negativo (llega como
+    // u32 enorme) recorta el rectángulo por arriba o a la izquierda. Tal cual
+    // dejaba el scissor fuera de pantalla: la ventana del tesoro (y = -47) no
+    // dibujaba nada.
+    float scX = (float)(s32)xOrig, scW = (float)wd;
+    float scY = (float)(s32)yOrig, scH = (float)ht;
+    if (scX < 0.0f) { scW = std::max(0.0f, scW + scX); scX = 0.0f; }
+    if (scY < 0.0f) { scH = std::max(0.0f, scH + scY); scY = 0.0f; }
+#if PIKI_P2_HOST
+    p2_widen_scissor(scX, scW);
+#endif
+    map_gx_rect(scX, scY, scW, scH, x, y, width, height);
+    sLastScissorX = x; sLastScissorY = y; sLastScissorW = width; sLastScissorH = height;
     static GLint lastX = -1, lastY = -1;
     static GLsizei lastWidth = -1, lastHeight = -1;
     static uint32_t seenSerial = 0;
@@ -5277,6 +5867,7 @@ void pc_gfx_load_tex_mtx(const Mtx mtx, u32 id) {
     d[12] = mtx[0][3]; d[13] = mtx[1][3]; d[14] = mtx[2][3]; d[15] = 1.0f;
     sTexMtxLoaded[id] = true;
     ++sTexMtxGen[id];
+    if (id >= 30 && id < 60) ++sTexPaletteGen;
 }
 
 // ── Texture coordinate generation ──
@@ -5288,6 +5879,22 @@ void pc_gfx_set_tex_coord_gen(GXTexCoordID coord, GXTexGenType type, GXTexGenSrc
     sTexCoordGen[coord].type = type;
     sTexCoordGen[coord].src = src;
     sTexCoordGen[coord].mtxIdx = matrixIdx;
+}
+
+void pc_gfx_set_tex_coord_post(u32 coord, u32 postIdx, u32 normalize) {
+    state_touched();
+    if (coord >= 8) return;
+    sTexCoordGen[coord].postIdx = (postIdx >= 64 && postIdx <= 127) ? postIdx : 125;
+    sTexCoordGen[coord].normalize = normalize != 0;
+}
+
+void pc_gfx_load_post_tex_mtx(const f32 mtx[3][4], u32 id) {
+    state_touched();
+    if (id < 64 || id > 125 || !mtx) return;
+    const u32 row = id - 64;
+    for (u32 r = 0; r < 3 && row + r < 64; ++r)
+        for (u32 c = 0; c < 4; ++c) sPostRows[row + r][c] = mtx[r][c];
+    ++sPostMtxGen;
 }
 
 // Last values handed to the z/blend/cull setters, for pc_gfx_get_pipeline_state.
@@ -5696,6 +6303,48 @@ void pc_gfx_set_num_tev_stages(u8 num) {
     sNumTevStages = std::min<u8>(num, GX_MAXTEVSTAGE);
 }
 
+void pc_gfx_set_tev_indirect(u32 stage, u32 indStage, u32 fmt, u32 bias, u32 mtx, u32 wrapS, u32 wrapT,
+                             u32 addPrev) {
+    state_touched();
+    if (stage >= GX_MAXTEVSTAGE) return;
+    TevIndState& st = sTevInd[stage];
+    st.indStage = u8(indStage & 3);
+    st.fmt      = u8(fmt & 3);
+    st.bias     = u8(bias & 7);
+    st.mtx      = u8(mtx & 15);
+    st.wrapS    = u8(std::min<u32>(wrapS, 6));
+    st.wrapT    = u8(std::min<u32>(wrapT, 6));
+    st.addPrev  = u8(addPrev ? 1 : 0);
+}
+
+void pc_gfx_set_ind_tex_order(u32 indStage, u32 texCoord, u32 texMap) {
+    state_touched();
+    if (indStage >= 4) return;
+    sIndStages[indStage].texCoord = u8(texCoord & 7);
+    sIndStages[indStage].texMap   = u8(texMap & 7);
+}
+
+void pc_gfx_set_num_ind_stages(u32 num) {
+    state_touched();
+    sNumIndStages = u8(std::min<u32>(num, 4));
+}
+
+void pc_gfx_set_ind_tex_coord_scale(u32 indStage, u32 scaleS, u32 scaleT) {
+    state_touched();
+    if (indStage >= 4) return;
+    sIndStages[indStage].scaleS = u8(std::min<u32>(scaleS, 8));
+    sIndStages[indStage].scaleT = u8(std::min<u32>(scaleT, 8));
+}
+
+void pc_gfx_set_ind_tex_mtx(u32 id, const f32 mtx[2][3], s32 scaleExp) {
+    state_touched();
+    // GXIndTexMtxID: GX_ITM_0..2 = 1..3.
+    if (id < 1 || id > 3 || !mtx) return;
+    for (int r = 0; r < 2; ++r)
+        for (int c = 0; c < 3; ++c) sIndMtx[id - 1][r][c] = mtx[r][c];
+    sIndMtxScale[id - 1] = scaleExp;
+}
+
 void pc_gfx_set_tev_color_in(GXTevStageID stage, GXTevColorArg a, GXTevColorArg b,
                              GXTevColorArg c, GXTevColorArg d) {
     state_touched();
@@ -5865,6 +6514,19 @@ void pc_gfx_release_texture(void* gxTexObj)
     sExternalMipChain.erase(id);
     sTextureCache.erase(it);
     sTextureSignatures.erase(key);
+    auto variants = sTexVariants.find(key);
+    if (variants != sTexVariants.end()) {
+        for (const PcTexVariant& v : variants->second) {
+            if (v.tex == id) continue; // ya borrada arriba
+            GLuint vt = v.tex;
+            for (int unit = 0; unit < 8; ++unit) {
+                if (sBoundTextures[unit] == vt) sBoundTextures[unit] = 0;
+            }
+            glDeleteTextures(1, &vt);
+            sExternalMipChain.erase(vt);
+        }
+        sTexVariants.erase(variants);
+    }
 
     auto bytesIt = sTextureBytes.find(key);
     if (bytesIt != sTextureBytes.end()) {
@@ -6495,6 +7157,7 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
                 }
             }
             if (copy != sEfbCopies.end() && copy->second.tex) {
+                ++copy->second.hits;
                 sActiveGLTextures[id] = copy->second.tex;
                 sHasActiveTextures[id] = true;
                 return;
@@ -6504,6 +7167,42 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
             && source->second.uploadedGeneration != source->second.generation) {
             sourceSnapshot = source->second;
             needsUpload = true;
+        }
+    }
+    // ¿Esta versión ya está en la GPU? (ver sTexVariants)
+    bool trackVariant = false;
+    u64 variantHash = 0;
+    if (needsUpload && !sourceSnapshot.indexed && !sourceSnapshot.image.empty()
+        && sourceSnapshot.width <= kTexVariantMaxSide && sourceSnapshot.height <= kTexVariantMaxSide) {
+        const u64 seed = (u64(sourceSnapshot.format) << 48) ^ (u64(sourceSnapshot.width) << 32) ^ (u64(sourceSnapshot.height) << 16)
+                       ^ (sourceSnapshot.mipmap ? 1u : 0u);
+        variantHash = XXH64(sourceSnapshot.image.data(), sourceSnapshot.image.size(), seed);
+        PcGfxHostVector<PcTexVariant>& variants = sTexVariants[key];
+        for (PcTexVariant& v : variants) {
+            if (v.hash != variantHash) continue;
+            v.lastUse          = ++sTexVariantClock;
+            sTextureCache[key] = v.tex;
+            needsUpload        = false;
+            std::lock_guard<std::mutex> lock(sTextureRegistryMutex);
+            auto source = sTextureSources.find(key);
+            if (source != sTextureSources.end() && source->second.generation == sourceSnapshot.generation) {
+                source->second.uploadedGeneration = sourceSnapshot.generation;
+            }
+            break;
+        }
+        if (needsUpload) {
+            // La textura GL actual es otra versión guardada: que la subida
+            // cree una nueva en vez de sobrescribirla.
+            auto current = sTextureCache.find(key);
+            if (current != sTextureCache.end()) {
+                for (const PcTexVariant& v : variants) {
+                    if (v.tex == current->second) {
+                        sTextureCache.erase(current);
+                        break;
+                    }
+                }
+            }
+            trackVariant = true;
         }
     }
     if (needsUpload) {
@@ -6519,6 +7218,32 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
                 std::strcpy(source->second.packName, sourceSnapshot.packName);
 #endif
             }
+        }
+        auto current = sTextureCache.find(key);
+        if (uploaded && trackVariant && current != sTextureCache.end()) {
+            PcGfxHostVector<PcTexVariant>& variants = sTexVariants[key];
+            if (variants.size() >= kTexVariantsPerObj) {
+                // Fuera la menos usada (nunca la recién subida).
+                size_t oldest = 0;
+                for (size_t i = 1; i < variants.size(); ++i) {
+                    if (variants[i].lastUse < variants[oldest].lastUse) oldest = i;
+                }
+                GLuint vt = variants[oldest].tex;
+                if (vt != current->second) {
+                    pc_gfx_flush_batch();
+                    for (int unit = 0; unit < 8; ++unit) {
+                        if (sBoundTextures[unit] == vt) sBoundTextures[unit] = 0;
+                    }
+                    glDeleteTextures(1, &vt);
+                    sExternalMipChain.erase(vt);
+                }
+                variants.erase(variants.begin() + oldest);
+            }
+            PcTexVariant added;
+            added.hash    = variantHash;
+            added.tex     = current->second;
+            added.lastUse = ++sTexVariantClock;
+            variants.push_back(added);
         }
     }
     auto it = sTextureCache.find(key);
@@ -6611,14 +7336,19 @@ void pc_gfx_dump_vtx_desc_history(const char* why) {
 }
 
 void pc_gfx_clear_vtx_desc(void) {
+    // GX code may omit GXEnd (a no-op on GameCube); a vertex-layout change
+    // must not reinterpret or extend the primitive that was just written.
+    close_complete_immediate();
     for (int i = 0; i < GX_VA_MAX_ATTR; ++i) sVtxDesc[i] = GX_NONE;
     log_vtx_desc(0, 0, true);
 }
 void pc_gfx_set_vtx_desc(GXAttr attr, GXAttrType type) {
+    close_complete_immediate();
     if (attr >= 0 && attr < GX_VA_MAX_ATTR) sVtxDesc[attr] = type;
     log_vtx_desc(int(attr), int(type), false);
 }
 void pc_gfx_set_vtx_attr_fmt(GXVtxFmt fmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+    close_complete_immediate();
     if (fmt >= 0 && fmt < GX_MAX_VTXFMT && attr >= 0 && attr < GX_VA_MAX_ATTR) {
         // GX ignores the caller's shift for normals: it is fixed at 6 bits for
         // s8 and 14 for s16 (the VAT does not even carry one). Lighting
@@ -6674,6 +7404,8 @@ static void fifo_imm_reset()
 // ── Drawing & FIFO Stream Parser ──
 static void bp_resolve_textures();
 void pc_gfx_begin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
+    sNativeWrittenThisFrame = true;
+    sTexBakedMask = 0;
     if (sInPrimitive) {
         pc_gfx_end();
     }
@@ -6703,8 +7435,20 @@ void pc_gfx_begin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
 }
 static int sAttrStep = 0;
 
+// En la consola todo va al mismo FIFO y el formato de vértice decide qué es
+// cada dato: código del juego que manda la coordenada de textura con
+// GXPosition2f32 (los números de carga de CarryInfo) funciona allí. Aquí las
+// funciones van por nombre, así que una "posición" que llega cuando el vértice
+// ya tiene la suya, el formato lleva TEX0 directa y aún no ha llegado, es la
+// coordenada de textura y no un vértice nuevo.
+static bool sCurVertexHasTex0 = false;
 void pc_gfx_position(f32 x, f32 y, f32 z) {
     if (!sInPrimitive) return;
+    if (sHaveVertex && !sCurVertexHasTex0 && sVtxDesc[GX_VA_TEX0] == GX_DIRECT) {
+        pc_gfx_texcoord(x, y);
+        return;
+    }
+    sCurVertexHasTex0 = false;
     if (sHaveVertex) sVertexStream.push_back(sCurVertex);
     sCurVertex.x = x;
     sCurVertex.y = y;
@@ -6728,12 +7472,13 @@ void pc_gfx_color(u8 r, u8 g, u8 b, u8 a) {
 void pc_gfx_texcoord(f32 u, f32 v) {
     sCurVertex.tex[0][0] = u;
     sCurVertex.tex[0][1] = v;
+    sCurVertexHasTex0 = true;
 }
 
 void pc_gfx_texcoord_fixed(s32 u, s32 v) {
-    const u8 frac = sVtxFormats[sImmVtxFmt][GX_VA_TEX0].frac;
-    const f32 scale = 1.0f / static_cast<f32>(1u << (frac & 31));
-    pc_gfx_texcoord(static_cast<f32>(u) * scale, static_cast<f32>(v) * scale);
+    const VertexFormatState& format = sVtxFormats[sImmVtxFmt][GX_VA_TEX0];
+    pc_gfx_texcoord(pc_gx_decode_fixed_component(u, format.type, format.frac),
+                    pc_gx_decode_fixed_component(v, format.type, format.frac));
 }
 
 void pc_gfx_push_f32(f32 val) {
@@ -7274,6 +8019,28 @@ static void build_tev_shader_key(PcTevShaderKey& key) {
         out.rasChannel = int8_t(st.rasChannel);
         out.rasSwapSel = uint8_t(sTevRasSwapSel[i] & 3);
         out.texSwapSel = uint8_t(sTevTexSwapSel[i] & 3);
+        const TevIndState& ind = sTevInd[i];
+        out.indMtx     = ind.mtx;
+        out.indWrapS   = ind.wrapS;
+        out.indWrapT   = ind.wrapT;
+        out.indAddPrev = ind.addPrev;
+        if (out.indMtx != 0) {
+            out.indStage = ind.indStage;
+            out.indFmt   = ind.fmt;
+            out.indBias  = ind.bias;
+        }
+    }
+    // Las etapas indirectas solo entran en la clave si alguna etapa TEV las lee.
+    bool anyIndirect = false;
+    for (int i = 0; i < stages; ++i) anyIndirect |= key.stages[i].indMtx != 0;
+    if (anyIndirect) {
+        key.numIndStages = uint8_t(std::min<int>(sNumIndStages, 4));
+        for (int n = 0; n < key.numIndStages; ++n) {
+            key.indTexCoord[n] = uint8_t(std::min<int>(sIndStages[n].texCoord, 3));
+            key.indTexMap[n]   = uint8_t(sIndStages[n].texMap & 7);
+            key.indScaleS[n]   = sIndStages[n].scaleS;
+            key.indScaleT[n]   = sIndStages[n].scaleT;
+        }
     }
     for (int t = 0; t < 4; ++t) {
         key.swapTable[t][0] = uint8_t(sTevSwapModes[t].red);
@@ -7745,6 +8512,9 @@ static uint64_t compute_batch_state_key_full() {
             h = hash_bytes(h, &texRevision, sizeof(texRevision));
         }
     }
+    h = hash_bytes(h, &sPostMtxGen, sizeof(sPostMtxGen));
+    h = hash_bytes(h, &sTexBakedMask, sizeof(sTexBakedMask));
+    h = hash_bytes(h, &sTexPaletteGen, sizeof(sTexPaletteGen));
     h = hash_bytes(h, sActiveGLTextures, sizeof(sActiveGLTextures));
     h = hash_bytes(h, sHasActiveTextures, sizeof(sHasActiveTextures));
     // Triangles, strips, fans and quads can all become GL_TRIANGLES and so may
@@ -8673,6 +9443,19 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
             }
         }
     }
+    if (sLoc.indMtx >= 0 && glUniform3fv_ptr) {
+        // Filas de las matrices indirectas ya escaladas por 2^escala: el
+        // shader suma el desplazamiento en texels con un dot por eje.
+        float rows[6][3];
+        float scales[3];
+        for (int m = 0; m < 3; ++m) {
+            scales[m] = std::ldexp(1.0f, sIndMtxScale[m]);
+            for (int r = 0; r < 2; ++r)
+                for (int c = 0; c < 3; ++c) rows[m * 2 + r][c] = sIndMtx[m][r][c] * scales[m];
+        }
+        glUniform3fv_ptr(sLoc.indMtx, 6, &rows[0][0]);
+        if (sLoc.indScale >= 0 && glUniform1fv_ptr) glUniform1fv_ptr(sLoc.indScale, 3, scales);
+    }
     for (u8 stage = 0; stage < sNumTevStages && stage < GX_MAXTEVSTAGE; ++stage) {
         const TevStageState& st = sTevStages[stage];
         float konst[4];
@@ -8885,9 +9668,19 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
             else if (src == GX_TG_NRM) mode = 2;
             else if (src >= GX_TG_TEX0 && src <= GX_TG_TEX7)
                 mode = 3 + int(src - GX_TG_TEX0);
-            else if (src >= GX_TG_TEXCOORD0 && src <= GX_TG_TEXCOORD6)
-                mode = 11 + int(src - GX_TG_TEXCOORD0);
+            else if (src >= GX_TG_TEXCOORD0 && src <= GX_TG_TEXCOORD6) {
+                // Solo los tipos de relieve (BUMP0..7 = 2..9) encadenan la salida
+                // de una generación anterior. Con matriz (MTX2x4/MTX3x4) la SDK
+                // deja la fila de entrada en TEX0: la coordenada del vértice.
+                // Leerlo como encadenado daba (0,0) en la generación 0, y los
+                // números de carga y el borde del círculo de vida (los dos
+                // usan GX_TG_TEXCOORD0) salían transparentes.
+                const u32 type = sTexCoordGen[slot].type;
+                mode = (type >= 2 && type <= 9) ? 11 + int(src - GX_TG_TEXCOORD0) : 3;
+            }
         }
+        if (slot < 4 && (sTexBakedMask & (1 << slot)))
+            mode = sTexCoordGen[slot].src == GX_TG_POS ? 15 : 0;
         if (sLoc.tcMode[slot] >= 0) glUniform1i_ptr(sLoc.tcMode[slot], mode);
         if (mode != 0 && sLoc.tcMtx[slot] >= 0) {
             u32 mtxIdx = (slot < 8) ? sTexCoordGen[slot].mtxIdx : 0;
@@ -8896,6 +9689,47 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
         }
     }
     if (sLoc.tcProj >= 0) glUniform1i_ptr(sLoc.tcProj, tcProj);
+    // Diagnóstico (PIKMIN_WRAITH_DEBUG=1): texgen proyectiva desde la posición
+    // (cuerpo del Waterwraith, agua): matriz y ruta de vértices al dibujar.
+    {
+        static const bool dbg = getenv("PIKMIN_WRAITH_DEBUG") != nullptr;
+        static unsigned n = 0;
+        if (dbg && (tcProj & 1) && sTexCoordGen[0].src == GX_TG_POS && (n++ % 600) == 0) {
+            const u32 mi = sTexCoordGen[0].mtxIdx < 64 ? sTexCoordGen[0].mtxIdx : 0;
+            const float* m = sTexMatrices[mi];
+            fprintf(stderr, "[WRAITH-GL] mtx=%u palette=%d baked=%X stages=%d | S %.3f %.3f %.3f %.3f | T %.3f %.3f %.3f %.3f | Q %.3f %.3f %.3f %.3f\n",
+                    mi, (int)sVertexUsesPalette, (unsigned)sTexBakedMask, (int)sNumTevStages,
+                    m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14]);
+        }
+    }
+    if (sLoc.tcPostOn >= 0) {
+        // Dual tex de las generaciones 0-3 (las que lleva el shader).
+        int postOn = 0, norm = 0, is2x4 = 0;
+        float post[12][4];
+        for (int slot = 0; slot < 4; ++slot) {
+            const TexCoordGen& tg = sTexCoordGen[slot];
+            const u32 row = (tg.postIdx >= 64 && tg.postIdx <= 125) ? tg.postIdx - 64 : 61;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) post[slot * 3 + r][c] = sPostRows[std::min<u32>(row + r, 63)][c];
+            if (!tg.active || tg.type >= GX_TG_BUMP0 || (sTexBakedMask & (1 << slot))) continue;
+            if (tg.postIdx != 125 || tg.normalize) postOn |= 1 << slot;
+            if (tg.normalize) norm |= 1 << slot;
+            if (tg.type == GX_TG_MTX3X4) is2x4 |= 1 << slot; // este enum: MTX3X4 = 1 = 2x4 del hardware
+        }
+        glUniform1i_ptr(sLoc.tcPostOn, postOn);
+        if (sLoc.tcNorm >= 0) glUniform1i_ptr(sLoc.tcNorm, norm);
+        if (sLoc.tc2x4 >= 0) glUniform1i_ptr(sLoc.tc2x4, is2x4);
+        if (postOn && sLoc.tcPost >= 0) glUniform4fv_ptr(sLoc.tcPost, 12, &post[0][0]);
+    }
+    if (sLoc.texPalette >= 0) {
+        float rows[30][4];
+        for (int m = 0; m < 10; ++m) {
+            const float* d = sTexMatrices[30 + m * 3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) rows[m * 3 + r][c] = d[c * 4 + r];
+        }
+        glUniform4fv_ptr(sLoc.texPalette, 30, &rows[0][0]);
+    }
 
 }
 
@@ -9684,6 +10518,7 @@ static void handle_bp_reg(u32 hex) {
     switch (reg) {
     case 0x00: { // GEN_MODE
         pc_gfx_set_num_tev_stages(u8(((hex >> 10) & 0xF) + 1));
+        pc_gfx_set_num_ind_stages((hex >> 16) & 0x7);
         static const GXCullMode hw2gx[4] = { GX_CULL_NONE, GX_CULL_BACK, GX_CULL_FRONT, GX_CULL_ALL };
         pc_gfx_set_cull_mode(hw2gx[(hex >> 14) & 3]);
         break;
@@ -9841,10 +10676,34 @@ static void handle_bp_reg(u32 hex) {
         }
         break;
     }
-    case 0x06 ... 0x0E: // indirect matrices
+    case 0x06 ... 0x0E: { // IND_MTXA/B/C: una columna (s1.10) por registro
+        const u32 m = (reg - 0x06) / 3, col = (reg - 0x06) % 3;
+        auto s11 = [](u32 v) { return f32(s32(v << 21) >> 21) / 1024.0f; };
+        state_touched();
+        sIndMtx[m][0][col] = s11(hex & 0x7FF);
+        sIndMtx[m][1][col] = s11((hex >> 11) & 0x7FF);
+        // Los 6 bits de escala van repartidos en las tres columnas, sesgo 17.
+        const u32 scaleBits = (sBpRegs[0x06 + m * 3] >> 22 & 3) | ((sBpRegs[0x07 + m * 3] >> 22 & 3) << 2)
+                            | ((sBpRegs[0x08 + m * 3] >> 22 & 3) << 4);
+        sIndMtxScale[m] = int(scaleBits) - 17;
+        break;
+    }
+    case 0x10 ... 0x1F: // IND_CMD: indirecto de cada etapa TEV
+        pc_gfx_set_tev_indirect(reg - 0x10, hex & 3, (hex >> 2) & 3, (hex >> 4) & 7, (hex >> 9) & 0xF,
+                                (hex >> 13) & 7, (hex >> 16) & 7, (hex >> 20) & 1);
+        break;
+    case 0x25: case 0x26: { // RAS1_SS0/1: escala de coordenada, dos etapas por registro
+        const u32 base = (reg - 0x25) * 2;
+        pc_gfx_set_ind_tex_coord_scale(base, hex & 0xF, (hex >> 4) & 0xF);
+        pc_gfx_set_ind_tex_coord_scale(base + 1, (hex >> 8) & 0xF, (hex >> 12) & 0xF);
+        break;
+    }
+    case 0x27: // RAS1_IREF: textura y coordenada de cada etapa indirecta
+        for (u32 n = 0; n < 4; ++n) {
+            pc_gfx_set_ind_tex_order(n, (hex >> (6 * n + 3)) & 7, (hex >> (6 * n)) & 7);
+        }
+        break;
     case 0x0F:          // indirect mask
-    case 0x10 ... 0x1F: // indirect TEV stages
-    case 0x25 ... 0x27: // indirect coord scale / order
     case 0x30 ... 0x3F: // texcoord scale (SU): the shader works in normalised coordinates
     case 0x20 ... 0x22: // scissor / line size: driven by the GX API on this port
     case 0x45 ... 0x5F: // PE control, copy, clear: driven by the GX API on this port
@@ -9928,8 +10787,16 @@ static void handle_xf_regs(u32 addrBase, u32 numWords, const u32* words) {
         pc_gfx_load_nrm_mtx(m, off / 3);
         return;
     }
-    if (addrBase < 0x600) { // post-transform texture matrices
-        gx_regs_report_once("XF post-tex matrix", addrBase);
+    if (addrBase < 0x600) { // post-transform texture matrices: filas de 4 floats
+        const u32 row = (addrBase - 0x500) / 4;
+        if ((addrBase % 4) != 0 || (numWords % 4) != 0 || row + numWords / 4 > 64) {
+            gx_regs_report_once("XF post-tex matrix", addrBase);
+            return;
+        }
+        state_touched();
+        for (u32 r = 0; r < numWords / 4; ++r)
+            for (u32 c = 0; c < 4; ++c) sPostRows[row + r][c] = bits_to_float(words[r * 4 + c]);
+        ++sPostMtxGen;
         return;
     }
     if (addrBase < 0x680) { // lights: 16 words each
@@ -10005,7 +10872,8 @@ static void handle_xf_regs(u32 addrBase, u32 numWords, const u32* words) {
             break;
         }
         case 0x1012: // DUALTEXTRANS
-        case 0x1050 ... 0x1057: // POSTMTXINFO: post-transform texgen not modelled
+        case 0x1050 ... 0x1057: // POSTMTXINFO: matriz de post-transformación y normalizar
+            pc_gfx_set_tex_coord_post(addr - 0x1050, (hex & 0x3F) + 64, (hex >> 8) & 1);
             break;
         case 0x1040 ... 0x1047:
             xf_apply_texgen(addr - 0x1040, hex);
@@ -10231,6 +11099,8 @@ static void draw_resident_mesh(ResidentMesh& mesh) {
 }
 
 void pc_gfx_call_display_list(const void* list, u32 nbytes) {
+    sNativeWrittenThisFrame = true;
+    sTexBakedMask = 0;
     if (sInPrimitive) pc_gfx_end(); // an immediate primitive left open without GXEnd
     // Two clock reads per display list (~1000 a frame): cheap enough, and it
     // is the one cost of renderall that nothing else was attributing.
@@ -10470,6 +11340,7 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
             v.nx = 0.0f; v.ny = 0.0f; v.nz = 1.0f;
             v.r = 1.0f; v.g = 1.0f; v.b = 1.0f; v.a = 1.0f;
             v.matrixSlot = 0.0f;
+            v.texMtxPacked = 0.0f;
             for (int tc = 0; tc < 4; ++tc) {
                 v.tex[tc][0] = 0.0f;
                 v.tex[tc][1] = 0.0f;
@@ -10493,6 +11364,12 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
                 if (attr <= GX_VA_TEX7MTXIDX) {
                     if (desc != GX_DIRECT || cursor >= end) { malformed = true; break; }
                     const u8 value = *cursor++;
+                    if (attr >= GX_VA_TEX0MTXIDX && attr <= GX_VA_TEX2MTXIDX && value < 64) {
+                        // Matriz de textura elegida por el vértice (reflejo de
+                        // los modelos con esqueleto, p. ej. el casco).
+                        static const float kPack[3] = { 1.0f, 128.0f, 16384.0f };
+                        v.texMtxPacked += float(value + 1) * kPack[attr - GX_VA_TEX0MTXIDX];
+                    }
                     if (attr == GX_VA_PNMTXIDX) {
                         matrixId = value;
                         v.matrixSlot = float(matrixId / 3);
@@ -10686,6 +11563,69 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
                 }
             }
             if (!sVertexUsesPalette) {
+                // POS texgen must see the original vertex, just like the GX
+                // transform unit does.  This CPU path has already replaced
+                // v.xyz with position-matrix (view-space) coordinates; leaving
+                // POS generation to the vertex shader therefore applies the
+                // particle matrix a second time.  Projected JPA effects then
+                // sample an unrelated part of the EFB copy, exposing the
+                // camera image as a disc instead of a local distortion.
+                //
+                // Bake S/T here only for the screen projection used by JPA.
+                // Its Q is -view-Z. genTc mode 15 reconstructs S/T/Q from
+                // this normalized pair before perspective interpolation. Other
+                // POS texgens remain in the shader because their Q need not
+                // have that property.
+                for (int slot = 0; slot < 4; ++slot) {
+                    const TexCoordGen& tg = sTexCoordGen[slot];
+                    if (!tg.active || tg.src != GX_TG_POS || tg.type != GX_TG_MTX2X4
+                        || tg.normalize || tg.postIdx != 125) continue;
+                    const u32 mid = tg.mtxIdx < 64 ? tg.mtxIdx : 0;
+                    const float* m = sTexMatrices[mid];
+                    const float* pm = sPosMatrix[matrixId < 64 ? matrixId : 0];
+                    const auto same = [](float a, float b) {
+                        return std::fabs(a - b) <= 1e-5f * std::max(1.0f, std::max(std::fabs(a), std::fabs(b)));
+                    };
+                    if (!same(m[2], -pm[2]) || !same(m[6], -pm[6])
+                        || !same(m[10], -pm[10]) || !same(m[14], -pm[14])) continue;
+                    float r[3];
+                    for (int row = 0; row < 3; ++row)
+                        r[row] = m[row] * rawX + m[4 + row] * rawY + m[8 + row] * rawZ + m[12 + row];
+                    const float q = std::fabs(r[2]) > 1e-6f ? r[2] : 1.0f;
+                    v.tex[slot][0] = r[0] / q;
+                    v.tex[slot][1] = r[1] / q;
+                    sTexBakedMask |= 1 << slot;
+                }
+                // Reflejos (fuente NRM): en la consola la generación recibe la
+                // normal original y la multiplica una vez por su matriz de
+                // textura. Aquí la normal se transforma a vista justo debajo, y
+                // multiplicarla otra vez en el shader la rotaba dos veces (el
+                // casco de los capitanes, con franjas en vez de un brillo).
+                for (int slot = 0; slot < 4; ++slot) {
+                    const TexCoordGen& tg = sTexCoordGen[slot];
+                    if (!tg.active || tg.src != GX_TG_NRM || tg.type >= GX_TG_BUMP0) continue;
+                    const int packed = int(v.texMtxPacked);
+                    const int perVertex = slot < 3 ? ((packed >> (7 * slot)) & 0x7F) - 1 : -1;
+                    const u32 mid = (perVertex >= 0 && perVertex < 64) ? u32(perVertex) : tg.mtxIdx;
+                    const float* m = sTexMatrices[mid < 64 ? mid : 0];
+                    float r[3];
+                    for (int row = 0; row < 3; ++row)
+                        r[row] = m[row] * v.nx + m[4 + row] * v.ny + m[8 + row] * v.nz + m[12 + row];
+                    if (tg.type == GX_TG_MTX3X4) r[2] = 1.0f; // este enum: MTX3X4 = 2x4 del hardware
+                    if (tg.normalize) {
+                        const float len = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+                        if (len > 1e-6f) { r[0] /= len; r[1] /= len; r[2] /= len; }
+                    }
+                    const u32 prow = (tg.postIdx >= 64 && tg.postIdx <= 125) ? tg.postIdx - 64 : 61;
+                    float out[2];
+                    for (int k = 0; k < 2; ++k) {
+                        const float* pr = sPostRows[std::min<u32>(prow + k, 63)];
+                        out[k] = pr[0] * r[0] + pr[1] * r[1] + pr[2] * r[2] + pr[3];
+                    }
+                    v.tex[slot][0] = out[0];
+                    v.tex[slot][1] = out[1];
+                    sTexBakedMask |= 1 << slot;
+                }
                 float nx, ny, nz;
                 transform_normal(matrixId, v.nx, v.ny, v.nz, nx, ny, nz);
                 v.nx = nx; v.ny = ny; v.nz = nz;
@@ -10921,6 +11861,19 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
         pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
     }
     if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+}
+
+// Diagnóstico (PIKMIN_WRAITH_DEBUG): ¿hay copia de GXCopyTex para esta
+// dirección, y cuántas veces se ha enlazado al dibujar?
+extern "C" int pc_gfx_efb_copy_info(const void* addr, unsigned* hits) {
+    std::lock_guard<std::mutex> lock(sTextureRegistryMutex);
+    auto it = sEfbCopies.find(reinterpret_cast<uintptr_t>(addr));
+    if (it == sEfbCopies.end() || !it->second.tex) {
+        if (hits) *hits = 0;
+        return 0;
+    }
+    if (hits) *hits = it->second.hits;
+    return 1;
 }
 
 void pc_gfx_set_copy_clear(GXColor color, u32 clearZ) {

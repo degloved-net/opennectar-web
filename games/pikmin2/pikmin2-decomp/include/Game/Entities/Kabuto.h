@@ -134,6 +134,8 @@ struct Parms : public EnemyParmsBase {
 
 	virtual void read(Stream& stream) // _08 (weak)
 	{
+		// En GameCube mCreatureProps queda en _00 y el cast a Parameters caía
+		// sobre él; en PC el vtable va delante y leía basura (crash en Windows).
 		CreatureParms::read(stream);
 		mGeneral.read(stream);
 		mKabutoParms.read(stream);

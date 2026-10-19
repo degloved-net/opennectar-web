@@ -264,6 +264,9 @@ public:
 	SnakeGenBodyOnGroundCallBack* mOnGroundCallBack;             // _884
 	SnakeGenBodyRotateCallBack* mRotateCallBack;                 // _888
 	zen::particleGenerator** mDeadPtclGens;                      // _88C
+#if defined(PIKI_PC_PORT)
+	BossPresentJoints mPresentJoints; // world-space joints for the netplay presentation pass
+#endif
 };
 
 /**

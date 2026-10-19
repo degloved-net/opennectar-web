@@ -299,6 +299,19 @@ void TimeMgr::pcDebugAdvanceHour()
 	}
 	updateSlot();
 }
+
+void TimeMgr::pcRecordSetLight(f32 hour)
+{
+	if (sPcVisualActive) {
+		sPcVisualTimeOfDay = hour;
+	} else {
+		// Sin reloj visual aparte, la luz es la hora de juego: nunca hasta el
+		// final del día, que lo daría por terminado.
+		const f32 cap = mParms.mParms.mDayEndTime.mValue - 0.01f;
+		setTime(hour > cap ? cap : hour);
+	}
+	updateSlot();
+}
 #endif
 
 bool TimeMgr::isDayOver()

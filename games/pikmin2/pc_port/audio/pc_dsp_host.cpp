@@ -6,6 +6,7 @@
 #include "pc_dsp_host.h"
 
 #include "pc_aram.h"
+#include "pc_audio_drops.h"
 #ifndef BEGIN_SCOPE_EXTERN_C
 #define BEGIN_SCOPE_EXTERN_C extern "C" {
 #define END_SCOPE_EXTERN_C }
@@ -13,6 +14,7 @@
 #include "jaudio/dspinterface.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -66,14 +68,28 @@ enum SourceType : u16 {
 /// Bus identifiers DSP_SetBusConnect writes into DSPMixerChannel::id. They are
 /// DSP DRAM addresses, spaced 0x60 apart for the six main buffers.
 enum BusId : u16 {
-	kBusNone       = 0x0000,
-	kBusDryLeft    = 0x0D00,
-	kBusDryRight   = 0x0D60,
-	kBusSurrLeft   = 0x0DC0,
-	kBusSurrRight  = 0x0E20,
-	kBusAuxLeft    = 0x0E80,
-	kBusAuxRight   = 0x0EE0,
+	kBusNone      = 0x0000,
+	kBusDryLeft   = 0x0D00,
+	kBusDryRight  = 0x0D60,
+	kBusBackLeft  = 0x0F40,
+	kBusBackRight = 0x0CA0,
+	// Entradas de las cuatro líneas FX (JASDsp::setFXLine), en orden de línea.
+	kBusFx0 = 0x0DC0,
+	kBusFx1 = 0x0E20,
+	kBusFx2 = 0x0E80,
+	kBusFx3 = 0x0EE0,
 };
+
+constexpr int kFxLines              = 4;
+constexpr u16 kFxInputBus[kFxLines] = { kBusFx0, kBusFx1, kBusFx2, kBusFx3 };
+
+int fxLineForBus(u16 id)
+{
+	for (int i = 0; i < kFxLines; ++i) {
+		if (kFxInputBus[i] == id) return i;
+	}
+	return -1;
+}
 
 /// Downmix weight for the surround pair when folded into stereo.
 constexpr s32 kSurroundFold = 24576; // 0.75 in Q15.
@@ -87,6 +103,21 @@ u32 sActiveVoices          = 0;
 /// Scratch accumulator, one entry per output sample, reused between frames.
 std::vector<s32> sBusLeft;
 std::vector<s32> sBusRight;
+
+/// Líneas FX: lo que mandan las voces en este frame, el buffer circular (el
+/// retardo) y la historia del FIR. La configuración la pone el juego.
+struct FxLine {
+	bool enabled   = false;
+	u32 subframes  = 0;
+	u16 dest[2]    = { 0, 0 };
+	s16 volume[2]  = { 0, 0 };
+	s16 coeffs[8]  = { 0 };
+	u32 index      = 0;
+	s16 history[8] = { 0 };
+	std::vector<s16> ring;
+	std::vector<s32> input;
+};
+FxLine sFx[kFxLines];
 
 s16 clampToS16(s32 value)
 {
@@ -129,6 +160,7 @@ bool decodeAdpcm4Block(u32 aramOffset, s16* out, s16& history1, s16& history2)
 {
 	const u8* block = pc_aram_read(aramOffset, 9);
 	if (block == nullptr) {
+		pc_audio_drop(PCAD_AramMiss);
 		return false;
 	}
 
@@ -190,7 +222,29 @@ struct HostVoice {
 	/// polifasico. Solo avanza, asi el ADPCM se decodifica en orden.
 	s16 taps[4]  = { 0, 0, 0, 0 };
 	u32 tapNext  = 0xFFFFFFFF; ///< 0xFFFFFFFF = ventana invalida.
+	// Diagnóstico (PIKMIN_AUDIO_DROPS): vida de la voz actual.
+	bool live        = false;
+	u32 lifeSamples  = 0;
+	s32 lifeMaxGain  = 0;
+	s32 lifeMaxAsked = 0; ///< el mayor volumen que pidió el juego (Q15)
 };
+
+enum VoiceEnd { kEndDisabled, kEndSample, kEndRequest };
+
+/// Cierra la vida de una voz para el diagnóstico: muy corta o inaudible, y por qué.
+void finishVoiceLife(HostVoice& voice, VoiceEnd why)
+{
+	if (!voice.live) return;
+	voice.live = false;
+	if (voice.lifeSamples < 1280) { // 40 ms a 32 kHz
+		pc_audio_drop(PCAD_VoiceShort);
+		pc_audio_drop(why == kEndSample ? PCAD_ShortSampleEnd : why == kEndRequest ? PCAD_ShortEndRequest : PCAD_ShortDisabled);
+	}
+	if (voice.lifeMaxGain < 104) { // -50 dB en Q15
+		pc_audio_drop(PCAD_VoiceInaudible);
+		pc_audio_drop(voice.lifeMaxAsked < 104 ? PCAD_InaudibleGame : PCAD_InaudibleDsp);
+	}
+}
 
 std::vector<HostVoice> sVoices;
 
@@ -271,6 +325,82 @@ bool pc_dsp_host_ready(void) { return sReady; }
 
 u32 pc_dsp_host_active_voices(void) { return sActiveVoices; }
 
+// DsetMixerLevel puede llegar desde el hilo del juego mientras el de audio
+// mezcla.
+std::atomic<double> sMixerLevel { 1.2 };
+
+void pc_dsp_host_set_mixer_level(float level) { sMixerLevel = std::max(0.0f, level); }
+
+void busLogVoice(const DSPchannel_& channel);
+void busLogFrame();
+
+void pc_dsp_host_set_fx_line(u32 index, bool enabled, u32 subframes, const u16 dest[2], const s16 volume[2],
+                             const s16 coeffs[8])
+{
+	if (index >= kFxLines) return;
+	HostAllocScope hostAlloc;
+	FxLine& fx   = sFx[index];
+	fx.enabled   = enabled && subframes > 0;
+	fx.subframes = subframes;
+	for (int i = 0; i < 2; ++i) {
+		fx.dest[i]   = dest[i];
+		fx.volume[i] = volume[i];
+	}
+	for (int i = 0; i < 8; ++i) {
+		fx.coeffs[i]  = coeffs[i];
+		fx.history[i] = 0;
+	}
+	fx.index = 0;
+	fx.ring.assign(fx.enabled ? subframes * PC_DSP_SUBFRAME_SAMPLES : 0, 0);
+	fx.input.clear();
+}
+
+namespace {
+/// Como el DSP (Dolphin, ZeldaAudioRenderer::ApplyReverb): cada subframe de 80
+/// muestras entra en el buffer circular y sale el que entró hace `subframes`
+/// subframes, filtrado por el FIR de 8 coeficientes, hacia sus dos buses.
+/// PIKMIN_FX_GAIN (1.0 por defecto, 0 lo apaga) ajusta el nivel a mano.
+void renderFxLines(u32 frameSamples)
+{
+	static const double sFxTrim = [] {
+		const char* env = std::getenv("PIKMIN_FX_GAIN");
+		return env ? std::clamp(std::strtod(env, nullptr), 0.0, 4.0) : 1.0;
+	}();
+	if (sFxTrim <= 0.0) return;
+	const s32 trimQ15 = static_cast<s32>(sFxTrim * 32768.0);
+	for (FxLine& fx : sFx) {
+		if (!fx.enabled || fx.input.size() < frameSamples || fx.ring.empty()) continue;
+		for (u32 sub = 0; sub + PC_DSP_SUBFRAME_SAMPLES <= frameSamples; sub += PC_DSP_SUBFRAME_SAMPLES) {
+			s16* slot = &fx.ring[fx.index * PC_DSP_SUBFRAME_SAMPLES];
+			s16 buffer[8 + PC_DSP_SUBFRAME_SAMPLES];
+			for (int i = 0; i < 8; ++i) buffer[i] = fx.history[i];
+			for (u32 i = 0; i < PC_DSP_SUBFRAME_SAMPLES; ++i) {
+				buffer[8 + i] = slot[i];
+				slot[i]       = clampToS16(fx.input[sub + i]);
+			}
+			fx.index = (fx.index + 1) % fx.subframes;
+			for (int i = 0; i < 8; ++i) fx.history[i] = buffer[PC_DSP_SUBFRAME_SAMPLES + i];
+			for (u32 i = 0; i < PC_DSP_SUBFRAME_SAMPLES; ++i) {
+				s32 acc = 0;
+				for (int j = 0; j < 8; ++j) acc += static_cast<s32>(buffer[i + j]) * fx.coeffs[j];
+				const s32 out = (static_cast<s32>(clampToS16(acc >> 15)) * trimQ15) >> 15;
+				for (int d = 0; d < 2; ++d) {
+					if (!fx.dest[d] || !fx.volume[d]) continue;
+					const s32 v = (out * fx.volume[d]) >> 15;
+					switch (fx.dest[d]) {
+					case kBusDryLeft: sBusLeft[sub + i] += v; break;
+					case kBusDryRight: sBusRight[sub + i] += v; break;
+					case kBusBackLeft: sBusLeft[sub + i] += (v * kSurroundFold) >> 15; break;
+					case kBusBackRight: sBusRight[sub + i] += (v * kSurroundFold) >> 15; break;
+					default: break;
+					}
+				}
+			}
+		}
+	}
+}
+} // namespace
+
 void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
                               u32 frameSamples)
 {
@@ -287,6 +417,9 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 
 	sBusLeft.assign(frameSamples, 0);
 	sBusRight.assign(frameSamples, 0);
+	for (FxLine& fx : sFx) {
+		if (fx.enabled) fx.input.assign(frameSamples, 0);
+	}
 	sActiveVoices = 0;
 
 	if (channels == nullptr || channelCount == 0) {
@@ -305,13 +438,27 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 			std::fprintf(stderr, "[PC DSP] enabled=%u done=%u\n", en, dn);
 		}
 	}
+	static const bool busLog = [] {
+		const char* v = std::getenv("PIKMIN_AUDIO_BUSLOG");
+		return v && v[0] && v[0] != '0';
+	}();
 	for (u32 ch = 0; ch < channelCount; ++ch) {
 		DSPchannel_& channel = channels[ch];
 		if (!channel.enabled || channel.done) {
+			finishVoiceLife(sVoices[ch], kEndDisabled);
 			continue;
 		}
 
 		HostVoice& voice = sVoices[ch];
+		if (busLog) busLogVoice(channel);
+		if (channel.resetVpb && pc_audio_levels_enabled()) {
+			finishVoiceLife(voice, kEndDisabled);
+			voice.live         = true;
+			voice.lifeSamples  = 0;
+			voice.lifeMaxGain  = 0;
+			voice.lifeMaxAsked = 0;
+			pc_audio_drop(PCAD_VoiceStart);
+		}
 		if (channel.resetVpb) {
 			// Expand the source end stored in the initial VPB into the running
 			// state, as the console DSP does when a voice starts.
@@ -322,6 +469,11 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 			voice.tapNext            = 0xFFFFFFFF;
 		}
 		bool produced    = false;
+		static const bool sLevels = pc_audio_levels_enabled();
+		double levelSum = 0.0;
+		s32 levelPeak   = 0;
+		u32 levelCount  = 0;
+		s32 levelGain   = 0;
 		if (std::getenv("PIKMIN_AUDIO_LOG")) {
 			static unsigned n;
 			if (n++ < 12) {
@@ -362,6 +514,8 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 			// value is Q14 with 0x4000 = unity, since JASDriverIF builds the
 			// level as autoMixerLevel * 16383.5.
 			s32 startL = 0, endL = 0, startR = 0, endR = 0;
+			s32 fxStart[kFxLines] = { 0 }, fxEnd[kFxLines] = { 0 };
+			bool hasFx            = false;
 			if (channel.useDolbyVolume) {
 				auto sineGain = [](u8 position) -> s32 {
 					constexpr double kHalfPi = 1.57079632679489661923;
@@ -371,15 +525,21 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 				const u8 surround = static_cast<u8>(channel.dolbyVoicePosition) & 0x7f;
 				// fxMix (0..127) feeds the rear buses; with no fx the voice
 				// plays dry out front, matching the DSP's fx routing.
-				const s32 fxSend  = static_cast<s32>(static_cast<u8>(static_cast<u16>(channel.dolbyReverbFactor) >> 8)) << 8;
+				// La parte trasera va siempre a los buses traseros (se pliegan en
+				// estéreo); antes dependía del envío a FX, y un sonido detrás de
+				// la cámara sin reverb se quedaba casi mudo. El envío a FX va
+				// aparte, a las líneas de eco (Dolphin: reverb_volume_factor =
+				// current * reverb_factor >> (shift - 1), o sea el doble).
+				const s32 fxSend  = static_cast<s32>(static_cast<u8>(static_cast<u16>(channel.dolbyReverbFactor) >> 8)) << 9;
 				const s32 right   = sineGain(pan);
 				const s32 left    = sineGain(pan ^ 0x7f);
-				const s32 back    = (sineGain(surround) * fxSend) >> 15;
+				const s32 back    = sineGain(surround);
 				const s32 front   = sineGain(surround ^ 0x7f);
-				const s32 frontL  = (left * front) >> 16;
-				const s32 backL   = (left * back) >> 16;
-				const s32 frontR  = (right * front) >> 16;
-				const s32 backR   = (right * back) >> 16;
+				// Q15 * Q15 -> Q15 (con >> 16 el auto-mixer salía a la mitad).
+				const s32 frontL  = (left * front) >> 15;
+				const s32 backL   = (left * back) >> 15;
+				const s32 frontR  = (right * front) >> 15;
+				const s32 backR   = (right * back) >> 15;
 				const s32 leftPan  = frontL + ((backL * kSurroundFold) >> 15);
 				const s32 rightPan = frontR + ((backR * kSurroundFold) >> 15);
 
@@ -388,19 +548,39 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 				// console DSP runs per subframe. A finish request retargets
 				// the ramp to zero so the voice fades out instead of stopping
 				// dead, and the channel is done once the fade lands.
+				// Como el DSP (Dolphin, ZeldaAudioRenderer::AddVoice): el volumen
+				// va en línea recta de current a target dentro del subframe y
+				// queda en target. Al pedir el final, cada subframe el objetivo es
+				// la mitad del actual, y la voz acaba al llegar a 0. Antes era una
+				// rampa exponencial (>> 5 por subframe) que tardaba ~200 ms en
+				// subir desde 0, y como initAutoMixer arranca las voces en 0, los
+				// sonidos cortos (pasos, golpes, gritos) se acababan casi mudos.
 				s32 mixer  = static_cast<u16>(channel.dolbyVolumeCurrent);
-				s32 target = channel.endRequested ? 0 : static_cast<u16>(channel.dolbyVolumeTarget);
-				const s32 fromGain = mixer << 1; // Q14 -> Q15
-				mixer += (target - mixer) >> 5;
-				if (((target - mixer) >> 5) == 0) {
-					mixer = target; // Converge exactly instead of crawling.
-				}
+				s32 target = channel.endRequested ? (mixer >> 1) : static_cast<u16>(channel.dolbyVolumeTarget);
+				// Escala del microcódigo real (Dolphin, ZeldaAudioRenderer con
+				// MAKE_DOLBY_LOUDER para Pikmin 2): cuadrante = (pan * mixer) >> 15
+				// y la voz se suma con (vol * muestra) >> 16. Aquí se suma con
+				// >> 15, así que la ganancia es mixer / 2. Antes iba mixer * 2:
+				// cuatro veces más fuerte, saturaba y sonaba distorsionado.
+				const s32 fromGain = mixer >> 1;
+				mixer              = target;
 				channel.dolbyVolumeCurrent = static_cast<s16>(mixer);
-				const s32 toGain = mixer << 1;
+				const s32 toGain = mixer >> 1;
 				startL = (leftPan * fromGain) >> 15;
 				endL   = (leftPan * toGain) >> 15;
 				startR = (rightPan * fromGain) >> 15;
 				endR   = (rightPan * toGain) >> 15;
+				if (fxSend != 0) {
+					// Delante a las líneas 2/3 (salen por izquierda/derecha con
+					// más volumen), detrás a las 0/1.
+					const s32 quadrant[kFxLines] = { backL, backR, frontL, frontR };
+					for (int f = 0; f < kFxLines; ++f) {
+						const s32 send = (quadrant[f] * fxSend) >> 15;
+						fxStart[f]     = (send * fromGain) >> 15;
+						fxEnd[f]       = (send * toGain) >> 15;
+						hasFx |= fxStart[f] != 0 || fxEnd[f] != 0;
+					}
+				}
 				voice.lastEndL = endL;
 				voice.lastEndR = endR;
 				if (channel.endRequested && mixer == 0) {
@@ -410,8 +590,10 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 			} else {
 				for (int m = 0; m < 6; ++m) {
 					const DSPMixerChannel& mix = channel.mixChannels[m];
-					const s32 from = static_cast<s16>(mix.currentVolume);
-					const s32 to   = static_cast<s16>(mix.targetVolume);
+					// El DSP suma cada bus con (vol * muestra) >> 16 (Dolphin,
+					// AddBuffersWithVolumeRamp); aquí se suma con >> 15.
+					const s32 from = static_cast<s16>(mix.currentVolume) >> 1;
+					const s32 to   = static_cast<s16>(mix.targetVolume) >> 1;
 					switch (mix.id) {
 				case kBusDryLeft:
 					startL += from;
@@ -421,21 +603,27 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 					startR += from;
 					endR += to;
 					break;
-				case kBusSurrLeft:
-				case kBusAuxLeft:
+				case kBusBackLeft:
 					startL += (from * kSurroundFold) >> 15;
 					endL += (to * kSurroundFold) >> 15;
 					break;
-				case kBusSurrRight:
-				case kBusAuxRight:
+				case kBusBackRight:
 					startR += (from * kSurroundFold) >> 15;
 					endR += (to * kSurroundFold) >> 15;
 					break;
+				case kBusFx0:
+				case kBusFx1:
+				case kBusFx2:
+				case kBusFx3: {
+					// Envío a una línea FX: antes se sumaba en seco a 0,75.
+					const int f = fxLineForBus(mix.id);
+					fxStart[f] += from;
+					fxEnd[f] += to;
+					hasFx |= from != 0 || to != 0;
+					break;
+				}
 				case kBusNone:
 				default:
-					// Reverb and the remaining sends are accumulated by the
-					// engine's FX buffers, which this renderer does not drive
-					// yet; they contribute nothing to the dry mix.
 					break;
 					}
 					voice.lastEndL = endL;
@@ -515,6 +703,20 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 				const u32 slot = sub + i;
 				sBusLeft[slot] += (interpolated * volL) >> 15;
 				sBusRight[slot] += (interpolated * volR) >> 15;
+				if (sLevels) {
+					const s32 cl = (interpolated * volL) >> 15, cr = (interpolated * volR) >> 15;
+					levelSum += 0.5 * (double(cl) * cl + double(cr) * cr);
+					levelPeak = std::max(levelPeak, std::max(std::abs(cl), std::abs(cr)));
+					levelGain = std::max(levelGain, std::max(std::abs(volL), std::abs(volR)));
+					++levelCount;
+				}
+				if (hasFx) {
+					for (int f = 0; f < kFxLines; ++f) {
+						if (!sFx[f].enabled) continue;
+						const s32 vol = fxStart[f] + ((fxEnd[f] - fxStart[f]) * t) / n;
+						sFx[f].input[slot] += (interpolated * vol) >> 15;
+					}
+				}
 				produced = true;
 
 				phase += step;
@@ -552,11 +754,40 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 		channel.currentPosFrac  = static_cast<u16>(phase);
 		channel.resetVpb        = DSP_FALSE;
 		channel.ageCounter++;
+		if (voice.live) {
+			voice.lifeSamples += levelCount;
+			voice.lifeMaxGain = std::max(voice.lifeMaxGain, levelGain);
+			// Lo que pidió el juego, con la misma escala que la ganancia: el
+			// auto-mixer como target/2 por el paneo central; el resto, el mayor
+			// volumen de bus seco.
+			s32 asked = 0;
+			if (channel.useDolbyVolume) {
+				asked = (static_cast<s32>(static_cast<u16>(channel.dolbyVolumeTarget)) >> 1) * 23170 >> 15;
+			} else {
+				for (int m = 0; m < 6; ++m) {
+					const u16 id = channel.mixChannels[m].id;
+					if (id == kBusDryLeft || id == kBusDryRight) {
+						asked = std::max(asked, std::abs(static_cast<s32>(static_cast<s16>(channel.mixChannels[m].targetVolume)) >> 1));
+					}
+				}
+			}
+			voice.lifeMaxAsked = std::max(voice.lifeMaxAsked, asked);
+			if (channel.done) finishVoiceLife(voice, channel.endRequested ? kEndRequest : kEndSample);
+		}
 		if (produced) {
 			++sActiveVoices;
+			if (sLevels) {
+				const int source = channel.useDolbyVolume ? PCAL_Voice3D : PCAL_Voice2D;
+				// Ganancia con el volumen maestro, como llega a la salida.
+				pc_audio_level_gain(source, static_cast<int>((static_cast<s64>(levelGain) * static_cast<s64>(sMixerLevel.load() * 32768.0)) >> 15));
+				pc_audio_level_block(source, levelSum, levelPeak, levelCount, 0);
+			}
 		}
 	}
 
+	renderFxLines(frameSamples);
+
+	if (busLog) busLogFrame();
 	if (std::getenv("PIKMIN_AUDIO_LOG")) {
 		static unsigned n2;
 		if (sActiveVoices > 0) {
@@ -572,19 +803,31 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 			             (int)channels[0].dolbyVolumeTarget, (int)sVoices[0].lastEndL, (int)sVoices[0].lastEndR);
 		}
 	}
-	// Volumen maestro de la salida del DSP (efectos y secuencias). El nivel de
-	// salida del juego (setLevel / DsetMixerLevel) no llega a este renderer y
-	// sin ajuste los SE suenan ~+4 dB por encima de la musica en stream.
-	// Calibrado de oido; PIKMIN_SE_GAIN lo sobrescribe (p. ej. 0.5 .. 1.0).
-	static const s32 sMasterQ15 = [] {
-		double gain = 0.6;
+	// Volumen maestro de la salida del DSP (efectos y secuencias): el nivel
+	// que fija el juego (DsetMixerLevel, 1.2 en Pikmin 2) como en la consola,
+	// por PIKMIN_SE_GAIN (1.0 por defecto) para ajustarlo a mano.
+	static const double sTrim = [] {
+		double gain = 1.0;
 		if (const char* env = std::getenv("PIKMIN_SE_GAIN")) {
 			gain = std::strtod(env, nullptr);
 		}
-		gain = std::clamp(gain, 0.0, 4.0);
-		return static_cast<s32>(gain * 32768.0);
+		return std::clamp(gain, 0.0, 4.0);
 	}();
-	auto master = [](s32 v) { return static_cast<s32>((static_cast<s64>(v) * sMasterQ15) >> 15); };
+	const s32 masterQ15 = static_cast<s32>(std::clamp(sMixerLevel.load() * sTrim, 0.0, 4.0) * 32768.0);
+	auto master = [masterQ15](s32 v) { return static_cast<s32>((static_cast<s64>(v) * masterQ15) >> 15); };
+	if (pc_audio_levels_enabled()) {
+		double sum = 0.0;
+		s32 peak   = 0;
+		unsigned clipped = 0;
+		for (u32 i = 0; i < frameSamples; ++i) {
+			for (s32 v : { master(sBusLeft[i]), master(sBusRight[i]) }) {
+				sum += 0.5 * double(v) * v;
+				peak = std::max(peak, std::abs(v));
+				clipped += (v > 32767 || v < -32768) ? 1u : 0u;
+			}
+		}
+		pc_audio_level_block(PCAL_DspOut, sum, std::min<s32>(peak, 32767), frameSamples, clipped);
+	}
 	if (sPlanarOutput) {
 		// Right plane first, then left. See pc_dsp_host.h for why.
 		for (u32 i = 0; i < frameSamples; ++i) {
@@ -597,6 +840,65 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 			out[i * 2 + 1] = clampToS16(master(sBusRight[i]));
 		}
 	}
+}
+
+// Diagnóstico (PIKMIN_AUDIO_BUSLOG=1): cada ~2 s, a qué buses mandan las voces
+// y con cuánto volumen, y cómo están las voces del auto-mixer. Sirve para ver
+// qué se pierde en el mezclado.
+namespace {
+struct BusLogStats {
+	u32 frames = 0;
+	u32 voices = 0, autoVoices = 0;
+	u32 busVoices[16] = {};
+	u64 busVolume[16] = {};
+	u32 surroundHist[4] = {};
+	u64 autoLevel = 0, fxSend = 0;
+} sBusLog;
+constexpr u16 kBusLogIds[12] = { 0x0000, 0x0D00, 0x0D60, 0x0DC0, 0x0E20, 0x0E80, 0x0EE0, 0x0CA0, 0x0F40, 0x0FA0, 0x0B00, 0x09A0 };
+int busLogIndex(u16 id)
+{
+	for (int i = 0; i < 12; ++i)
+		if (kBusLogIds[i] == id) return i;
+	return 12; // otro
+}
+} // namespace
+
+void busLogVoice(const DSPchannel_& channel)
+{
+	++sBusLog.voices;
+	if (channel.useDolbyVolume) {
+		++sBusLog.autoVoices;
+		sBusLog.surroundHist[(static_cast<u8>(channel.dolbyVoicePosition) & 0x7f) >> 5]++;
+		sBusLog.autoLevel += static_cast<u16>(channel.dolbyVolumeTarget);
+		sBusLog.fxSend += static_cast<u8>(static_cast<u16>(channel.dolbyReverbFactor) >> 8);
+		return;
+	}
+	for (int m = 0; m < 6; ++m) {
+		const DSPMixerChannel& mix = channel.mixChannels[m];
+		const s32 vol = std::abs(static_cast<s32>(static_cast<s16>(mix.targetVolume)));
+		if (vol == 0) continue;
+		const int i = busLogIndex(mix.id);
+		sBusLog.busVoices[i]++;
+		sBusLog.busVolume[i] += static_cast<u64>(vol);
+	}
+}
+
+void busLogFrame()
+{
+	if (++sBusLog.frames < 400) return;
+	std::fprintf(stderr, "[PC DSP bus] voices/frame=%.1f auto=%.1f", sBusLog.voices / 400.0, sBusLog.autoVoices / 400.0);
+	if (sBusLog.autoVoices) {
+		std::fprintf(stderr, " autoLvl=%llu fx=%llu surr=[%u %u %u %u]", sBusLog.autoLevel / sBusLog.autoVoices,
+		             sBusLog.fxSend / sBusLog.autoVoices, sBusLog.surroundHist[0], sBusLog.surroundHist[1],
+		             sBusLog.surroundHist[2], sBusLog.surroundHist[3]);
+	}
+	for (int i = 0; i < 13; ++i) {
+		if (!sBusLog.busVoices[i]) continue;
+		std::fprintf(stderr, " %04x:%u/%llu", i < 12 ? kBusLogIds[i] : 0xFFFF, sBusLog.busVoices[i],
+		             sBusLog.busVolume[i] / sBusLog.busVoices[i]);
+	}
+	std::fprintf(stderr, "\n");
+	sBusLog = BusLogStats();
 }
 
 void pc_dsp_host_render_frame_planar(DSPchannel_* channels, u32 channelCount,

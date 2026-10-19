@@ -14,6 +14,12 @@ DEFINE_ERROR(18)
  */
 DEFINE_PRINT("Bou")
 
+#if defined(PIKI_PC_PORT)
+// Netplay failure-path diagnostic, strong-defined by pc_netplay_diag.cpp in
+// netplay builds only. Null otherwise, and the halt below is unchanged.
+void pc_netplay_diag_bad_action_target(const char* site, Piki* piki, Creature* target);
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -33,6 +39,9 @@ void ActBou::init(Creature* creature)
 		mTargetStick = creature;
 	} else {
 		PRINT("TARGET IS %x : %d\n", creature, creature ? creature->mObjType : OBJTYPE_INVALID);
+#if defined(PIKI_PC_PORT)
+		if (pc_netplay_diag_bad_action_target != nullptr) pc_netplay_diag_bad_action_target("ActBou::init", mPiki, creature);
+#endif
 		ERROR("karl caught a cold !\n");
 	}
 

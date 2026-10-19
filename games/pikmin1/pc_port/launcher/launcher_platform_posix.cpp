@@ -4,10 +4,16 @@
 
 #include "launcher_platform.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#if defined(__APPLE__)
+#include <climits>
+#include <mach-o/dyld.h>
+#endif
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <sys/types.h>
@@ -89,11 +95,22 @@ fs::path executablePath()
     if (env != nullptr) {
         return fs::path(env);
     }
+#if defined(__APPLE__)
+    // macOS has no /proc. _NSGetExecutablePath returns the path as it was
+    // invoked, which can be relative, so resolve it to an absolute path.
+    std::vector<char> invoked(4096);
+    std::uint32_t invokedSize = static_cast<std::uint32_t>(invoked.size());
+    if (_NSGetExecutablePath(invoked.data(), &invokedSize) != 0) return {};
+    char resolved[PATH_MAX];
+    if (realpath(invoked.data(), resolved) == nullptr) return {};
+    return fs::path(resolved);
+#else
     std::vector<char> path(4096);
     const ssize_t count = readlink("/proc/self/exe", path.data(), path.size() - 1);
     if (count <= 0) return {};
     path[static_cast<std::size_t>(count)] = '\0';
     return fs::path(path.data());
+#endif
 }
 
 fs::path defaultDataRoot()
@@ -110,7 +127,12 @@ unsigned long currentProcessId()
 
 bool hasGraphicalDialogs()
 {
+#if defined(__APPLE__)
+    // osascript ships with macOS, so the native choosers are always available.
+    return true;
+#else
     return commandExists("zenity") || commandExists("kdialog");
+#endif
 }
 
 bool stdinIsTerminal()
@@ -151,6 +173,15 @@ fs::path askForInstallDirectory(const std::string& title)
         });
         if (!selected.empty()) return selected;
     }
+#if defined(__APPLE__)
+    else {
+        // POSIX path returns a trailing slash. Drop it, but keep a bare "/".
+        std::string selected = runDialog("osascript", { "-e",
+            "POSIX path of (choose folder with prompt \"Open Nectar - " + title + "\")" });
+        while (selected.size() > 1 && selected.back() == '/') selected.pop_back();
+        if (!selected.empty()) return selected;
+    }
+#endif
     return {};
 }
 
@@ -170,6 +201,15 @@ fs::path askForImage()
         });
         if (!selected.empty()) return selected;
     }
+#if defined(__APPLE__)
+    else {
+        // No type filter: osascript's "of type" needs file-type identifiers, not
+        // extensions. The launcher checks the image format after selection.
+        const std::string selected = runDialog("osascript", { "-e",
+            "POSIX path of (choose file with prompt \"Open Nectar - Choose your disc image\")" });
+        if (!selected.empty()) return selected;
+    }
+#endif
     return {};
 }
 
@@ -236,7 +276,7 @@ bool downloadFile(const std::string& url, const fs::path& destination, std::stri
         // Sin salida: el launcher no tiene dónde mostrarla.
         const int null = open("/dev/null", O_WRONLY);
         if (null >= 0) { dup2(null, STDOUT_FILENO); dup2(null, STDERR_FILENO); }
-        execlp("curl", "curl", "-fsSL", "--max-time", "30", "-o", partial.c_str(), url.c_str(), static_cast<char*>(nullptr));
+        execlp("curl", "curl", "-fsSL", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60", "-o", partial.c_str(), url.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }
     int status = 0;
@@ -373,15 +413,108 @@ void relaunch(const fs::path& program, const std::vector<std::string>& arguments
     execv(program.c_str(), argv.data());
 }
 
-[[noreturn]] void launchGame(const fs::path& dataRoot, const fs::path& gameBinary)
+[[noreturn]] void launchGame(const fs::path& dataRoot, const fs::path& gameBinary,
+                             const std::vector<std::string>& arguments)
 {
     if (chdir(dataRoot.c_str()) != 0) {
         std::cerr << "No se pudo entrar en " << dataRoot << ": " << std::strerror(errno) << '\n';
         std::exit(1);
     }
-    execl(gameBinary.c_str(), gameBinary.c_str(), static_cast<char*>(nullptr));
+    std::vector<std::string> storage;
+    storage.push_back(gameBinary.string());
+    storage.insert(storage.end(), arguments.begin(), arguments.end());
+    std::vector<char*> argv;
+    for (std::string& argument : storage) argv.push_back(argument.data());
+    argv.push_back(nullptr);
+    execv(gameBinary.c_str(), argv.data());
     std::cerr << "No se pudo iniciar " << gameBinary << ": " << std::strerror(errno) << '\n';
     std::exit(1);
+}
+
+bool spawnGame(const fs::path& dataRoot, const fs::path& gameBinary, const std::vector<std::string>& arguments,
+               GameProcess& process, std::string& error)
+{
+    std::vector<std::string> storage;
+    storage.push_back(gameBinary.string());
+    storage.insert(storage.end(), arguments.begin(), arguments.end());
+    std::vector<char*> argv;
+    for (std::string& argument : storage) argv.push_back(argument.data());
+    argv.push_back(nullptr);
+    const pid_t child = fork();
+    if (child < 0) {
+        error = std::string("fork failed: ") + std::strerror(errno);
+        return false;
+    }
+    if (child == 0) {
+        if (chdir(dataRoot.c_str()) != 0) _exit(127);
+        execv(gameBinary.c_str(), argv.data());
+        _exit(127);
+    }
+    process.handle = static_cast<unsigned long long>(child);
+    process.pid    = static_cast<unsigned long>(child);
+    return true;
+}
+
+bool createDesktopShortcut(const fs::path& launcher)
+{
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return false;
+    std::error_code ec;
+#if defined(__APPLE__)
+    const fs::path link = fs::path(home) / "Desktop" / "Open Nectar";
+    fs::remove(link, ec);
+    fs::create_symlink(launcher, link, ec);
+    return !ec;
+#else
+    // La carpeta del escritorio va traducida ("Escritorio"): la dice
+    // user-dirs.dirs, con la línea XDG_DESKTOP_DIR="$HOME/Escritorio".
+    fs::path desktop = fs::path(home) / "Desktop";
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    std::ifstream dirs((xdg && *xdg ? fs::path(xdg) : fs::path(home) / ".config") / "user-dirs.dirs");
+    for (std::string line; std::getline(dirs, line);) {
+        const std::string key = "XDG_DESKTOP_DIR=\"";
+        if (line.compare(0, key.size(), key) != 0) continue;
+        std::string value = line.substr(key.size());
+        if (!value.empty() && value.back() == '"') value.pop_back();
+        if (value.compare(0, 5, "$HOME") == 0) value = std::string(home) + value.substr(5);
+        if (!value.empty()) desktop = value;
+    }
+    const fs::path icon = launcher.parent_path() / "open_nectar.png";
+    const std::string entry = "[Desktop Entry]\nType=Application\nName=Open Nectar\n"
+                              "Comment=Pikmin 1 and Pikmin 2\nExec=\"" + launcher.string() + "\"\n"
+                              "Path=" + launcher.parent_path().string() + "\n"
+                            + (fs::is_regular_file(icon, ec) ? "Icon=" + icon.string() + "\n" : std::string())
+                            + "Terminal=false\nCategories=Game;\n";
+    bool written = false;
+    // Escritorio y menú de aplicaciones.
+    for (const fs::path& file : { desktop / "open-nectar.desktop",
+                                  fs::path(home) / ".local/share/applications/open-nectar.desktop" }) {
+        fs::create_directories(file.parent_path(), ec);
+        std::ofstream out(file, std::ios::trunc);
+        if (!(out << entry)) continue;
+        out.close();
+        fs::permissions(file, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                        fs::perm_options::add, ec);
+        if (!written) {
+            // GNOME no abre un .desktop del escritorio hasta marcarlo de confianza.
+            std::string ignored, error;
+            runAndCapture("gio", { "set", file.string(), "metadata::trusted", "true" }, desktop, ignored, error);
+        }
+        written = true;
+    }
+    return written;
+#endif
+}
+
+bool gameRunning(GameProcess& process, int& exitCode)
+{
+    if (process.handle == 0) return false;
+    int status = 0;
+    const pid_t got = waitpid(static_cast<pid_t>(process.handle), &status, WNOHANG);
+    if (got == 0) return true;
+    process.handle = 0;
+    exitCode = got > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    return false;
 }
 
 } // namespace platform

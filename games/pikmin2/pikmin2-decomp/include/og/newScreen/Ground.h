@@ -87,6 +87,9 @@ struct ObjGround : public ::Screen::ObjBase {
 	u8 mIsTotalPokoActive;                   // _64, unused for ground
 	u32 mPokos;                              // _68
 	f32 mTotalPokoTimer;                     // _6C, unused for ground
+#ifdef PIKI_PC_PORT
+	og::Screen::PikminCounter* mPcPikiCounter2; // co-op: el grupo de Louie, en su mitad
+#endif
 
 	static struct StaticValues {
 		inline StaticValues()

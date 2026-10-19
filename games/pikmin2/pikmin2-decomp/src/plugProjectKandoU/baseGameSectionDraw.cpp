@@ -1,4 +1,5 @@
 #include "Game/BaseGameSection.h"
+#include "Game/pcCoop.h"
 #ifdef PIKI_PC_PORT
 extern "C" int pc_settings_get_shadows(void);
 extern "C" void pc_gfx_set_dof_focus(float viewDistance);
@@ -25,6 +26,9 @@ extern u32 gPcDrawBufferClears;
 #include "Light.h"
 #include "nans.h"
 
+#ifdef PIKI_PC_PORT
+extern "C" void pc_gfx_world_done(void);
+#endif
 const char* message = "drct-post";
 
 namespace Game {
@@ -46,7 +50,7 @@ void BaseGameSection::newdraw_draw3D_all(Graphics& gfx)
 	gPcDrawBufferClears++;
 #endif
 
-	if (!gameSystem->isMultiplayerMode()) {
+	if (!PC_TWO_CAPTAIN_PLAY()) {
 		particleMgr->setXfb(mXfbImage->mTexInfo);
 	}
 
@@ -56,6 +60,12 @@ void BaseGameSection::newdraw_draw3D_all(Graphics& gfx)
 	drawParticle(gfx, PLAYER2_VIEWPORT);
 	sys->mTimers->_stop("part-draw");
 
+#ifdef PIKI_PC_PORT
+	// Postproceso (sombras, SSAO, DOF) antes de los contadores: no escriben
+	// profundidad y heredaban la sombra del suelo que tienen debajo. La
+	// llamada de doDraw queda sin efecto (una vez por frame).
+	pc_gfx_world_done();
+#endif
 	// Draw counters for both viewports
 	// (Life gauge & Carry info)
 	sys->mTimers->_start("drct-post", true);
@@ -122,7 +132,7 @@ void BaseGameSection::newdraw_drawAll(Viewport* vp)
 		f32 focus   = 0.0f;
 		Navi* navi  = naviMgr ? naviMgr->getActiveNavi() : nullptr;
 		Camera* cam = vp->getCamera();
-		if (navi && cam && !gameSystem->isMultiplayerMode()) {
+		if (navi && cam && !PC_TWO_CAPTAIN_PLAY()) {
 			Vector3f eye  = cam->getPosition();
 			Vector3f look = cam->getLookAtPosition();
 			Vector3f fwd(look.x - eye.x, look.y - eye.y, look.z - eye.z);

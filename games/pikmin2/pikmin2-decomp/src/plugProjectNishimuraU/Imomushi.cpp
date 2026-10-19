@@ -370,6 +370,12 @@ Creature* Obj::getRandFruitsPlant()
 	int counter = 0;
 	ItemPlant::Plant* plantList[32];
 	f32 rad = SQUARE(C_GENERALPARMS.mTerritoryRadius());
+#ifdef PIKI_PC_PORT
+	// Sin plantas de bayas en el mapa (cuevas) no hay gestor: se queda escondida.
+	if (!ItemPlant::mgr) {
+		return nullptr;
+	}
+#endif
 	Iterator<BaseItem> iter(ItemPlant::mgr);
 
 	CI_LOOP(iter)

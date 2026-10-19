@@ -79,6 +79,9 @@ struct ObjCave : public ::Screen::ObjBase {
 	J2DPane* mPaneChika;                         // _70
 	J2DPane* mPaneFinalf;                        // _74
 	bool mDoSensorEff;                           // _78
+#ifdef PIKI_PC_PORT
+	og::Screen::PikminCounterCave* mPcPikiCounter2; // co-op: el grupo de Louie, en su mitad
+#endif
 
 	static struct StaticValues {
 		inline StaticValues()

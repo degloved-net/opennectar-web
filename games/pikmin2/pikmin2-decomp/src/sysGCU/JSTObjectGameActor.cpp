@@ -22,6 +22,10 @@ ObjectGameActor::ObjectGameActor(char const* name, MoviePlayer* movie, Creature*
 	mGameObject   = obj;
 	mSRTCommand   = 0;
 	mActorArchive = MoviePlayer::mArchive;
+#ifdef PIKI_PC_PORT
+	// Script rewind calls reset(), so this latch belongs to this actor instance.
+	mPcX03OnyonBirthSeen = false;
+#endif
 	reset();
 	obj->movie_begin(true);
 	mRotation2 = 0.0f;
@@ -145,6 +149,16 @@ void ObjectGameActor::update()
 
 	for (int i = 0; i < mCurrCommandCount; i++) {
 		if (mCommandIDs[i] >= CC_MovieCommand1) {
+#ifdef PIKI_PC_PORT
+			// x03 rewinds on skip; its forced Red Onyon birth must happen once.
+			if (mCommandIDs[i] == CC_MovieCommand6 && mMoviePlayer && mMoviePlayer->mCurrentConfig
+			    && mMoviePlayer->mCurrentConfig->is("x03_find_red_onyon") && mGameObject->getObjType() == OBJTYPE_Onyon) {
+				if (mPcX03OnyonBirthSeen) {
+					continue;
+				}
+				mPcX03OnyonBirthSeen = true;
+			}
+#endif
 			mGameObject->movieUserCommand(mCommandIDs[i], mMoviePlayer);
 		} else if (mCommandIDs[i] == CC_StartAnimation) {
 			mGameObject->movieStartAnimation(mMovieCommandData[i]);

@@ -1,4 +1,5 @@
 #include "Game/Entities/Queen.h"
+#include "Game/pcCoop.h"
 #include "Game/Entities/Baby.h"
 #include "Game/Entities/Rock.h"
 #include "Game/generalEnemyMgr.h"
@@ -357,7 +358,11 @@ bool Obj::isRollingAttackLeft()
 {
 	if (mDoEasyRoll) {
 		mDoEasyRoll = false;
+#ifdef PIKI_PC_PORT
+		Navi* navi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 		Navi* navi  = naviMgr->getActiveNavi();
+#endif
 		if (navi) {
 			f32 angle       = HALF_PI + getFaceDir();
 			Vector3f angles = Vector3f(sinf(angle), 0.0f, cosf(angle));

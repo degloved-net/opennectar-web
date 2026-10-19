@@ -120,6 +120,17 @@ struct TRenderingProcessor : public P2JME::TRenderingProcessor {
 	virtual BOOL doDrawCommon(f32, f32, Matrixf*, Matrixf*);     // _84
 	virtual void makeMatrix(Matrixf*, DrawInfo*, f32, Vector3f); // _88
 	virtual void doGetDrawInfo(DrawInfo*) { }                    // _8C (weak)
+#ifdef PIKI_PC_PORT
+	virtual bool pcInlineIconOrigin(f32& x, f32& y)
+	{
+		// Cada letra lleva su propia matriz (posición incluida) y se dibuja en
+		// 0,0: el icono igual. Fuera de la caja (scroll) no se marca.
+		if (doDrawCommon(x, y, nullptr, nullptr) < 128) return false;
+		x = 0.0f;
+		y = 0.0f;
+		return true;
+	}
+#endif
 
 	void initDrawInfoMgr(u32);
 

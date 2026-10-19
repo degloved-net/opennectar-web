@@ -1,4 +1,5 @@
 #ifdef PIKI_PC_PORT
+#include "audio/pc_audio_drops.h"
 #include <cstdio>
 #include <cstdlib>
 #endif
@@ -132,20 +133,32 @@ JASChannel* noteOn(int bankIndex, int instIndex, u8 p3, u8 p4, u16 p5, void (*p6
 	if (instIndex > 0xEF) {
 		return noteOnOsc(instIndex - 0xF0, p3, p4, p5, p6, p7);
 	}
+#ifdef PIKI_PC_PORT
+	pc_audio_drop(PCAD_NoteOn);
+#define PC_DROP(reason) pc_audio_drop(reason)
+#define PC_DROP_WAVE(reason, wave) pc_audio_drop_wave(reason, wave)
+#else
+#define PC_DROP(reason)
+#define PC_DROP_WAVE(reason, wave)
+#endif
 	JASBank* bank = getBank(bankIndex);
 	if (bank == nullptr) {
+		PC_DROP(PCAD_NoBank);
 		return nullptr;
 	}
 	JASInst* inst = bank->getInst(instIndex);
 	if (inst == nullptr) {
+		PC_DROP(PCAD_NoInst);
 		return nullptr;
 	}
 	JASInstParam instParam;
 	if (inst->getParam(p3, p4, &instParam) == false) {
+		PC_DROP(PCAD_NoInstParam);
 		return nullptr;
 	}
 	JASWaveBank* waveBank = bank->_04;
 	if (waveBank == nullptr) {
+		PC_DROP(PCAD_NoWaveBank);
 		return nullptr;
 	}
 	JASWaveHandle* waveHandle = waveBank->getWaveHandle(instParam.mWaveID);
@@ -158,14 +171,17 @@ JASChannel* noteOn(int bankIndex, int instIndex, u8 p3, u8 p4, u16 p5, void (*p6
 	}
 #endif
 	if (waveHandle == nullptr) {
+		PC_DROP_WAVE(PCAD_NoWaveHandle, instParam.mWaveID);
 		return nullptr;
 	}
 	const JASWaveInfo* waveInfo = waveHandle->getWaveInfo();
 	if (waveInfo == nullptr) {
+		PC_DROP_WAVE(PCAD_NoWaveInfo, instParam.mWaveID);
 		return nullptr;
 	}
 	void* wavePtr = waveHandle->getWavePtr();
 	if (wavePtr == nullptr) {
+		PC_DROP_WAVE(PCAD_NoWavePtr, instParam.mWaveID);
 		return nullptr;
 	}
 	// JASMemPool<JASChannel, JASThreadingModel::SingleThreaded>* channelMemPool = JASSingletonHolder<JASMemPool<JASChannel,
@@ -174,6 +190,7 @@ JASChannel* noteOn(int bankIndex, int instIndex, u8 p3, u8 p4, u16 p5, void (*p6
 	    = new (JASPoolAllocObject<JASChannel, JASCreationPolicy::NewFromRootHeap, JASThreadingModel::SingleThreaded>::alloc())
 	        JASChannel(p6, p7);
 	if (channel == nullptr) {
+		PC_DROP(PCAD_NoChannel);
 		return nullptr;
 	}
 	channel->setPanPower(1.0f, 1.0f, 1.0f);
@@ -207,6 +224,7 @@ JASChannel* noteOn(int bankIndex, int instIndex, u8 p3, u8 p4, u16 p5, void (*p6
 	}
 #endif
 	if (!played) {
+		PC_DROP(PCAD_PlayFail);
 		return nullptr;
 	}
 	return channel;

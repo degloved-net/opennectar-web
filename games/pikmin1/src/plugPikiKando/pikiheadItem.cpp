@@ -1,6 +1,7 @@
 #include "PikiHeadItem.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "netplay/pc_netplay_present.h"
 #endif
 #include "DebugLog.h"
 #include "GameStat.h"
@@ -250,8 +251,16 @@ void PikiHeadItem::refresh(Graphics& gfx)
 		localPos.set(6.0f, 0.0f, 0.0f);
 	}
 
+#if defined(PIKI_PC_PORT)
+	// Netplay: the glow anchor and effect scale are sim.
+	if (pc_netplay_present_sim_side()) {
+		mFreeLightEfx->setScale(0.84f * mItemShapeObject->mShape->calcJointWorldPos(gfx, 3, localPos));
+		mGlowEffectPos = localPos;
+	}
+#else
 	mFreeLightEfx->setScale(0.84f * mItemShapeObject->mShape->calcJointWorldPos(gfx, 3, localPos));
 	mGlowEffectPos = localPos;
+#endif
 
 	pikiMgr->mLeafModel[mFlowerStage]->drawshape(gfx, *gfx.mCamera, nullptr);
 }

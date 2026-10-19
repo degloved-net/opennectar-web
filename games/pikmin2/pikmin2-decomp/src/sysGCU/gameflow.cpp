@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "pc_p2_captain_preview.h"
+#endif
 #include "types.h"
 #ifdef PIKI_PC_PORT
 extern "C" void pc_gfx_set_post_allowed(int allowed);
@@ -83,6 +86,11 @@ void GameFlow::run()
 	JKRExpHeap* expHeap;
 	JKRHeap* parentHeap;
 
+#ifdef PIKI_PC_PORT
+	// Selector de capitanes: los modelos de las tarjetas viven en un heap
+	// propio, reservado antes de que cada sección se quede con todo lo libre.
+	pc_p2_captain_preview_reserve();
+#endif
 	while (true) {
 		parentHeap = JKRGetCurrentHeap();
 

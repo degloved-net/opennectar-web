@@ -1,6 +1,27 @@
+#ifdef PIKI_PC_PORT
+extern "C" void pc_p2_rules_begin_new_run(void);
+extern "C" void pc_p2_rules_set_pending(int permadeath, int hard);
+#include "pc_speedrun.h"
+#include "pc_p2_coop.h"
+#include "Game/MemoryCard/Mgr.h"
+#include "stream.h"
+#include "GameFlow.h"
+#include "settings/pc_settings.h"
+#endif
 #include "Game/MoviePlayer.h"
+#include "ebi/FileSelect.h"
+#include "ebi/FS.h"
 #ifdef PIKI_PC_PORT
 extern "C" void pc_gfx_set_post_allowed(int allowed);
+extern "C" float pc_gfx_get_current_aspect_ratio(void);
+extern "C" int pc_gfx_p2_tile_edges(float gxY0, float gxY1, float period, float maxLuma);
+extern "C" void pc_gfx_p2_sides_static(int capture);
+extern "C" void pc_gfx_p2_sides_static_reset(void);
+static int sPcSidesFrames = 0;
+static bool sPcSpeedrunRestart = false; // reset rápido: otra run sin el menú del modo
+static bool sPcCaptainSelect   = false; // selector de capitanes abierto antes de la selección de partida
+static bool sPcCoopAssign      = false; // co-op: asignación de mandos antes del selector de capitanes
+extern "C" void pc_window_input_reset_assignment(void);
 #endif
 #include "Game/GameConfig.h"
 #include "Game/AIConstants.h"
@@ -49,6 +70,11 @@ void FileState::init(SingleGameSection* section, StateArg* arg)
 	sys->setFrameRate(1);
 #ifdef PIKI_PC_PORT
 	pc_gfx_set_post_allowed(0); // bloom/SSAO dejaban en negro esta pantalla 2D
+	// Venimos de perder una partida Permadeath: el aviso va primero y el
+	// selector espera debajo hasta que se cierra.
+	pc_erased_notice_open_if_queued();
+	sPcSidesFrames = 0; // laterales estaticos: se vuelven a capturar al entrar
+	pc_gfx_p2_sides_static_reset();
 #endif
 	playData->mDeadNaviID.typeView = 0;
 }
@@ -87,7 +113,24 @@ void FileState::exec(SingleGameSection* game)
 
 		mLoadDelegate = new Delegate<FileState>(this, &FileState::dvdload);
 		game->loadSync(mLoadDelegate, false);
+#ifdef PIKI_PC_PORT
+		// Speedrun (opción del título): sin selector de ranuras, el menú del modo;
+		// tras un reset rápido, otra run directamente.
+		sPcSpeedrunRestart = pc_speedrun_active() && pc_speedrun_take_restart();
+		if (pc_speedrun_active() && !sPcSpeedrunRestart) {
+			pc_speedrun_menu_open();
+		} else if (pc_p2_coop_pending()) {
+			// Co-op (opción del título): mandos de cada jugador, luego capitanes.
+			pc_devassign_prompt_open();
+			sPcCoopAssign = true;
+		} else if (!pc_speedrun_active()) {
+			// Selector de capitanes antes de la selección de partida.
+			pc_captain_select_open();
+			sPcCaptainSelect = true;
+		}
+#else
 		mFSMgr->start();
+#endif
 		mIsNotInitialized = false;
 
 	} else if (mMainHeap) {
@@ -108,6 +151,79 @@ void FileState::exec(SingleGameSection* game)
 		}
 
 		game->BaseHIOSection::doUpdate();
+#ifdef PIKI_PC_PORT
+		if (pc_erased_notice_active()) {
+			return;
+		}
+		if (sPcCoopAssign) {
+			if (pc_devassign_prompt_active()) {
+				return;
+			}
+			sPcCoopAssign = false;
+			if (pc_devassign_prompt_result() == PC_DEVASSIGN_OK) {
+				pc_captain_select_open();
+				sPcCaptainSelect = true;
+			} else {
+				pc_window_input_reset_assignment();
+				game->flow_goto_title();
+			}
+			return;
+		}
+		if (sPcCaptainSelect) {
+			if (pc_captain_select_active()) {
+				return;
+			}
+			sPcCaptainSelect = false;
+			if (pc_captain_select_result() == PC_CAPSEL_START) {
+				mFSMgr->start();
+			} else {
+				game->flow_goto_title();
+			}
+			return;
+		}
+		if (pc_speedrun_active()) {
+			if (!sPcSpeedrunRestart && pc_speedrun_menu_active()) {
+				return;
+			}
+			if ((sPcSpeedrunRestart || pc_speedrun_menu_result() == PC_SPEEDRUN_MENU_START)
+			    && pc_speedrun_category_is_challenge()) {
+				// Desafío: la sección pasa a ser la del Modo Desafío; el reloj
+				// espera a que se elija el primer nivel.
+				sPcSpeedrunRestart = false;
+				pc_speedrun_start_timer();
+				GameFlow::mActiveSectionFlag = GameFlow::SN_ChallengeGame;
+				game->flow_goto_title();
+				return;
+			}
+			if (sPcSpeedrunRestart || pc_speedrun_menu_result() == PC_SPEEDRUN_MENU_START) {
+				sPcSpeedrunRestart = false;
+				// Una run es una sola sentada: partida nueva sin tarjeta, por el
+				// mismo camino que "jugar sin guardar" (FSMState_CardError), y
+				// el guardado se salta (ebi::Save::TMgr::start). Speedrun es Normal.
+				static_cast<Game::MemoryCard::Mgr*>(sys->mCardMgr)->loadPlayerForNoCard(0);
+				gameSystem->mTimeMgr->mDayCount = 0;
+				// Práctica de un día N > 1: la partida tal como empezaba ese día en
+				// una run (punto de práctica); PlayData::read pone también el día.
+				if (pc_speedrun_practice_day() > 1) {
+					u8* buffer = new u8[PLAYER_FILE_SIZE];
+					if (pc_speedrun_practice_point_load(pc_speedrun_practice_day(), buffer, PLAYER_FILE_SIZE)) {
+						RamStream stream(buffer, PLAYER_FILE_SIZE);
+						playData->read(stream);
+					} else {
+						pc_speedrun_set_practice_day(1);
+					}
+					delete[] buffer;
+				}
+				pc_p2_rules_set_pending(0, 0);
+				pc_p2_rules_begin_new_run();
+				pc_speedrun_start_timer();
+				startGame(game);
+			} else {
+				game->flow_goto_title();
+			}
+			return;
+		}
+#endif
 		mFSMgr->update();
 
 		if (mFSMgr->isFinish()) {
@@ -118,6 +234,10 @@ void FileState::exec(SingleGameSection* game)
 
 			case ebi::FileSelect::TMgr::End_StartNewGame:
 				gameSystem->mTimeMgr->mDayCount = 0;
+#ifdef PIKI_PC_PORT
+				pc_p2_rules_begin_new_run();
+				pc_speedrun_start_timer();
+#endif
 				startGame(game);
 				break;
 
@@ -216,7 +336,32 @@ void FileState::draw(SingleGameSection* game, Graphics& gfx)
 		gfx.mPerspGraph.setPort();
 		mFSMgr->draw();
 		gfx.mPerspGraph.setPort();
+#ifdef PIKI_PC_PORT
+		// La rejilla de arriba (hasta la banda azul, y=75) se queda en el 4:3:
+		// se continua en los laterales repitiendo una celda (20 en 612 = 30.6).
+		// Mientras pasa el destello de los slots (franja clara) no se copia.
+		// Una vez guardados los laterales estaticos ya no hace falta.
+		bool pcTiled = false;
+		if (sPcSidesFrames <= 30) {
+			pcTiled = pc_gfx_p2_tile_edges(0.0f, 75.0f, 30.6f, 0.25f) != 0;
+		}
+#endif
 		particle2dMgr->draw(0, 0);
+#ifdef PIKI_PC_PORT
+		// Laterales estaticos: con la pantalla quieta (medio segundo seguido
+		// eligiendo partida, ya sin la entrada ni su destello) se guardan y
+		// desde entonces se reponen; los destellos y la cortina de las
+		// transiciones solo existen en el 4:3 y los descuadraban.
+		gfx.mPerspGraph.setPort();
+		if (sPcSidesFrames <= 30) {
+			// Quieta = eligiendo partida y sin destello en la franja de arriba.
+			const bool idle = mFSMgr->mMgrFS.getStateID() == ebi::FS::FSSTATE_SelectData && pcTiled;
+			sPcSidesFrames  = idle ? sPcSidesFrames + 1 : 0;
+			if (sPcSidesFrames > 30) pc_gfx_p2_sides_static(1);
+		} else {
+			pc_gfx_p2_sides_static(0);
+		}
+#endif
 		mFSMgr->showInfo();
 	}
 }

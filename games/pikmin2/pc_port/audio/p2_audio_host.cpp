@@ -1,6 +1,7 @@
 #include "audio/p2_audio_host.h"
 
 #include "audio/pc_aram.h"
+#include "audio/pc_audio_drops.h"
 #include "audio/pc_dsp_host.h"
 #ifndef BEGIN_SCOPE_EXTERN_C
 #define BEGIN_SCOPE_EXTERN_C extern "C" {
@@ -13,16 +14,13 @@
 #include <cstdlib>
 #include <algorithm>
 #include <SDL.h>
-#ifdef __EMSCRIPTEN__
-#include <atomic>
-#endif
 
 namespace {
 bool sOpened = false;
-#ifdef __EMSCRIPTEN__
-std::atomic<bool> sMovieAudio {false};
-SDL_AudioStream* sMovieStream = nullptr;
-#endif
+void* sFrameChannels    = nullptr;
+s16* sFrameOutput       = nullptr;
+u32 sFrameSamples       = 0;
+u32 sFrameSubframes     = 0;
 }
 
 void pc_p2_audio_init()
@@ -59,13 +57,46 @@ void pc_p2_audio_render(void* channels, s16* planarOutput, u32 frameSamples)
 	pc_p2_audio_init();
 	pc_dsp_host_render_frame_planar(reinterpret_cast<DSPchannel_*>(channels), 64,
 	                                planarOutput, frameSamples);
+	pc_audio_drop_report();
+}
+
+void pc_p2_audio_set_fx_line(u32 index, bool enabled, u32 subframes, const u16 dest[2], const s16 volume[2],
+                             const s16 coeffs[8])
+{
+	pc_dsp_host_set_fx_line(index, enabled, subframes, dest, volume, coeffs);
+}
+
+void pc_p2_audio_begin_frame(void* channels, s16* planarOutput, u32 frameSamples, u32 subframes)
+{
+	sFrameChannels  = channels;
+	sFrameOutput    = planarOutput;
+	sFrameSamples   = frameSamples;
+	sFrameSubframes = subframes ? subframes : 1;
+}
+
+void pc_p2_audio_render_subframe(u32 index)
+{
+	if (!sFrameOutput || index >= sFrameSubframes) return;
+	pc_p2_audio_init();
+	const u32 length = sFrameSamples / sFrameSubframes;
+	const u32 offset = index * length;
+	if (length == 0 || offset + length > sFrameSamples) return;
+	// La salida es planar (derecha y luego izquierda, ver pc_dsp_host.h): se
+	// mezcla el trozo aparte y se copia a su sitio en cada plano.
+	static s16 part[2 * 1024];
+	if (length > 1024) return;
+	pc_dsp_host_render_frame_planar(reinterpret_cast<DSPchannel_*>(sFrameChannels), 64, part, length);
+	for (u32 i = 0; i < length; ++i) {
+		sFrameOutput[offset + i]                 = part[i];
+		sFrameOutput[sFrameSamples + offset + i] = part[length + i];
+	}
+	if (index + 1 == sFrameSubframes) {
+		pc_audio_drop_report();
+	}
 }
 
 void pc_p2_audio_queue(const s16* interleaved, size_t frames)
 {
-#ifdef __EMSCRIPTEN__
-	if (sMovieAudio.load()) return;
-#endif
 	if (sOpened && interleaved && frames) {
 		PikiAudioSinkQueue(interleaved, frames);
 	}
@@ -132,40 +163,3 @@ void pc_p2_audio_queue(const s16* interleaved, size_t frames)
 		}
 	}
 }
-
-#ifdef __EMSCRIPTEN__
-bool pc_p2_movie_audio_open(int rate)
-{
-	pc_p2_movie_audio_close();
-	if (!sOpened || rate <= 0) return false;
-	sMovieStream = SDL_NewAudioStream(AUDIO_S16SYS, 2, rate, AUDIO_S16SYS, 2, 32000);
-	if (!sMovieStream) return false;
-	sMovieAudio.store(true);
-	PikiAudioSinkClear();
-	PikiAudioSinkResume();
-	return true;
-}
-
-void pc_p2_movie_audio_queue(const s16* pcm, size_t frames)
-{
-	if (!sMovieStream || !pcm || !frames) return;
-	if (PikiAudioSinkQueuedFrames() >= 16000) return;
-	if (SDL_AudioStreamPut(sMovieStream, pcm, int(frames * 4)) != 0) return;
-	s16 converted[2048];
-	while (SDL_AudioStreamAvailable(sMovieStream) > 0) {
-		int bytes = SDL_AudioStreamGet(sMovieStream, converted, sizeof(converted));
-		if (bytes <= 0) break;
-		PikiAudioSinkQueue(converted, size_t(bytes) / 4);
-	}
-}
-
-void pc_p2_movie_audio_close()
-{
-	if (!sMovieStream) return;
-	SDL_FreeAudioStream(sMovieStream);
-	sMovieStream = nullptr;
-	PikiAudioSinkClear();
-	sMovieAudio.store(false);
-	PikiAudioSinkResume();
-}
-#endif

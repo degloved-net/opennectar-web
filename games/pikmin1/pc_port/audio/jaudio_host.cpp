@@ -1405,8 +1405,9 @@ public:
 private:
 	void report()
 	{
+		// double sqrt (SSE): an x87 fsqrt on long double trips the FP gate.
 		const long double rms
-		    = mSampleCount == 0 ? 0.0L : std::sqrt(mSquareSum / mSampleCount);
+		    = mSampleCount == 0 ? 0.0L : std::sqrt(static_cast<double>(mSquareSum / mSampleCount));
 		const long double clipPercent
 		    = mSampleCount == 0 ? 0.0L : static_cast<long double>(mClipped) * 100.0L / mSampleCount;
 		const long double averageVoices = mVoiceSnapshots == 0
@@ -1451,7 +1452,7 @@ private:
 			const BusDiagnostics& stats = sBusDiagnostics[bus];
 			const long double rms = stats.sampleCount == 0
 			                           ? 0.0L
-			                           : std::sqrt(stats.squareSum / stats.sampleCount);
+			                           : std::sqrt(static_cast<double>(stats.squareSum / stats.sampleCount));
 			std::fprintf(stderr, " %s{peak=%lld,rms=%.1Lf,out=%llu/%llu}",
 			             kDiagnosticBusNames[bus],
 			             static_cast<long long>(stats.peak), rms,

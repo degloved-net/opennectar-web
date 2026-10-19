@@ -1,3 +1,10 @@
+// El online está apagado en todo el proyecto (pc_online_switch.h): sin
+// botones de co-op/VS online aunque el launcher se compile con ellos.
+#include "../netplay/pc_online_switch.h"
+#if !PC_ONLINE_ENABLED
+#undef PIKMIN_LAUNCHER_NETPLAY
+#endif
+
 // Ventana principal del launcher: Dear ImGui sobre SDL2 + OpenGL 3.
 //
 // Estética: fondo verde Pikmin, el logo de Open Nectar arriba y bordes y letras
@@ -10,6 +17,9 @@
 #include "launcher_gui.h"
 
 #include "bti_decode.h"
+#if PIKMIN_LAUNCHER_NETPLAY
+#include "launcher_coop.h"
+#endif
 #include "launcher_platform.h"
 #include "settings_model.h"
 #include "release_update.h"
@@ -19,7 +29,11 @@
 #include "backends/imgui_impl_sdl2.h"
 
 #include <SDL2/SDL.h>
+#ifdef __ANDROID__
+#include <GLES3/gl3.h>
+#else
 #include <SDL2/SDL_opengl.h>
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -34,6 +48,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -620,8 +635,52 @@ struct Hub {
     std::string toast;
     float toastTime = 0.0f;
     bool chosen = false;
+    bool coopOpen = false;
 
     Hub(const HubState& s, HubResult& r) : state(s), result(r) {}
+
+#if PIKMIN_LAUNCHER_NETPLAY
+    // Online co-op panel (netplay builds of the game): the game runs as a
+    // child while the panel shows and takes the connection codes.
+    platform::GameProcess coopProcess;
+    std::unique_ptr<CoopFlow> coop;
+    std::vector<char> coopInput = std::vector<char>(32768, '\0');
+    std::string coopError;
+
+    CoopFlow& coopFlow()
+    {
+        if (!coop) {
+            coop = std::make_unique<CoopFlow>(
+                [this](const std::vector<std::string>& args, std::string& error) {
+                    const GameInstall& game = state.games[int(HubGame::Pikmin1)];
+                    return platform::spawnGame(game.directory, game.executable, args, coopProcess, error);
+                },
+                [this](int& code) { return platform::gameRunning(coopProcess, code); });
+        }
+        return *coop;
+    }
+
+    static fs::path coopExchangeDir()
+    {
+        const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+        return platform::cacheDirectory() / "netplay"
+             / ("session-" + std::to_string(platform::currentProcessId()) + "-" + std::to_string(stamp));
+    }
+
+    void openCoop(bool host, bool vs = false)
+    {
+        coopError.clear();
+        std::fill(coopInput.begin(), coopInput.end(), '\0');
+        CoopFlow& flow = coopFlow();
+        if (host) {
+            std::string err;
+            flow.startHost(coopExchangeDir(), err, {}, vs);
+        } else {
+            flow.startJoin(coopExchangeDir(), {}, vs);
+        }
+        coopOpen = true;
+    }
+#endif
 
     void choose(HubAction action, HubGame game)
     {
@@ -763,10 +822,9 @@ struct Hub {
     void drawCard(int index, ImVec2 origin, ImVec2 size, float dt, float t)
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        // Pikmin 1 siempre se puede instalar desde este launcher. Pikmin 2 se
-        // habilita cuando Fusion le proporciona un ejecutable y sus datos.
-        const bool available = index == int(HubGame::Pikmin1) || state.games[index].installed;
-        const bool installed = available && state.games[index].installed;
+        // Los dos juegos se instalan desde este launcher con su propio disco.
+        const bool available = true;
+        const bool installed = state.games[index].installed;
 
         ImGui::SetCursorScreenPos(origin);
         ImGui::PushID(index);
@@ -841,7 +899,8 @@ struct Hub {
 
         if (clicked) {
             if (installed) choose(HubAction::Play, HubGame(index));
-            else if (available) notify("Install Pikmin first: use the Install button below its cover.");
+            else if (available) notify(index == 0 ? "Install Pikmin first: use the Install button below its cover."
+                                                  : "Install Pikmin 2 first: use the Install button below its cover.");
         }
     }
 
@@ -863,25 +922,55 @@ struct Hub {
             centredText(ImGui::GetWindowDrawList(), fonts.title, 28.0f, ImVec2(x + cardW * 0.5f, below + 14.0f),
                         col(kOrange), names[i]);
             const bool isPikmin2 = i == int(HubGame::Pikmin2);
-            const bool comingSoon = isPikmin2 && !state.games[i].installed;
-            // Ya instalado solo tiene sentido actualizar: un botón a lo ancho.
-            const bool installed = !comingSoon && state.games[i].installed;
-            const float buttonW = installed ? cardW : (cardW - 12.0f) * 0.5f;
+            const bool installed = state.games[i].installed;
+            // Debajo de cada portada: Install o, ya instalado, HD textures
+            // (y en Pikmin 1, Map editor a su lado).
             ImGui::PushID(i);
             ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f));
-            if (!installed && glassButton("Install", ImVec2(buttonW, 44.0f), false, comingSoon)) choose(HubAction::Install, HubGame(i));
-            ImGui::SetCursorScreenPos(ImVec2(installed ? x : x + buttonW + 12.0f, below + 38.0f));
+            if (!installed) {
+                if (glassButton("Install", ImVec2(cardW, 44.0f))) choose(HubAction::Install, HubGame(i));
+            } else {
+                const bool editor = !isPikmin2 && !state.mapEditor.empty();
+                const float buttonW = editor ? (cardW - 12.0f) * 0.5f : cardW;
+                if (editor) {
+                    if (glassButton("Map editor", ImVec2(buttonW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(x + buttonW + 12.0f, below + 38.0f));
+                }
+                if (glassButton("HD textures", ImVec2(buttonW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
+            }
+#if PIKMIN_LAUNCHER_NETPLAY
+            // Online co-op: two captains on two PCs (netplay builds).
+            if (installed && !isPikmin2 && state.netplay) {
+                const float coopW = (cardW - 12.0f) * 0.5f;
+                ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f + 44.0f + 10.0f));
+                if (glassButton("Host Co-op", ImVec2(coopW, 44.0f))) openCoop(true);
+                ImGui::SetCursorScreenPos(ImVec2(x + coopW + 12.0f, below + 38.0f + 44.0f + 10.0f));
+                if (glassButton("Join Co-op", ImVec2(coopW, 44.0f))) openCoop(false);
+                // Online VS: a 1v1 match on two PCs, on the host's VS map.
+                ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f + 2.0f * (44.0f + 10.0f)));
+                if (glassButton("Host VS", ImVec2(coopW, 44.0f))) openCoop(true, true);
+                ImGui::SetCursorScreenPos(ImVec2(x + coopW + 12.0f, below + 38.0f + 2.0f * (44.0f + 10.0f)));
+                if (glassButton("Join VS", ImVec2(coopW, 44.0f))) openCoop(false, true);
+            }
+#endif
+            ImGui::PopID();
+        }
+
+        // Un solo Update, centrado entre los dos juegos y debajo de sus botones.
+        if (state.games[int(HubGame::Pikmin1)].installed) {
+            float y = cardY + cardH + 22.0f + 38.0f + 44.0f + 32.0f;
+#if PIKMIN_LAUNCHER_NETPLAY
+            if (state.netplay) y += 2.0f * (44.0f + 10.0f);
+#endif
             // Con versión nueva en GitHub el botón lo dice ("Update to 1.0").
-            std::string updateLabel = isPikmin2 ? "Fusion build" : "Update";
-            if (!isPikmin2 && installed && releaseCheck && releaseCheck->done) {
+            std::string updateLabel = "Update";
+            if (releaseCheck && releaseCheck->done) {
                 std::lock_guard<std::mutex> lock(releaseCheck->mutex);
                 if (releaseCheck->newer) updateLabel = "Update to " + releaseCheck->latest.version;
             }
-            if (glassButton(updateLabel.c_str(), ImVec2(buttonW, 44.0f), updateLabel != "Update",
-                            comingSoon || isPikmin2)) {
-                choose(HubAction::Update, HubGame(i));
-            }
-            ImGui::PopID();
+            ImGui::SetCursorScreenPos(ImVec2((size.x - cardW) * 0.5f, y));
+            if (glassButton(updateLabel.c_str(), ImVec2(cardW, 44.0f), updateLabel != "Update"))
+                choose(HubAction::Update, HubGame::Pikmin1);
         }
     }
 
@@ -1424,6 +1513,104 @@ struct Hub {
         ImGui::End();
     }
 
+#if PIKMIN_LAUNCHER_NETPLAY
+    // A connection code, read-only, wrapped, with a copy button under it.
+    void coopCode(const char* id, const std::string& code, float width)
+    {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(4, 22, 8, 255));
+        std::vector<char> shown(code.begin(), code.end());
+        shown.push_back('\0');
+        ImGui::InputTextMultiline(id, shown.data(), shown.size(), ImVec2(width, 110.0f), ImGuiInputTextFlags_ReadOnly);
+        ImGui::PopStyleColor();
+        if (glassButton("Copy code", ImVec2(170.0f, 44.0f))) {
+            SDL_SetClipboardText(code.c_str());
+            notify("Code copied. Send it to the other player.");
+        }
+    }
+
+    // Host Co-op / Join Co-op: the same overlay style as "What's new".
+    void drawCoop(ImVec2 size)
+    {
+        CoopFlow& flow = coopFlow();
+        flow.poll();
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(size);
+        ImGui::Begin("##coop", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings
+                         | ImGuiWindowFlags_NoBackground);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(ImVec2(0, 0), size, IM_COL32(2, 12, 4, 170));
+        const ImVec2 panel(std::min(size.x - 80.0f, 820.0f), std::min(size.y - 80.0f, 560.0f));
+        const ImVec2 a((size.x - panel.x) * 0.5f, (size.y - panel.y) * 0.5f);
+        const ImVec2 b(a.x + panel.x, a.y + panel.y);
+        dl->AddRectFilled(ImVec2(a.x + 8, a.y + 12), ImVec2(b.x + 8, b.y + 12), IM_COL32(0, 0, 0, 110), 22.0f);
+        dl->AddRectFilled(a, b, IM_COL32(10, 40, 15, 250), 22.0f);
+        dl->AddRect(a, b, col(kOrange), 22.0f, 0, 3.0f);
+        const bool host = flow.role() == CoopFlow::Role::Host;
+        dl->AddText(fonts.title, 32.0f, ImVec2(a.x + 34.0f, a.y + 28.0f), col(kOrange),
+                    flow.vs() ? (host ? "Host VS" : "Join VS") : (host ? "Host Co-op" : "Join Co-op"));
+
+        const float innerW = panel.x - 68.0f;
+        ImGui::SetCursorScreenPos(ImVec2(a.x + 34.0f, a.y + 80.0f));
+        ImGui::BeginChild("##coopbody", ImVec2(innerW, panel.y - 80.0f - 90.0f), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoBackground);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, col(ImVec4(1.0f, 0.93f, 0.80f, 1.0f)));
+        ImGui::TextWrapped("%s", flow.status().c_str());
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 6.0f));
+        const CoopFlow::Stage stage = flow.stage();
+        const bool takesPaste = (!host && stage == CoopFlow::Stage::PasteOffer)
+                             || (host && stage == CoopFlow::Stage::ShowOffer);
+        if (host && (stage == CoopFlow::Stage::ShowOffer || stage == CoopFlow::Stage::Connecting)) {
+            ImGui::TextUnformatted("Your offer code:");
+            coopCode("##offer", flow.offer(), innerW);
+            ImGui::Dummy(ImVec2(0, 6.0f));
+        }
+        if (!host && stage == CoopFlow::Stage::Connecting) {
+            ImGui::TextUnformatted("Your answer code:");
+            coopCode("##answer", flow.answer(), innerW);
+        }
+        if (takesPaste) {
+            ImGui::TextUnformatted(host ? "The other player's answer code:" : "The host's offer code:");
+            ImGui::InputTextMultiline("##paste", coopInput.data(), coopInput.size(), ImVec2(innerW, 90.0f));
+            if (glassButton("Paste", ImVec2(130.0f, 44.0f))) {
+                if (char* clip = SDL_GetClipboardText()) {
+                    std::snprintf(coopInput.data(), coopInput.size(), "%s", clip);
+                    SDL_free(clip);
+                }
+            }
+            ImGui::SameLine();
+            if (glassButton(host ? "Connect" : "Join", ImVec2(150.0f, 44.0f), true)) {
+                std::string err;
+                const bool ok = host ? flow.submitAnswer(coopInput.data(), err) : flow.submitOffer(coopInput.data(), err);
+                coopError = ok ? std::string() : err;
+            }
+            if (!coopError.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 130, 110, 255));
+                ImGui::TextWrapped("%s", coopError.c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+        ImGui::Dummy(ImVec2(0, 6.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, col(ImVec4(0.80f, 0.86f, 0.78f, 1.0f)));
+        ImGui::TextWrapped("Both players need the same game version. If the games cannot reach each other, allow "
+                           "the game through the firewall when Windows asks, or see NETPLAY.md for TURN and "
+                           "Tailscale.");
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+        ImGui::EndChild();
+
+        const float buttonsH = 50.0f, closeW = 130.0f, y = b.y - buttonsH - 26.0f;
+        ImGui::SetCursorScreenPos(ImVec2(b.x - 34.0f - closeW, y));
+        if (glassButton("Close", ImVec2(closeW, buttonsH)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            // The game keeps running; closing only hides the panel.
+            coopOpen = false;
+        }
+        ImGui::End();
+    }
+#endif
+
     void drawFooter(ImVec2 size)
     {
         ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -1458,7 +1645,7 @@ struct Hub {
         ImGui::Begin("##hub", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings
                          | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoBackground);
-        ImGui::BeginDisabled(!interactive || whatsNewOpen);
+        ImGui::BeginDisabled(!interactive || whatsNewOpen || coopOpen);
 
         const float logoW = std::min(size.x * 0.56f, 700.0f);
         const float logoH = logoW / logo.aspect();
@@ -1493,6 +1680,9 @@ struct Hub {
         toastTime = std::max(0.0f, toastTime - dt);
         drawFooter(size);
         if (whatsNewOpen && interactive) drawWhatsNew(size);
+#if PIKMIN_LAUNCHER_NETPLAY
+        if (coopOpen && interactive) drawCoop(size);
+#endif
     }
 
     void release()
@@ -1504,10 +1694,16 @@ struct Hub {
     }
 };
 
+// Android: la interfaz se diseña para ~1180x780; en el móvil se dibuja a esa
+// escala virtual multiplicada por gUiScale (fuentes rasterizadas a la
+// densidad real para que el texto salga nítido).
+float gUiScale = 1.0f;
+
 void loadFonts(Fonts& fonts)
 {
     ImGuiIO& io = ImGui::GetIO();
     ImFontConfig cfg;
+    cfg.RasterizerDensity = gUiScale;
     cfg.FontDataOwnedByAtlas = false; // los datos viven en el ejecutable
     cfg.OversampleH = 3;
     auto* data = const_cast<unsigned char*>(kFontFredoka);
@@ -1532,6 +1728,8 @@ struct HubWindow::Impl {
     bool quitRequested = false;
     bool startAtHome = false;  // la próxima elección de rutas empieza en la pantalla principal
     bool playRequested = false;
+    HubGame installGame = HubGame::Pikmin1; // juego que instalan los modales de rutas y progreso
+    std::function<HubResult()> homeLoop;   // ver setHomeLoop
 
     enum class Modal { None, Paths, Progress, Message };
     Modal modal = Modal::None;
@@ -1616,10 +1814,12 @@ struct HubWindow::Impl {
         const ImVec2 panel(std::min(size.x - 80.0f, 700.0f), 430.0f);
         const ImVec2 at = beginModal(size, panel);
         const float width = panel.x - 68.0f;
-        title(at, "Install Pikmin");
+        const bool pikmin2 = installGame == HubGame::Pikmin2;
+        title(at, pikmin2 ? "Install Pikmin 2" : "Install Pikmin");
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddText(hub->fonts.caption, 16.0f, ImVec2(at.x, at.y + 42.0f), col(kOrange, 0.75f),
-                    "Use your own disc: Pikmin USA (Rev 1) or Europe. ISO or GCM; RVZ, WIA and GCZ need Dolphin.");
+                    pikmin2 ? "Use your own disc: Pikmin 2 USA or Europe. ISO or GCM; RVZ, WIA and GCZ need Dolphin."
+                            : "Use your own disc: Pikmin USA (Rev 1) or Europe. ISO or GCM; RVZ, WIA and GCZ need Dolphin.");
         if (pathField(ImVec2(at.x, at.y + 80.0f), width, "Disc image", rom, "No disc image chosen", "rom")) pathsAction = 1;
         if (pathField(ImVec2(at.x, at.y + 170.0f), width, "Install to", installDirectory, "No folder chosen", "dir")) pathsAction = 2;
         if (!pathsNote.empty()) {
@@ -1638,7 +1838,7 @@ struct HubWindow::Impl {
         const ImVec2 panel(std::min(size.x - 80.0f, 700.0f), 260.0f);
         const ImVec2 at = beginModal(size, panel);
         const float width = panel.x - 68.0f;
-        title(at, "Installing Pikmin");
+        title(at, installGame == HubGame::Pikmin2 ? "Installing Pikmin 2" : "Installing Pikmin");
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const bool indeterminate = percent > 100;
         const std::string status = indeterminate ? phase + "..." : phase + "  " + std::to_string(percent) + "%";
@@ -1704,6 +1904,19 @@ struct HubWindow::Impl {
     {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
+            if (gUiScale != 1.0f) {
+                // Coordenadas de la pantalla real → las de la interfaz virtual.
+                const float inv = 1.0f / gUiScale;
+                if (event.type == SDL_MOUSEMOTION) {
+                    event.motion.x = int(event.motion.x * inv);
+                    event.motion.y = int(event.motion.y * inv);
+                    event.motion.xrel = int(event.motion.xrel * inv);
+                    event.motion.yrel = int(event.motion.yrel * inv);
+                } else if (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) {
+                    event.button.x = int(event.button.x * inv);
+                    event.button.y = int(event.button.y * inv);
+                }
+            }
             ImGui_ImplSDL2_ProcessEvent(&event);
             if (event.type == SDL_QUIT) quitRequested = true;
             if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE
@@ -1721,6 +1934,11 @@ struct HubWindow::Impl {
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
+        if (gUiScale != 1.0f) {
+            ImGuiIO& io = ImGui::GetIO();
+            io.DisplayFramebufferScale = ImVec2(io.DisplayFramebufferScale.x * gUiScale, io.DisplayFramebufferScale.y * gUiScale);
+            io.DisplaySize = ImVec2(io.DisplaySize.x / gUiScale, io.DisplaySize.y / gUiScale);
+        }
         ImGui::NewFrame();
         const ImVec2 size = ImGui::GetIO().DisplaySize;
         hub->frame(size, t, dt, modal == Modal::None);
@@ -1769,18 +1987,38 @@ bool HubWindow::open(const HubState& state, std::string& error)
         error = SDL_GetError();
         return false;
     }
+#ifdef __ANDROID__
+    // Android: OpenGL ES 3.0 a pantalla completa (la ventana es la actividad).
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#endif
+#ifdef __APPLE__
+    // macOS only offers a core profile at 3.2 or later. A 3.0 request without a
+    // profile gets a legacy 2.1 context, which fails here.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+#ifdef __ANDROID__
+    SDL_Window* window = SDL_CreateWindow("Open Nectar", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 0, 0,
+                                          SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI);
+#else
     SDL_Window* window = SDL_CreateWindow("Open Nectar", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1180, 780,
                                           SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+#endif
     if (!window) {
         error = SDL_GetError();
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return false;
     }
+#ifndef __ANDROID__
     SDL_SetWindowMinimumSize(window, 960, 700);
     pc_icon_apply(window);
+#endif
     SDL_GLContext context = SDL_GL_CreateContext(window);
     if (!context) {
         error = SDL_GetError();
@@ -1790,6 +2028,14 @@ bool HubWindow::open(const HubState& state, std::string& error)
     }
     SDL_GL_MakeCurrent(window, context);
     SDL_GL_SetSwapInterval(1);
+#ifdef __ANDROID__
+    {
+        int w = 0, h = 0;
+        SDL_GL_GetDrawableSize(window, &w, &h);
+        const float s = std::min(float(w) / 1180.0f, float(h) / 780.0f);
+        gUiScale = std::max(1.0f, std::min(s, 4.0f));
+    }
+#endif
     m.window = window;
     m.context = context;
 
@@ -1797,7 +2043,13 @@ bool HubWindow::open(const HubState& state, std::string& error)
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
     ImGui_ImplSDL2_InitForOpenGL(window, context);
+#ifdef __ANDROID__
+    ImGui_ImplOpenGL3_Init("#version 300 es");
+#elif defined(__APPLE__)
+    ImGui_ImplOpenGL3_Init("#version 150");
+#else
     ImGui_ImplOpenGL3_Init("#version 130");
+#endif
     applyTheme();
 
     m.hub = std::make_unique<Hub>(m.state, m.result);
@@ -1814,7 +2066,12 @@ bool HubWindow::open(const HubState& state, std::string& error)
     for (Texture& photo : hub.art.logs) hub.slideshow.add(photo);
     hub.art.logs.clear();
     hub.startCoverDownloads();
-    if (!m.state.installerOnly && m.state.games[0].installed) {
+#ifdef __ANDROID__
+    const bool checkReleases = m.state.games[0].installed || m.state.games[1].installed; // Android: sin pestañas, pero sí Update
+#else
+    const bool checkReleases = !m.state.installerOnly && m.state.games[0].installed;
+#endif
+    if (checkReleases) {
         hub.releaseCheck = std::make_shared<ReleaseCheck>();
         std::thread(ReleaseCheck::run, hub.releaseCheck).detach();
     }
@@ -1841,6 +2098,26 @@ HubResult HubWindow::runHome()
     while (!m.quitRequested && !m.hub->chosen) m.frame();
     if (m.quitRequested) m.result.action = HubAction::Quit;
     return m.result;
+}
+
+void HubWindow::setInstallGame(HubGame game, const std::string& suggestedDirectory)
+{
+    Impl& m = *mImpl;
+    if (m.installGame != game) m.rom.clear();
+    m.installGame = game;
+    if (m.installDirectory.empty()) m.installDirectory = suggestedDirectory;
+}
+
+void HubWindow::setHomeLoop(std::function<HubResult()> loop) { mImpl->homeLoop = std::move(loop); }
+
+void HubWindow::markInstalled(HubGame game, const std::string& directory, const std::string& executable,
+                              const std::string& discId)
+{
+    GameInstall& install = mImpl->state.games[int(game)];
+    install.installed = true;
+    install.directory = directory;
+    install.executable = executable;
+    install.discId = discId;
 }
 
 bool HubWindow::playRequested() const { return mImpl->playRequested; }
@@ -1872,7 +2149,7 @@ bool HubWindow::choosePaths(const std::function<std::string()>& chooseRom,
             // Tras cancelar: de vuelta a la pantalla principal, y de ahí otra
             // vez al modal si pulsa Install.
             m.startAtHome = false;
-            const HubResult choice = runHome();
+            const HubResult choice = m.homeLoop ? m.homeLoop() : runHome();
             if (choice.action == HubAction::Quit) return false;
             if (choice.action == HubAction::Play) {
                 m.playRequested = true;
@@ -1900,6 +2177,12 @@ bool HubWindow::choosePaths(const std::function<std::string()>& chooseRom,
                 m.currentFile.clear();
                 return true;
             } else if (m.pathsAction == 4) {
+                // Pikmin 2 se instala desde el bucle de la pantalla principal:
+                // al cancelar se vuelve allí.
+                if (m.installGame == HubGame::Pikmin2) {
+                    m.modal = Impl::Modal::None;
+                    return false;
+                }
                 m.startAtHome = true;
                 break;
             }

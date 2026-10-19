@@ -1,4 +1,5 @@
 #include "PikiAI.h"
+#include "Game/pcCoop.h"
 #include "Game/Navi.h"
 #include "nans.h"
 
@@ -196,6 +197,19 @@ bool Brain::start(int nextID, ActionArg* actionArg)
  */
 Game::Navi* Brain::searchOrima()
 {
+#ifdef PIKI_PC_PORT
+	// Co-op: el Pikmin vuelve con su capitán (el que lo arrancó, lanzó o
+	// sacó), no con el que tenga más cerca. Si no, al acabar una tarea o al
+	// fallar un instante la formación (al salir de la cebolla) se repartían
+	// entre los dos. Sin el alcance de 300 de la búsqueda: al salir de la
+	// cebolla sale despedido desde lo alto y quedaba fuera, ocioso.
+	if (pc_p2_coop_active()) {
+		Game::Navi* own = mPiki->mNavi;
+		if (own && own->isAlive() && own->mController1) {
+			return own;
+		}
+	}
+#endif
 	Game::CellIteratorArg itSettings;
 	Vector3f position            = mPiki->getPosition();
 	itSettings.mSphere.mPosition = position;

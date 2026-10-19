@@ -3,6 +3,7 @@
 #include "Navi.h"
 #include "PikiAI.h"
 #if defined(PIKI_PC_PORT)
+#include "Piki.h"
 #include "settings/pc_settings.h"
 #endif
 
@@ -169,9 +170,20 @@ int ActFormation::exec()
 	mDistanceToTarget          = distanceToTarget;
 	mPiki->mTargetVelocity.set(0.0f, 0.0f, 0.0f);
 
-	if (mUseLastFormationPosition && distanceToTarget < 100.0f) {
+	// Mod "Blues Only In Water": mientras el capitán está en el agua, los que
+	// no son azules se quedan quietos donde estén en vez de seguirlo hasta la
+	// orilla. En cuanto sale, la formación sigue como siempre.
+	bool waitAshore = false;
+#if defined(PIKI_PC_PORT)
+	if (pc_settings_get_blues_only_water() && mPiki->mColor != Blue) {
+		Navi* navi = mPiki->mNavi;
+		waitAshore = navi && navi->mIsInWater;
+	}
+#endif
+
+	if (!waitAshore && mUseLastFormationPosition && distanceToTarget < 100.0f) {
 		getFormPoint();
-	} else if (!mUseLastFormationPosition && distanceToTarget < 6.0f) {
+	} else if (waitAshore || (!mUseLastFormationPosition && distanceToTarget < 6.0f)) {
 		mInFormation = false;
 		mPiki->mFaceDirection += 2.5f * (angDist(mPiki->mNavi->mFaceDirection, mPiki->mFaceDirection) * gsys->getFrameTime());
 
@@ -201,6 +213,7 @@ int ActFormation::exec()
 	if (!mIsIdling && !mIsOnFloorTripped && gsys->getRand(1.0f) > 0.99f && gsys->getRand(1.0f) > 0.99f
 #if defined(PIKI_PC_PORT)
 	    && !pc_settings_get_no_trip() // Mod "No Tripping"
+	    && gsys->getRand(1.0f) * PC_TICKS30 < 1.0f // misma probabilidad por segundo a 60/120 FPS
 #endif
 	    && mPiki->mVelocity.length() > mPiki->getSpeed(0.5f)) {
 		mPiki->mPikiAnimMgr.finishMotion(this);

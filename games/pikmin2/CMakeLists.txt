@@ -56,6 +56,14 @@ else()
     set(PIKMIN_GLES_DEFAULT OFF)
 endif()
 option(PIKMIN_GLES "Build with OpenGL ES 3.0 renderer" ${PIKMIN_GLES_DEFAULT})
+# Controles táctiles (la misma capa que Pikmin 1: pc_port/touch).
+option(PIKMIN_TOUCH "Build the touch control layer" ${PIKMIN_GLES_DEFAULT})
+option(NECTAR_ONLINE "Build the experimental direct online co-op layer" OFF)
+# Sólo enlaza nectar_net: todavía no hay sesión ni UI. Mejor fallar que dar
+# un build que parece online y no lo es.
+if(NECTAR_ONLINE)
+    message(FATAL_ERROR "Pikmin 2 online adapter not implemented (NECTAR_ONLINE=ON). Reconfigure with -DNECTAR_ONLINE=OFF.")
+endif()
 
 # ─── Flags de compilación: código decompilado ───
 # Fuerza nuestro header de adaptación ANTES de cualquier include del juego.
@@ -63,6 +71,19 @@ set(CLANG_LEGACY_RELAXATIONS
     $<$<CXX_COMPILER_ID:Clang>:-Wno-register>
     $<$<CXX_COMPILER_ID:Clang>:-Wno-address-of-temporary>
     $<$<CXX_COMPILER_ID:Clang>:-Wno-unknown-warning-option>
+    # clang no tiene -fpermissive. Estas dos dejan pasar como aviso lo mismo que
+    # GCC permite al decomp: punteros a enteros de 32 bits (-fms-extensions) y
+    # plantillas que usan tipos aún incompletos (análisis diferido).
+    $<$<CXX_COMPILER_ID:Clang>:-fms-extensions>
+    $<$<CXX_COMPILER_ID:Clang>:-fdelayed-template-parsing>
+    $<$<CXX_COMPILER_ID:Clang>:-Wno-microsoft>
+    # trig.h redefine sinf/cosf/sincosf/acosf con la tabla de GameCube. clang
+    # los trata como los de libm y llama a la versión exacta: la nave giraba
+    # ~0,1° distinto y en Android los capitanes salían fuera de las cabinas.
+    $<$<CXX_COMPILER_ID:Clang>:-fno-builtin-sinf>
+    $<$<CXX_COMPILER_ID:Clang>:-fno-builtin-cosf>
+    $<$<CXX_COMPILER_ID:Clang>:-fno-builtin-sincosf>
+    $<$<CXX_COMPILER_ID:Clang>:-fno-builtin-acosf>
 )
 set(LEGACY_COMPILE_OPTIONS
     -include "${ADAPTER_DIR}/pikmin2_pc_types.h"
@@ -107,12 +128,20 @@ set(NATIVE_COMPILE_OPTIONS
     -Werror=return-type
 )
 
-# ─── Definiciones de compilacion ───
-set(PIKMIN2_GAME_VERSION "VERSION_GPVP01" CACHE STRING "Pikmin 2 disc region")
-set_property(CACHE PIKMIN2_GAME_VERSION PROPERTY STRINGS VERSION_GPVP01 VERSION_GPVE01)
-if(NOT PIKMIN2_GAME_VERSION MATCHES "^VERSION_GP(VP|VE)01$")
-    message(FATAL_ERROR "supported Pikmin 2 regions are Europe and USA")
+# ─── Versión del disco y nombres de los targets ───
+# Android compila el árbol dos veces (USA y PAL) en el mismo build, como
+# Pikmin 1: cada pasada lleva su versión y un sufijo en los targets.
+set(PIKMIN_GAME_VERSION "VERSION_GPVP01" CACHE STRING "Disc version (VERSION_GPVE01 USA, VERSION_GPVP01 PAL)")
+set(PIKMIN_TARGET_SUFFIX "" CACHE STRING "Suffix for the game targets when the tree is added more than once")
+set(P2_LEGACY pikmin2_legacy${PIKMIN_TARGET_SUFFIX})
+set(P2_GAME pikmin2_pc${PIKMIN_TARGET_SUFFIX})
+if(PIKMIN_GAME_VERSION STREQUAL "VERSION_GPVE01")
+    set(P2_OUTPUT_NAME "nectar2")
+else()
+    set(P2_OUTPUT_NAME "nectar2-pal")
 endif()
+
+# ─── Definiciones de compilacion ───
 add_compile_definitions(
     PIKI_PC_PORT=1
     # Capa de host de Pikmin 2: excluye lo exclusivo del port de Pikmin 1
@@ -124,9 +153,10 @@ add_compile_definitions(
     # físicas y escriben big-endian; pc_gfx los decodifica (ver pc_gfx.cpp).
     PIKI_PC_GXREGS=1
     DTK_CONFIG_NONMATCHING=1
-    ${PIKMIN2_GAME_VERSION}
+    ${PIKMIN_GAME_VERSION}
     PIKI_USE_DGX=1
     PIKI_USE_GLES=$<BOOL:${PIKMIN_GLES}>
+    PIKI_PC_TOUCH=$<BOOL:${PIKMIN_TOUCH}>
     $<$<NOT:$<BOOL:${ANDROID}>>:SDL_MAIN_HANDLED=1>
 )
 
@@ -140,6 +170,15 @@ add_compile_definitions(
 # despues; el include/stl original nunca se alcanza porque las rutas con
 # prefijo ya estan resueltas por los shims, y las inclusiones desnudas
 # (<utility>, <algorithm>...) caen al STL real del sistema.
+# Windows: sustitutos de cabeceras POSIX que el port usa para depurar
+# (execinfo.h, dlfcn.h). Solo en WIN32; en Linux se usan las del sistema.
+if(WIN32)
+    include_directories(BEFORE ${ADAPTER_DIR}/win32)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include")
+        include_directories("${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include/SDL2")
+    endif()
+endif()
 include_directories(
     ${ADAPTER_DIR}
     ${PIKMIN2_DECOMP_DIR}/include
@@ -250,15 +289,15 @@ set(SYSTEM_SOURCES
 # sysBootupU/sysBootup.cpp defines GameCube main(); the host owns main() in pc_main.cpp.
 list(FILTER SYSTEM_SOURCES EXCLUDE REGEX "sysBootupU/sysBootup\\.cpp$")
 
-add_library(pikmin2_legacy STATIC
+add_library(${P2_LEGACY} STATIC
     ${JSYSTEM_SOURCES}
     ${GAME_SOURCES}
     ${SYSTEM_SOURCES}
     ${GD_SOURCES}
     ${THP_SOURCES}
 )
-target_compile_options(pikmin2_legacy PRIVATE ${LEGACY_COMPILE_OPTIONS})
-target_include_directories(pikmin2_legacy PRIVATE ${PC_PORT_DIR})
+target_compile_options(${P2_LEGACY} PRIVATE ${LEGACY_COMPILE_OPTIONS})
+target_include_directories(${P2_LEGACY} PRIVATE ${PC_PORT_DIR})
 
 message(STATUS "Pikmin 2 legacy sources:")
 message(STATUS "  JSystem : ${JSYSTEM_SOURCES}")
@@ -286,6 +325,20 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/settings/pc_p2_glass_assets.cpp
         ${PC_PORT_DIR}/pc_achievements.cpp
         ${PC_PORT_DIR}/pc_p2_cheats.cpp
+        ${PC_PORT_DIR}/pc_record.cpp
+        ${PC_PORT_DIR}/pc_p2_rules.cpp
+        ${PC_PORT_DIR}/pc_p2_coop.cpp
+        ${PC_PORT_DIR}/pc_p2_captains.cpp
+        ${PC_PORT_DIR}/pc_speedrun.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_catalog.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_audit.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_apply.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_cave.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_debug.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_enemies.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_logic.cpp
+        ${PC_PORT_DIR}/pc_livesplit.cpp
         ${PC_PORT_DIR}/dolphin_stubs/p2_gx_stubs.cpp
         ${PC_PORT_DIR}/dolphin_stubs/p2_os_host.cpp
         ${PC_PORT_DIR}/dolphin_stubs/pc_thp.cpp
@@ -293,7 +346,9 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/dolphin_stubs/p2_cpp_link.cpp
         ${PC_PORT_DIR}/audio/pc_aram.cpp
         ${PC_PORT_DIR}/audio/pc_dsp_host.cpp
+        ${PC_PORT_DIR}/audio/pc_audio_drops.cpp
         ${PC_PORT_DIR}/audio/p2_audio_host.cpp
+        $<$<BOOL:${PIKMIN_TOUCH}>:${PC_PORT_DIR}/touch/pc_touch.cpp>
         ${PC_PORT_DIR}/audio/jaudio_sink.cpp
         ${PC_PORT_DIR}/audio/pc_ast_stream.cpp
         ${PC_PORT_DIR}/gl/pc_gfx.cpp
@@ -305,13 +360,36 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/timing/pc_tick_profiler.cpp
     )
 
+    if(ANDROID)
+        list(APPEND PC_PORT_SOURCES
+            ${PC_PORT_DIR}/android/pc_android.cpp
+            ${PC_PORT_DIR}/android/pc_texpack_android.cpp
+            ${PC_PORT_DIR}/android/pc_save_android.cpp)
+    endif()
+
     if(EMSCRIPTEN)
         set(P2_SDL_LIBS "")
         set(P2_SDL_INCLUDES "")
     else()
     find_package(Threads REQUIRED)
-    find_package(SDL2 QUIET)
-    if(TARGET SDL2::SDL2)
+    if(NOT ANDROID)
+        # Find SDL2 as Pikmin 1 does. Without it, the pkg-config fallback below
+        # passes -lSDL2 with no library directory.
+        find_package(SDL2 QUIET)
+    endif()
+    if(ANDROID)
+        # Como Pikmin 1: android/app/jni/CMakeLists.txt añade SDL2 como target
+        # antes de este árbol. El port incluye <SDL2/SDL.h>; un enlace en el
+        # build reproduce esa disposición.
+        if(NOT TARGET SDL2)
+            message(FATAL_ERROR "Android: SDL2 must be added as a target before this project")
+        endif()
+        set(P2_SDL_LIBS SDL2)
+        get_target_property(_sdl2_src SDL2 SOURCE_DIR)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/sdl2-include")
+        file(CREATE_LINK "${_sdl2_src}/include" "${CMAKE_CURRENT_BINARY_DIR}/sdl2-include/SDL2" SYMBOLIC)
+        set(P2_SDL_INCLUDES "${CMAKE_CURRENT_BINARY_DIR}/sdl2-include" "${_sdl2_src}/include")
+    elseif(TARGET SDL2::SDL2)
         set(P2_SDL_LIBS SDL2::SDL2)
         set(P2_SDL_INCLUDES "")
     elseif(SDL2_FOUND)
@@ -324,14 +402,68 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         set(P2_SDL_INCLUDES ${SDL2_INCLUDE_DIRS})
     endif()
 
-    find_package(OpenGL REQUIRED)
+    # Paquetes de release (como Pikmin 1): SDL2 y el runtime de C/C++ dentro
+    # del ejecutable, para que arranque en cualquier sistema sin DLL ni .so
+    # propias. En Linux se compila así en el contenedor de release.
+    if(WIN32)
+        set(_p2_static_default ON)
+    else()
+        set(_p2_static_default OFF)
+    endif()
+    option(PIKMIN_STATIC_RUNTIME "Link SDL2 and the C/C++ runtime into the executable" ${_p2_static_default})
+    if(PIKMIN_STATIC_RUNTIME AND NOT ANDROID)
+        if(TARGET SDL2::SDL2-static)
+            set(P2_SDL_LIBS SDL2::SDL2-static)
+        elseif(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/lib/libSDL2.a")
+            # Sin config de CMake usable: la biblioteca estática y lo que pide.
+            set(P2_SDL_LIBS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/lib/libSDL2.a"
+                m dinput8 dxguid dxerr8 user32 gdi32 winmm imm32 ole32 oleaut32 shell32 setupapi version uuid)
+        endif()
+        if(WIN32)
+            add_link_options(-static)
+        elseif(NOT APPLE) # macOS: libc++ viene con el sistema; basta SDL2 estática
+            # --exclude-libs: el libstdc++/SDL2 estáticos no se exportan (ver P1).
+            # libgcc va dinámica: OSCancelThread usa pthread_cancel, que
+            # desenrolla con el libgcc_s del sistema; con una copia estática
+            # el personality de C++ usaba la otra y abortaba (issue #123, al
+            # entrar en Story se cancela el hilo del e-Reader).
+            add_link_options(-static-libstdc++ -Wl,--exclude-libs,ALL)
+        endif()
+    endif()
+    if(P2_SDL_LIBS)
+        list(FILTER P2_SDL_LIBS EXCLUDE REGEX "SDL2main")
+    endif()
+    # El paquete SDL2 de MinGW da include/SDL2 como ruta; el port incluye
+    # <SDL2/SDL.h>, así que hace falta también la carpeta de arriba.
+    if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include")
+        list(APPEND P2_SDL_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include")
     endif()
 
-    add_executable(pikmin2_pc ${PC_PORT_SOURCES})
-    target_compile_options(pikmin2_pc PRIVATE ${NATIVE_COMPILE_OPTIONS} -Wno-unused-parameter)
+    if(NOT ANDROID)
+        find_package(OpenGL REQUIRED)
+    endif()
+    endif()
+
+    if(ANDROID)
+        # Biblioteca que carga NectarActivity (SDL_main como entrada).
+        add_library(${P2_GAME} SHARED ${PC_PORT_SOURCES})
+        set_target_properties(${P2_GAME} PROPERTIES OUTPUT_NAME "${P2_OUTPUT_NAME}")
+    else()
+        add_executable(${P2_GAME} ${PC_PORT_SOURCES})
+    endif()
+    target_compile_options(${P2_GAME} PRIVATE ${NATIVE_COMPILE_OPTIONS} -Wno-unused-parameter)
     # GX-exact spot/distance light attenuation in the shader (see doLights).
-    target_compile_definitions(pikmin2_pc PRIVATE PIKMIN2_GX_LIGHT_ATTN=1)
-    target_include_directories(pikmin2_pc PRIVATE
+    target_compile_definitions(${P2_GAME} PRIVATE PIKMIN2_GX_LIGHT_ATTN=1)
+    if(NECTAR_ONLINE)
+        if(NOT TARGET nectar_net)
+            add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../libs/nectar_net" "${CMAKE_BINARY_DIR}/nectar_net")
+        endif()
+        target_link_libraries(${P2_GAME} PRIVATE nectar_net)
+        target_compile_definitions(${P2_GAME} PRIVATE PIKI_NECTAR_ONLINE=1)
+    else()
+        target_compile_definitions(${P2_GAME} PRIVATE PIKI_NECTAR_ONLINE=0)
+    endif()
+    target_include_directories(${P2_GAME} PRIVATE
         ${PC_PORT_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${PC_PORT_DIR}/gl
@@ -341,19 +473,30 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${P2_SDL_INCLUDES}
     )
     if(EMSCRIPTEN)
-        target_link_libraries(pikmin2_pc PRIVATE pikmin2_legacy m)
+        target_link_libraries(${P2_GAME} PRIVATE ${P2_LEGACY} m)
         include("${CMAKE_CURRENT_SOURCE_DIR}/../../packaging/web/pikmin2.cmake")
     else()
-    target_link_libraries(pikmin2_pc PRIVATE pikmin2_legacy m Threads::Threads ${P2_SDL_LIBS} OpenGL::GL)
+    if(ANDROID)
+        target_link_libraries(${P2_GAME} PRIVATE ${P2_LEGACY} m ${P2_SDL_LIBS} GLESv3 EGL log android)
+        # Android 15 exige bibliotecas alineadas a páginas de 16 KB en arm64.
+        target_link_options(${P2_GAME} PRIVATE "-Wl,-z,max-page-size=16384")
+    else()
+        target_link_libraries(${P2_GAME} PRIVATE ${P2_LEGACY} m Threads::Threads ${P2_SDL_LIBS} OpenGL::GL)
+    endif()
+    # Cliente TCP de LiveSplit (pc_livesplit.cpp), modo Speedrun.
+    if(WIN32)
+        target_link_libraries(${P2_GAME} PRIVATE ws2_32)
+    endif()
     # -rdynamic + libdl: readable symbol names in the crash backtrace (pc_main.cpp).
     if(NOT WIN32)
-        target_link_options(pikmin2_pc PRIVATE -rdynamic)
-        target_link_libraries(pikmin2_pc PRIVATE ${CMAKE_DL_LIBS})
+        target_link_options(${P2_GAME} PRIVATE -rdynamic)
+        target_link_libraries(${P2_GAME} PRIVATE ${CMAKE_DL_LIBS})
     endif()
     # pc_window.cpp usa Xlib en Linux de escritorio (como el port de Pikmin 1).
     if(UNIX AND NOT APPLE AND NOT ANDROID)
-        target_link_libraries(pikmin2_pc PRIVATE X11)
+        target_link_libraries(${P2_GAME} PRIVATE X11)
     endif()
+
     endif()
 
     # Source-only regression tests. Keep these as small executables so failures
@@ -381,6 +524,14 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             set(P2_HOST_TEST_TARGETS ${P2_HOST_TEST_TARGETS} ${target} PARENT_SCOPE)
         endfunction()
 
+        pikmin2_add_host_test(p2_randomizer_test
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_test.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_catalog.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_enemies.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_logic.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_cave.cpp
+        )
         pikmin2_add_host_test(p2_aram_test
             ${PC_PORT_DIR}/audio/pc_aram_test.cpp
             ${PC_PORT_DIR}/audio/pc_aram.cpp
@@ -396,6 +547,12 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         pikmin2_add_host_test(p2_tev_shader_test
             ${PC_PORT_DIR}/gl/pc_tev_shader_test.cpp
             ${PC_PORT_DIR}/gl/pc_tev_shader.cpp
+        )
+        pikmin2_add_host_test(p2_gx_vertex_decode_test
+            ${PC_PORT_DIR}/gl/pc_gx_vertex_decode_test.cpp
+        )
+        pikmin2_add_host_test(p2_mtx_interp_test
+            ${PC_PORT_DIR}/timing/pc_mtx_interp_test.cpp
         )
         pikmin2_add_host_test(p2_menu_repeat_test
             ${PC_PORT_DIR}/pc_menu_repeat_test.cpp
@@ -443,7 +600,7 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             ${PC_PORT_DIR}/timing/pc_render_phase.cpp
         )
 
-        add_test(NAME p2_jaudio_integration_test COMMAND pikmin2_pc --audio-self-test)
+        add_test(NAME p2_jaudio_integration_test COMMAND ${P2_GAME} --audio-self-test)
         set_tests_properties(p2_jaudio_integration_test PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
             SKIP_RETURN_CODE 77
@@ -470,7 +627,7 @@ endif()
 ###############################################################################
 if(PIKMIN2_ASAN)
     set(P2_ASAN_FLAGS -fsanitize=address -fno-omit-frame-pointer -g)
-    foreach(tgt pikmin2_legacy pikmin2_pc ${P2_HOST_TEST_TARGETS})
+    foreach(tgt ${P2_LEGACY} ${P2_GAME} ${P2_HOST_TEST_TARGETS})
         if(TARGET ${tgt})
             target_compile_options(${tgt} PRIVATE ${P2_ASAN_FLAGS})
             target_link_options(${tgt} PRIVATE -fsanitize=address)
@@ -493,7 +650,7 @@ if(PIKMIN2_TSAN)
         message(FATAL_ERROR "PIKMIN2_TSAN and PIKMIN2_ASAN are mutually exclusive")
     endif()
     set(P2_TSAN_FLAGS -fsanitize=thread -fno-omit-frame-pointer -g)
-    foreach(tgt pikmin2_legacy pikmin2_pc ${P2_HOST_TEST_TARGETS})
+    foreach(tgt ${P2_LEGACY} ${P2_GAME} ${P2_HOST_TEST_TARGETS})
         if(TARGET ${tgt})
             target_compile_options(${tgt} PRIVATE ${P2_TSAN_FLAGS})
             target_link_options(${tgt} PRIVATE -fsanitize=thread)

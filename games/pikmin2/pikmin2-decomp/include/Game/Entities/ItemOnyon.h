@@ -119,6 +119,11 @@ struct Onyon : public BaseItem {
 	void enterPiki(Piki*);
 	void exitPikis(int, int);
 	Creature* exitPiki();
+#ifdef PIKI_PC_PORT
+	// Co-op: capitán que pidió sacar Pikmin (menú de la cebolla o la nave);
+	// los que salen van a él y no al más cercano (docs/PLAN_COOP.md).
+	struct Navi* mPcExitNavi = nullptr;
+#endif
 	bool insideAccessArea(Vector3f&);
 	Vector3f getInEnd_UFO();
 	Vector3f getInStart_UFO();

@@ -53,12 +53,51 @@ void CellPyramid::mapSearch(Sys::Sphere& sphere, IDelegate1<CellObject*>* delega
  * @note Address: 0x8015668C
  * @note Size: 0xB4
  */
+#ifdef PIKI_PC_PORT
+// Una pata puede apuntar a una celda de una pirámide ya liberada (un subnivel
+// anterior): salir de ella recorría memoria muerta (crash en Cell::exit). Solo
+// se sale de celdas de la pirámide actual; las otras se olvidan.
+static bool pcPyramidOwnsCell(CellPyramid* pyramid, Cell* cell)
+{
+	if (!pyramid || !cell) {
+		return false;
+	}
+	for (int i = 0; i < pyramid->mLayerCount; i++) {
+		CellLayer& layer = pyramid->mLayers[i];
+		if (cell == &layer.mCurrCell || (cell >= layer.mCells && cell < layer.mCells + layer.mSizeX * layer.mSizeY)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool pcCellLegIsLive(CellPyramid* pyramid, CellLeg& leg)
+{
+	if (!pyramid || pcPyramidOwnsCell(pyramid, leg.mCell)) {
+		return true;
+	}
+	static bool sWarned = false;
+	if (!sWarned) {
+		sWarned = true;
+		printf("[PC Port] cell leg points outside the current cell pyramid: dropped\n");
+	}
+	leg.mCell = nullptr;
+	leg.mPrev = leg.mNext = nullptr;
+	return false;
+}
+#endif
+
 void CellObject::exitCell()
 {
 	bool isFakePiki = (isPiki() || isNavi());
 	for (int i = 0; i < 4; i++) {
 		Cell* cell = mCellLegs[i].mCell;
 		if (cell) {
+#ifdef PIKI_PC_PORT
+			if (!pcCellLegIsLive(Cell::sCurrCellMgr, mCellLegs[i])) {
+				continue;
+			}
+#endif
 			cell->exit(&mCellLegs[i], isFakePiki);
 			mCellLegs[i].mCell = nullptr;
 		}
@@ -957,6 +996,11 @@ void CellPyramid::entry(CellObject* object, Sys::Sphere& sphere, int& layerIndex
 
 	for (int i = 0; i < 4; i++) {
 		if (object->mCellLegs[i].mCell) {
+#ifdef PIKI_PC_PORT
+			if (!pcCellLegIsLive(this, object->mCellLegs[i])) {
+				continue;
+			}
+#endif
 			object->mCellLegs[i].mCell->exit(&object->mCellLegs[i], pikiOrNavi);
 			object->mCellLegs[i].mCell = nullptr;
 		}

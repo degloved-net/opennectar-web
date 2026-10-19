@@ -1,5 +1,6 @@
 #include "pc_frame_scheduler.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 

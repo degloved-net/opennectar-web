@@ -1,4 +1,5 @@
 #include "Game/BaseItem.h"
+#include "Game/pcCoop.h"
 #include "Game/MapMgr.h"
 #include "Game/PlatInstance.h"
 #include "Game/itemMgr.h"
@@ -111,7 +112,7 @@ void BaseItem::entryShape()
 		mModel->show();
 	} else {
 		if (BaseHIOParms::sEntryOpt) {
-			if (!gameSystem->isMultiplayerMode()) {
+			if (!PC_TWO_CAPTAIN_PLAY()) {
 				return;
 			}
 		}

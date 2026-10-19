@@ -64,6 +64,12 @@ public:
 
 	void resetMatrixBuffer();
 	Matrix4f* getMatrices(int);
+#if defined(PIKI_PC_PORT)
+	// Netplay presentation pass: pose matrices come from a separate pool so
+	// the sim pool keeps its authoritative contents.
+	void resetPresentBuffer();
+	Matrix4f* getPresentMatrices(int);
+#endif
 	void resetCacheBuffer();
 	void cacheShape(BaseShape*, ShapeDynMaterials*);
 	void flushCachedShapes();
@@ -124,6 +130,11 @@ public:
 	Matrix4f* mMatrixBuffer;                  // _384
 	int mMaxMatrixCount;                      // _388
 	int mNextFreeMatrixIdx;                   // _38C
+#if defined(PIKI_PC_PORT)
+	Matrix4f* mPresentMatrixBuffer = nullptr;
+	int mPresentMatrixMax          = 0;
+	int mNextFreePresentMatrixIdx  = 0;
+#endif
 	CachedShape mShapeCache;                  // _390
 	CachedShape* mCachedShapes;               // _3A8
 	int mCachedShapeMax;                      // _3AC

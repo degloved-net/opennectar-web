@@ -47,7 +47,22 @@ struct Part {
 	unsigned flags = 0;
 	std::vector<unsigned char> rgba;
 	GXTexObj texture{};
+	// -1 sin calcular; 1 si la textura tiene alfa parcial en una parte
+	// apreciable (el visor), que se dibuja después y sin escribir profundidad.
+	mutable int translucent = -1;
 };
+
+bool partIsTranslucent(const Part& part)
+{
+	if (part.translucent < 0) {
+		size_t partial = 0, total = part.rgba.size() / 4;
+		for (size_t i = 3; i < part.rgba.size(); i += 4) {
+			if (part.rgba[i] < 240) ++partial;
+		}
+		part.translucent = (total > 0 && partial * 20 > total) ? 1 : 0; // más del 5 %
+	}
+	return part.translucent == 1;
+}
 
 // How HD vertices are attached to the engine's animated joints.
 enum BindMode {
@@ -126,6 +141,11 @@ const Entry kEntries[PC_HD_MODEL_COUNT] = {
 	// (their rigs differ), so the engine's inverse binds skin them.
 	{ "BulborbHD", "bulborb_dwarf.nhm", BIND_ENGINE, GX_CULL_FRONT, kDwarfBulborbRig, 17 },
 	{ "BulborbHD", "bulborb.nhm", BIND_ENGINE, GX_CULL_FRONT, kBulborbRig, 29 },
+	// De Pikmin 2: mismo esqueleto que Pikmin 1, con sus propias poses de reposo.
+	{ "Pikmin2", "president.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
+	{ "Pikmin2", "piki_white.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
+	{ "Pikmin2", "piki_purple.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
+	{ "Pikmin2", "bulbmin.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
 };
 
 struct Model {
@@ -267,6 +287,11 @@ int settingsRow(PcHdModelId id)
 	case PC_HD_MODEL_LOUIE_HD: return 2;
 	case PC_HD_MODEL_BULBORB: return 4;
 	case PC_HD_MODEL_BULBORB_DWARF: return 5;
+	// Capitanes de Pikmin 2: no son un pack HD opcional, siempre activos.
+	case PC_HD_MODEL_PRESIDENT:
+	case PC_HD_MODEL_PIKI_WHITE:
+	case PC_HD_MODEL_PIKI_PURPLE:
+	case PC_HD_MODEL_BULBMIN: return -1;
 	default: return 3;
 	}
 }
@@ -275,7 +300,7 @@ Model* prepare(PcHdModelId id)
 {
 	if (id < 0 || id >= PC_HD_MODEL_COUNT) return nullptr;
 	// Apagado desde el launcher o el .conf: se dibuja el original.
-	if (!pc_settings_get_hd_model_enabled(settingsRow(id))) return nullptr;
+	if (settingsRow(id) >= 0 && !pc_settings_get_hd_model_enabled(settingsRow(id))) return nullptr;
 	// First use: build packs from any Pikmin 3 rip (zip or folder) dropped
 	// into Load/Models, so the user never needs an external tool.
 	static bool sConverted = false;
@@ -312,6 +337,10 @@ void drawModel(Graphics& gfx, const Model& model, const Entry& entry, const std:
 	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
 	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
 	const bool prevLighting = gfx.setLighting(true, nullptr);
+	// setLighting sin material ilumina GX_COLOR0A0: el alfa del paquete HD es el
+	// de su textura, sin luz (con ella el modelo salía semitransparente).
+	// setLighting(prevLighting) de abajo vuelve a dejar el canal como estaba.
+	GXSetChanCtrl(GX_ALPHA0, GX_FALSE, GX_SRC_REG, GX_SRC_REG, 0, GX_DF_NONE, GX_AF_NONE);
 	const PcGfxPipelineState prevPipeline = pc_gfx_get_pipeline_state();
 	GXSetChanMatColor(GX_COLOR0A0, tint);
 	GXSetNumTexGens(1);
@@ -333,16 +362,33 @@ void drawModel(Graphics& gfx, const Model& model, const Entry& entry, const std:
 	}
 	GXSetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
 	GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_COPY);
+	// El alpha compare también se hereda del último material del motor (hojas y
+	// flores de los Pikmin lo dejan en "alfa > umbral"). Con él, el cristal del
+	// casco, de alfa baja, se descartaba entero o no según qué se hubiera dibujado
+	// justo antes: el casco aparecía y desaparecía al azar.
+	GXCompare prevComp0, prevComp1;
+	GXAlphaOp prevAlphaOp;
+	u8 prevRef0, prevRef1;
+	pc_gfx_get_alpha_compare(&prevComp0, &prevRef0, &prevAlphaOp, &prevComp1, &prevRef1);
+	GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
 	static const GXColor kWhite = { 255, 255, 255, 255 };
-	for (const Part& part : model.parts) {
-		GXSetChanMatColor(GX_COLOR0A0, (part.flags & kPartFlagNoTint) ? kWhite : tint);
-		drawPart(model, entry, part, matrices);
+	// Primero lo opaco y luego lo translúcido sin escribir profundidad: si el
+	// visor se pintaba antes que la cabeza, su profundidad la tapaba y el cristal
+	// se veía como un azul casi opaco.
+	for (int pass = 0; pass < 2; ++pass) {
+		if (pass == 1) GXSetZMode(GX_TRUE, GX_LEQUAL, GX_FALSE);
+		for (const Part& part : model.parts) {
+			if (partIsTranslucent(part) != (pass == 1)) continue;
+			GXSetChanMatColor(GX_COLOR0A0, (part.flags & kPartFlagNoTint) ? kWhite : tint);
+			drawPart(model, entry, part, matrices);
+		}
 	}
 	gfx.setLighting(prevLighting, nullptr);
 	// Put back what the engine had: its materials are display lists that do
 	// not restate every mode, so a leaked GX_CULL_FRONT or blend mode hit the
 	// next mesh drawn (transparent Onion, missing helmet, cursor ring).
 	pc_gfx_set_pipeline_state(prevPipeline);
+	GXSetAlphaCompare(prevComp0, prevRef0, prevAlphaOp, prevComp1, prevRef1);
 	GXSetNumTevStages(1);
 	GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
 }

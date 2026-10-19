@@ -11,6 +11,7 @@
 #include <string.h>
 #if defined(PIKI_PC_PORT)
 #include "timing/pc_render_phase.h"
+#include "timing/pc_anim_timing.h"
 #endif
 
 /**
@@ -550,7 +551,11 @@ void Animator::animate(f32 animSpeed)
 	if (mPlayState != ANIMSTATE_Inactive) {
 		if (lastFrame > firstFrame) {
 			// playing normally
+#if defined(PIKI_PC_PORT)
+			mAnimationCounter += pc_anim_dt(gsys->getFrameTime()) * animSpeed;
+#else
 			mAnimationCounter += gsys->getFrameTime() * animSpeed;
+#endif
 
 			// we've hit the end of the animation
 			if (mAnimationCounter >= lastFrame) {

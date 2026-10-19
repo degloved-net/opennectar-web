@@ -19,7 +19,20 @@ struct TMainTitleMgr {
 	enum StateID { Standby, Opening, PressStart, MainMenu, Exiting };
 
 	// Vs and Challenge are strangely swapped from the actual menu order
-	enum MenuSelects { Select_NULL = -1, Select_Story, Select_Challenge, Select_Vs, Select_Options, Select_HiScore, Select_Bonus };
+	enum MenuSelects {
+		Select_NULL = -1,
+		Select_Story,
+		Select_Challenge,
+		Select_Vs,
+		Select_Options,
+		Select_HiScore,
+		Select_Bonus,
+#ifdef PIKI_PC_PORT
+		Select_Speedrun, // opciones del port (TTitleMenu::pcAddWordEntry)
+		Select_Coop,
+		Select_Randomizer,
+#endif
+	};
 
 	TMainTitleMgr();
 

@@ -13,6 +13,9 @@
 #include <gl/gl.h>
 #include <gl/glu.h>
 #endif
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_present.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -314,6 +317,12 @@ void Texture::createBuffer(int width, int height, int texFmt, void* buf)
  */
 void Texture::grabBuffer(int width, int height, bool enableDepth, bool useMIPmap)
 {
+#if defined(PIKI_PC_PORT)
+	if (pc_netplay_present_null_active()) {
+		pc_netplay_present_note_attempt();
+		return;
+	}
+#endif
 #if PIKI_USE_DGX
 	if (enableDepth) {
 		GXSetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);

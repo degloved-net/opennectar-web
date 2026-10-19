@@ -1,4 +1,7 @@
 #include "zen/DrawCommon.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_sim_rng.h"
+#endif
 #include "DebugLog.h"
 #include "P2D/Graph.h"
 #include "P2D/Picture.h"
@@ -334,7 +337,11 @@ bool zen::BalloonPane::invoke(P2DPane* pane)
 		setGoalPos();
 	}
 
+#if defined(PIKI_PC_PORT)
+	moveDir.multiply(gsys->getFrameTime() * (0.1f + pc_cosmetic_randf(0.1f)));
+#else
 	moveDir.multiply(gsys->getFrameTime() * (0.1f + zen::Rand(0.1f)));
+#endif
 	mVelocity.add(moveDir);
 	mVelocity.multiply(0.99f);
 	mCurrPos.add(mVelocity);
@@ -370,7 +377,11 @@ bool zen::BalloonPane::invoke(P2DPane* pane)
 void zen::BalloonPane::setGoalPos()
 {
 	Vector3f randOffset;
+#if defined(PIKI_PC_PORT)
+	randOffset.set(mGoalRadius * (pc_cosmetic_randf(2.0f) - 1.0f), mGoalRadius * (pc_cosmetic_randf(2.0f) - 1.0f), 0.0f);
+#else
 	randOffset.set(mGoalRadius * (zen::Rand(2.0f) - 1.0f), mGoalRadius * (zen::Rand(2.0f) - 1.0f), 0.0f);
+#endif
 	mGoalPos.set(mHomePos + randOffset);
 }
 
@@ -379,5 +390,9 @@ void zen::BalloonPane::setGoalPos()
  */
 void zen::BalloonPane::setGoalRotate()
 {
+#if defined(PIKI_PC_PORT)
+	mGoalRotate = 15.0f * PI / 180.0f * (pc_cosmetic_randf(2.0f) - 1.0f);
+#else
 	mGoalRotate = 15.0f * PI / 180.0f * (zen::Rand(2.0f) - 1.0f);
+#endif
 }

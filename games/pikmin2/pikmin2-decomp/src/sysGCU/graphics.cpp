@@ -1,6 +1,21 @@
 #include "Splitter.h"
 #ifdef PIKI_PC_PORT
 extern "C" float pc_gfx_get_current_aspect_ratio(void);
+#include "pc_p2_coop.h"
+extern "C" void pc_gfx_set_proj_offset(float ndcX, float ndcY);
+struct Viewport;
+// Vistas que se dibujaron fusionadas (aspecto de pantalla completa): al salir
+// de la fusión recuperan el de su rectángulo.
+static Viewport* sPcMergedViewports[2] = { nullptr, nullptr };
+static void pcSetRect(Rectf& rect, f32 x0, f32 y0, f32 x1, f32 y1)
+{
+	rect.p1 = Vector2f(x0, y0);
+	rect.p2 = Vector2f(x1, y1);
+}
+// Vista del co-op (0 o 1) que se dibuja fusionada, o -1.
+static int pcMergedView(Viewport* vp);
+// Desplazamiento del frustum de la vista fusionada (0 fuera de la fusión).
+static void pcApplyMergeOffset(Viewport* vp);
 #endif
 #include "Viewport.h"
 #include "Graphics.h"
@@ -45,6 +60,47 @@ void HorizonalSplitter::split2(f32 split)
 {
 	Viewport* vp1 = mGraphics->getViewport(PLAYER1_VIEWPORT);
 	Viewport* vp2 = mGraphics->getViewport(PLAYER2_VIEWPORT);
+
+#ifdef PIKI_PC_PORT
+	// Co-op (docs/PLAN_COOP.md §6.6-6.7): arriba/abajo o izquierda/derecha
+	// (ajuste "Co-op Split Screen") y, con la cámara fusionada, cada capitán en
+	// el lado de la pantalla donde estaba al separarse. split = parte de la
+	// vista 1 (1 = toda la pantalla, 0.5 = mitades), como en el original.
+	if (pc_p2_coop_active()) {
+		mPcCoop             = true;
+		const bool vertical = pc_p2_coop_vertical() != 0;
+		const f32 w = mBounds.p2.x, h = mBounds.p2.y;
+		const f32 len       = vertical ? w : h;
+		const bool vp1First = pc_p2_coop_view_side(0) == 0; // la vista 1 a la izquierda/arriba
+		const f32 cut       = (vp1First ? split : 1.0f - split) * len;
+		Viewport* first     = vp1First ? vp1 : vp2;
+		Viewport* second    = vp1First ? vp2 : vp1;
+		if (vertical) {
+			pcSetRect(first->mBounds, 0.0f, 0.0f, cut, h);
+			pcSetRect(second->mBounds, cut, 0.0f, w, h);
+		} else {
+			pcSetRect(first->mBounds, 0.0f, 0.0f, w, cut);
+			pcSetRect(second->mBounds, 0.0f, cut, w, h);
+		}
+		Viewport* vps[2]    = { vp1, vp2 };
+		for (int i = 0; i < 2; i++) {
+			vps[i]->mSplitRatio = Vector2f(1.0f, 1.0f);
+			vps[i]->mOffset     = Vector2f(0.0f, 0.0f);
+			vps[i]->refresh();
+		}
+		return;
+	}
+	if (mPcCoop) {
+		// Fuera del co-op, las mitades del original.
+		mPcCoop          = false;
+		pcSetRect(vp1->mBounds, 0.0f, 0.0f, mBounds.p2.x, mBounds.p2.y * 0.5f);
+		pcSetRect(vp2->mBounds, 0.0f, mBounds.p2.y * 0.5f, mBounds.p2.x, mBounds.p2.y);
+		vp1->mSplitRatio = Vector2f(1.0f, 1.0f);
+		vp2->mSplitRatio = Vector2f(1.0f, 1.0f);
+		vp1->mOffset     = Vector2f(0.0f, 0.0f);
+		vp2->mOffset     = Vector2f(0.0f, 0.0f);
+	}
+#endif
 
 	vp1->mSplitRatio.y = split / 0.5f;
 	vp2->mSplitRatio.y = (1.0f - split) / 0.5f;
@@ -139,6 +195,9 @@ void Viewport::setProjection()
 #ifdef PIKI_PC_PORT
 	// El aspecto de la ventana puede cambiar en caliente (menu F1).
 	updateCameraAspect();
+	// Algunas pasadas proyectan antes de fijar el viewport: el desplazamiento
+	// de la fusión se pone aquí también, para que sea el de esta vista.
+	pcApplyMergeOffset(this);
 #endif
 	if (mCamera) {
 		mCamera->setProjection();
@@ -197,6 +256,14 @@ void Viewport::updateCameraAspect()
 
 	f32 y = mBounds2.getHeight();
 	f32 x = mBounds2.getWidth();
+#ifdef PIKI_PC_PORT
+	// Cámara fusionada del co-op: la vista se dibuja a pantalla completa.
+	if (pcMergedView(this) >= 0) {
+		const Vector2f screen = getScreenSize();
+		x                     = screen.x;
+		y                     = screen.y;
+	}
+#endif
 	f32 aspect;
 	if (y == 0.0f || x == 0.0f) {
 		aspect = 1.0f;
@@ -245,11 +312,41 @@ void Viewport::setRect(Rectf& rect)
  */
 void Viewport::setViewport()
 {
+#ifdef PIKI_PC_PORT
+	// Co-op con cámara fusionada (docs/PLAN_COOP.md §6.7, como el de Pikmin 1):
+	// cada vista se dibuja a pantalla completa, con el aspecto de la pantalla,
+	// recortada a su mitad y con el frustum corrido hacia su lado. Con las dos
+	// cámaras unidas (blend 0) las mitades forman una sola imagen; separadas
+	// (blend 1) cada capitán queda en el centro de la suya.
+	const int view = pcMergedView(this);
+	pcApplyMergeOffset(this);
+	if (view >= 0) {
+		const Vector2f screen = getScreenSize();
+		GXSetViewport(0.0f, 0.0f, screen.x, screen.y, 0.0f, 1.0f);
+		GXSetScissor((u32)(s32)mBounds2.p1.x, (u32)(s32)mBounds2.p1.y, (u32)mBounds2.getWidth(),
+		             gScissorOffset + (u32)mBounds2.getHeight());
+		updateCameraAspect(); // aspecto de pantalla completa
+		sPcMergedViewports[view] = this;
+		return;
+	}
+	for (int i = 0; i < 2; i++) {
+		if (sPcMergedViewports[i] == this) {
+			sPcMergedViewports[i] = nullptr;
+			updateCameraAspect(); // vuelve al aspecto de su rectángulo
+		}
+	}
+#endif
 	GXSetViewport(mBounds2.p1.x, mBounds2.p1.y, mBounds2.getWidth(), mBounds2.getHeight(), 0.0f, 1.0f);
 
 	u32 x = mBounds2.getWidth();
 	u32 y = mBounds2.getHeight();
+#ifdef PIKI_PC_PORT
+	// Origen negativo (ventana del tesoro: y = -47): float -> u32 directo es
+	// indefinido en C++; por s32 queda el mismo patrón de bits que la consola.
+	GXSetScissor((u32)(s32)mBounds2.p1.x, (u32)(s32)mBounds2.p1.y, x, gScissorOffset + y);
+#else
 	GXSetScissor(mBounds2.p1.x, mBounds2.p1.y, x, gScissorOffset + y);
+#endif
 }
 
 /**
@@ -779,6 +876,12 @@ void Graphics::fillZBuffer(Rectf& bounds, f32 z)
 
 	GXPosition3f32(bounds.p2.x, bounds.p1.y, z);
 	GXColor4u8(10, 70, 10, 255);
+#ifdef PIKI_PC_PORT
+	// Sin GXEnd el puerto enviaba el quad con el estado siguiente (color
+	// activado, Z LESS): pintaba de verde (10,70,10) todo lo que no tenía
+	// geometría, como el cielo de la cinemática del tesoro.
+	GXEnd();
+#endif
 
 	GXSetZMode(GX_TRUE, GX_LESS, GX_TRUE);
 	GXSetColorUpdate(GX_TRUE);
@@ -1114,3 +1217,30 @@ void Graphics::clearInitGX()
 {
 	initGX();
 }
+
+#ifdef PIKI_PC_PORT
+static int pcMergedView(Viewport* vp)
+{
+	if (!pc_p2_coop_merge_on() || !sys->mGfx || sys->mGfx->mActiveViewports < 2) {
+		return -1;
+	}
+	for (int i = 0; i < 2; i++) {
+		if (sys->mGfx->getViewport(i) == vp) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void pcApplyMergeOffset(Viewport* vp)
+{
+	const int view = pcMergedView(vp);
+	if (view < 0) {
+		pc_gfx_set_proj_offset(0.0f, 0.0f);
+		return;
+	}
+	const bool vertical = pc_p2_coop_vertical() != 0;
+	const f32 shift     = 0.5f * pc_p2_coop_split_blend() * (pc_p2_coop_view_side(view) == 0 ? 1.0f : -1.0f);
+	pc_gfx_set_proj_offset(vertical ? -shift : 0.0f, vertical ? 0.0f : shift);
+}
+#endif

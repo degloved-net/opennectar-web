@@ -12,6 +12,7 @@
  */
 
 #include "settings/pc_settings.h"
+#include "netplay/pc_online_switch.h"
 #include "settings/pc_settings_rows.h"
 #include "settings/pc_settings_tabs.h"
 #include "settings/pc_glass_menu.h"
@@ -46,8 +47,14 @@
 #include "pc_permadeath.h"
 #include "pc_coop.h"
 #include "pc_vs.h"
+#include "mods/pc_vs_map.h"
+#include "netplay/pc_netplay_det.h"
 #include "pc_achievements.h"
 #include "pc_speedrun.h"
+#include "pc_livesplit.h"
+#include "pc_captain_preview.h"
+#include "mods/pc_hd_model_convert.h"
+#include "randomizer/pc_randomizer.h"
 #include "gameflow.h"
 #include "SoundMgr.h"
 #include "pc_art.h"
@@ -75,6 +82,8 @@
 // Configuration
 // ---------------------------------------------------------------------------
 
+std::string pc_card_save_dir(); // card_stubs.cpp
+
 namespace {
 
 #ifdef __EMSCRIPTEN__
@@ -92,7 +101,7 @@ struct PcConfig {
     float renderScale = 2.0f / 3.0f;                 // internal 3D resolution multiplier
     int aspectRatioMode = 0;                         // 0=auto, 1=4:3, 2=16:10, 3=16:9, 4=21:9
 
-    // FPS mode (0=30fps, 1=60fps, 2=120fps experimental)
+    // FPS mode (0=30fps, 1=60fps, 2=120fps experimental, 3=monitor refresh rate)
     int fpsMode = 0;
 
     // Control mode (0=Classic, 1=Mouse Cursor)
@@ -157,6 +166,15 @@ struct PcConfig {
     int bombControl = 0;
     int hideOlimarText = 0;     // sin los textos de Olimar (primer Pikmin, piezas, avisos)
     int speedrunIntroHidden = 0; // explicación del modo Speedrun ya vista (se abre sola solo la primera vez)        // botón Bomb: el amarillo con bomba la lanza al cursor o la suelta
+    int speedrunCategory = 0;    // categoría del modo Speedrun (PC_SR_CAT_*)
+    int speedrunSplitsShown = 4;
+    // LiveSplit (servidor TCP): opcional, apagado por defecto. Host y puerto
+    // solo en el archivo de ajustes (otro PC de la red, p. ej. desde Android).
+    int speedrunLiveSplit = 0;
+    int speedrunLsHideClock = 0; // con LiveSplit conectado, sin reloj ni splits propios
+    char speedrunLsHost[64] = "127.0.0.1";
+    int speedrunLsPort = 16834; // splits visibles bajo el reloj del modo Speedrun (1-10)
+    int onlineStun = 1;         // online: servidor STUN público para jugar entre redes distintas
     int onionStep10 = 0;        // Y + arriba/abajo en la cebolla mueve de 10 en 10
     int instantWhistle = 0;     // los Pikmin silbados se unen sin la reacción de girarse
     // Cheats.
@@ -170,6 +188,7 @@ struct PcConfig {
     int breakableGates = 0;     // issue #70: los Pikmin rompen a golpes las compuertas reforzadas
     int freeCamPadPct = 100;    // issue #66: sensibilidad del stick derecho con la cámara libre
     int eternalNight = 0;       // siempre de noche (luz y luna), el reloj del día sigue igual
+    int fireflies = 0;          // luciérnagas por el escenario (de día o de noche)
     int p2Selection = 0;        // issue #67: cruceta como en Pikmin 2 (tipo fijo, arriba/abajo hoja/capullo/flor/bomba)
     // Reglas del modo VS (índices de las opciones del menú previo).
     int vsDuration = 2;  // 5 / 10 / 15 / 25 / 30 min
@@ -178,6 +197,7 @@ struct PcConfig {
     int vsBigPiece = 1;  // minuto 3 / minuto 7 / desde el inicio / sin gorda
     int vsPikiLimit = 2; // 25 / 40 / 50 por jugador
     int vsPellets = 1;   // cada 30 / 45 / 60 s / sin pastillas
+    std::string vsMap;   // carpeta en user/maps/vs/; vacío = la arena de serie
     // Mods de Pikmin 3: fijar objetivo, y mandar el escuadrón contra él.
     int lockOn = 0;
     int charge = 0;
@@ -283,6 +303,7 @@ struct PcConfig {
         freeCamPadPct = 100;
         p2Selection = 0;
         eternalNight = 0;
+        fireflies = 0;
         allOnions = 0;
         vsDuration = 2;
         vsRocketWin = 1;
@@ -290,6 +311,7 @@ struct PcConfig {
         vsBigPiece = 1;
         vsPikiLimit = 2;
         vsPellets = 1;
+        vsMap.clear();
         lockOn = 0;
         charge = 0;
         throwWhileMoving = 0;
@@ -901,6 +923,8 @@ void modsRowChange(int row, bool left, bool right);
 void saveDataRowAction(int row);
 void texturePacksRowAction(int row, const std::vector<std::string>& packs);
 void hdModelsRowAction(int row);
+void hdModelsToggle(int row);
+bool hdModelInstalled(int row);
 void pollKeyCapture(SDL_GameController* ctl);
 bool pollButtonCapture(SDL_GameController* ctl);
 void pcCaptainPromptInput();
@@ -1068,7 +1092,90 @@ void pc_settings_set_language(unsigned char language) {
 
 namespace {
 
+#if PIKI_NETPLAY_BUILD
+// Netplay: every setting that changes the simulation. Both peers hash these
+// in the handshake and they are locked for the session. Window, graphics,
+// audio, bindings, camera feel and other local-only rows are not here.
+#define PC_NETPLAY_SESSION_FIELDS(X)                                                          \
+    X(fpsMode) X(chainActions) X(holdToPluck) X(betterPathfinding) X(bluesOnlyWater)         \
+    X(idleCounter) X(naviHealthPct) X(tekiHealthPct) X(infiniteDay) X(freeCamera)            \
+    X(whistleRadiusPct) X(throwSpeedPct) X(throwCancelB) X(quickGrab) X(noTrip)              \
+    X(whistlePluck) X(bombControl) X(hideOlimarText) X(onionStep10) X(instantWhistle)        \
+    X(pikiInvincible) X(allFlowers) X(carrySpeedPct) X(naviSpeedPct) X(unlockZones)          \
+    X(noDayAdvance) X(allOnions) X(breakableGates) X(eternalNight) X(fireflies)              \
+    X(p2Selection) X(vsDuration) X(vsRocketWin) X(vsRocketHp) X(vsBigPiece) X(vsPikiLimit)   \
+    X(vsPellets) X(lockOn) X(charge) X(throwWhileMoving) X(firstPerson) X(pikiLimit)         \
+    X(dayMinutes) X(coopSplit) X(coopMergeCamera) X(debugKeys) X(gyroEnabled)
+
+bool sNetplaySessionLocked = false;
+PcConfig sNetplaySessionConfig;
+// The joiner of a launcher session adopted the host's values: the file keeps
+// this player's own (sNetplayDiskConfig), never the adopted ones.
+bool sNetplayAdopted = false;
+PcConfig sNetplayDiskConfig;
+
+void netplayRelockSessionFields() {
+    if (!sNetplaySessionLocked) return;
+#define PC_NETPLAY_RELOCK(f) sConfig.f = sNetplaySessionConfig.f; sPending.f = sNetplaySessionConfig.f;
+    PC_NETPLAY_SESSION_FIELDS(PC_NETPLAY_RELOCK)
+#undef PC_NETPLAY_RELOCK
+    sConfig.vsMap  = sNetplaySessionConfig.vsMap;
+    sPending.vsMap = sNetplaySessionConfig.vsMap;
+}
+
+// While saveConfig writes, the session fields hold this player's own values.
+struct NetplayDiskValuesScope {
+    bool active = false;
+    PcConfig live;
+    NetplayDiskValuesScope() {
+        if (!sNetplaySessionLocked || !sNetplayAdopted) return;
+        active = true;
+        live = sConfig;
+#define PC_NETPLAY_DISK(f) sConfig.f = sNetplayDiskConfig.f;
+        PC_NETPLAY_SESSION_FIELDS(PC_NETPLAY_DISK)
+#undef PC_NETPLAY_DISK
+        sConfig.vsMap = sNetplayDiskConfig.vsMap;
+    }
+    ~NetplayDiskValuesScope() {
+        if (active) sConfig = live;
+    }
+};
+
+// Inverse of pc_settings_netplay_config_text: sets every session field the
+// text names. Unknown or malformed pairs are ignored.
+int netplayApplyConfigText(const char* text) {
+    int applied = 0;
+    std::string s(text != nullptr ? text : "");
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t semi = s.find(';', pos);
+        const std::string pair = s.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos);
+        pos = semi == std::string::npos ? s.size() : semi + 1;
+        const size_t eq = pair.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = pair.substr(0, eq);
+        const std::string val = pair.substr(eq + 1);
+        if (key == "vsMap") {
+            sConfig.vsMap = val;
+            ++applied;
+            continue;
+        }
+        char* end = nullptr;
+        const long v = std::strtol(val.c_str(), &end, 10);
+        if (val.empty() || end == nullptr || *end != '\0') continue;
+#define PC_NETPLAY_ADOPT(f) if (key == #f) { sConfig.f = (int)v; ++applied; continue; }
+        PC_NETPLAY_SESSION_FIELDS(PC_NETPLAY_ADOPT)
+#undef PC_NETPLAY_ADOPT
+    }
+    return applied;
+}
+#endif
+
 void saveConfig() {
+#if PIKI_NETPLAY_BUILD
+    netplayRelockSessionFields();
+    NetplayDiskValuesScope netplayDiskValues;
+#endif
     std::string path = std::string(kConfigFilename);
     std::ofstream out(path, std::ios::out | std::ios::trunc);
     if (!out) {
@@ -1111,8 +1218,16 @@ void saveConfig() {
     out << "freeCamPadPct = " << sConfig.freeCamPadPct << "\n";
     out << "p2Selection = " << sConfig.p2Selection << "\n";
     out << "eternalNight = " << sConfig.eternalNight << "\n";
+    out << "fireflies = " << sConfig.fireflies << "\n";
     out << "hideOlimarText = " << sConfig.hideOlimarText << "\n";
     out << "speedrunIntroHidden = " << sConfig.speedrunIntroHidden << "\n";
+    out << "speedrunCategory = " << sConfig.speedrunCategory << "\n";
+    out << "speedrunSplitsShown = " << sConfig.speedrunSplitsShown << "\n";
+    out << "speedrunLiveSplit = " << sConfig.speedrunLiveSplit << "\n";
+    out << "speedrunLsHideClock = " << sConfig.speedrunLsHideClock << "\n";
+    out << "speedrunLsHost = " << sConfig.speedrunLsHost << "\n";
+    out << "speedrunLsPort = " << sConfig.speedrunLsPort << "\n";
+    out << "onlineStun = " << sConfig.onlineStun << "\n";
     out << "onionStep10 = " << sConfig.onionStep10 << "\n";
     out << "instantWhistle = " << sConfig.instantWhistle << "\n";
     out << "pikiInvincible = " << sConfig.pikiInvincible << "\n";
@@ -1128,6 +1243,7 @@ void saveConfig() {
     out << "vsBigPiece = " << sConfig.vsBigPiece << "\n";
     out << "vsPikiLimit = " << sConfig.vsPikiLimit << "\n";
     out << "vsPellets = " << sConfig.vsPellets << "\n";
+    out << "vsMap = " << sConfig.vsMap << "\n";
     out << "lockOn = " << sConfig.lockOn << "\n";
     out << "charge = " << sConfig.charge << "\n";
     out << "throwWhileMoving = " << sConfig.throwWhileMoving << "\n";
@@ -1256,7 +1372,7 @@ void loadConfig() {
         else if (key == "fpsMode") {
             sConfig.fpsMode = atoi(val.c_str());
             if (sConfig.fpsMode < 0) sConfig.fpsMode = 0;
-            if (sConfig.fpsMode > 2) sConfig.fpsMode = 2;
+            if (sConfig.fpsMode > 3) sConfig.fpsMode = 3;
         }
         else if (key == "chainActions") {
             sConfig.chainActions = atoi(val.c_str()) ? 1 : 0;
@@ -1303,6 +1419,27 @@ void loadConfig() {
         else if (key == "speedrunIntroHidden") {
             sConfig.speedrunIntroHidden = atoi(val.c_str()) ? 1 : 0;
         }
+        else if (key == "speedrunCategory") {
+            sConfig.speedrunCategory = std::clamp(atoi(val.c_str()), 0, PC_SR_CAT_COUNT - 1);
+        }
+        else if (key == "speedrunLiveSplit") {
+            sConfig.speedrunLiveSplit = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "speedrunLsHideClock") {
+            sConfig.speedrunLsHideClock = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "speedrunLsHost") {
+            if (!val.empty()) snprintf(sConfig.speedrunLsHost, sizeof(sConfig.speedrunLsHost), "%s", val.c_str());
+        }
+        else if (key == "speedrunLsPort") {
+            sConfig.speedrunLsPort = std::clamp(atoi(val.c_str()), 1, 65535);
+        }
+        else if (key == "onlineStun") {
+            sConfig.onlineStun = atoi(val.c_str()) != 0 ? 1 : 0;
+        }
+        else if (key == "speedrunSplitsShown") {
+            sConfig.speedrunSplitsShown = std::clamp(atoi(val.c_str()), 1, 10);
+        }
         else if (key == "hideOlimarText") {
             sConfig.hideOlimarText = atoi(val.c_str()) ? 1 : 0;
         }
@@ -1310,6 +1447,7 @@ void loadConfig() {
             sConfig.breakableGates = atoi(val.c_str()) ? 1 : 0;
         }
         else if (key == "eternalNight") sConfig.eternalNight = atoi(val.c_str()) ? 1 : 0;
+        else if (key == "fireflies") sConfig.fireflies = atoi(val.c_str()) ? 1 : 0;
         else if (key == "p2Selection") {
             sConfig.p2Selection = atoi(val.c_str()) ? 1 : 0;
         }
@@ -1426,6 +1564,12 @@ void loadConfig() {
         }
         else if (key == "debugKeys") {
             sConfig.debugKeys = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "vsMap") {
+            // Solo un nombre de carpeta, nunca una ruta.
+            const bool safe = val.size() < 64 && val.find('/') == std::string::npos
+                && val.find('\\') == std::string::npos && val.find("..") == std::string::npos;
+            sConfig.vsMap = safe ? val : std::string();
         }
         else if (key == "texturePack") {
             const bool safe = !val.empty() && val.size() < 64
@@ -1592,6 +1736,7 @@ void latchKeys() {
 void pcNewGamePromptInput();
 void pcErasedNoticeInput();
 void pcSpeedrunIntroInput();
+void pcRandomizerIntroInput();
 void pcPlayerCountPromptInput();
 void pcDevAssignPromptInput();
 
@@ -1808,6 +1953,13 @@ void pollMenuInput() {
         pcSpeedrunIntroInput();
         return;
     }
+    if (pc_randomizer_intro_active()) {
+#if PIKI_PC_TOUCH
+        pc_touch_claim_game_menu();
+#endif
+        pcRandomizerIntroInput();
+        return;
+    }
     if (pc_newgame_prompt_active()) {
 #if PIKI_PC_TOUCH
         pc_touch_claim_game_menu();
@@ -1850,7 +2002,9 @@ void pollMenuInput() {
 #if PIKI_PC_TOUCH
         pc_touch_claim_game_menu();
 #endif
-        pcVsEndScreenInput();
+        // Netplay: the choice comes from both players' synced pads, in the
+        // sim (pc_vs_end_screen_sim_input); the local devices only feed them.
+        if (!pc_netplay_deterministic()) pcVsEndScreenInput();
         return;
     }
     // Menú de cristal del título (Advanced Options): es dueño de la entrada
@@ -2124,10 +2278,15 @@ void pollMenuInput() {
             if (padNavA(ctl)) ok = true;
             if (padNavB(ctl)) cancel = true;
         }
+        bool toggle = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_A)
+                   || keyWentDown(SDL_SCANCODE_D);
+        // The touch stick reaches the menu as digital directions too.
+        if ((ctl || sTouchFrameButtons) && (padNavLeft(ctl) || padNavRight(ctl))) toggle = true;
         const int rowCount = 6;
         if (up) { sHdModelsSelection = (sHdModelsSelection + rowCount - 1) % rowCount; return; }
         if (down) { sHdModelsSelection = (sHdModelsSelection + 1) % rowCount; return; }
         if (cancel) { sInHdModelsSubmenu = false; return; }
+        if (toggle) { hdModelsToggle(sHdModelsSelection); return; }
         if (ok) hdModelsRowAction(sHdModelsSelection);
         return;
     }
@@ -2507,6 +2666,7 @@ void graphicsRowChange(int row, bool left, bool right, bool ok) {
     } else if (row == 13) {
         if (left) sPending.shadows = (sPending.shadows + 3) % 4;
         else if (right) sPending.shadows = (sPending.shadows + 1) % 4;
+
     } else if (row == 0) {
         if (left || right) sPending.antialiasing = sPending.antialiasing ? 0 : 1;
     } else if (row == 1) {
@@ -2693,6 +2853,9 @@ void modsRowChange(int row, bool left, bool right) {
     else if (row == 40) {
         if (left || right) sPending.eternalNight = sPending.eternalNight ? 0 : 1;
     }
+    else if (row == 41) {
+        if (left || right) sPending.fireflies = sPending.fireflies ? 0 : 1;
+    }
     else if (row == 39) {
         if (left || right) sPending.p2Selection = sPending.p2Selection ? 0 : 1;
     }
@@ -2727,9 +2890,11 @@ void saveDataRowAction(int row) {
         else pc_save_android_open_restore();
     }
 #else
-    texturePackNotice(false,
-        "Desktop saves live in the game's 'save' folder (card0 / card1). "
-        "Copy that folder to transfer.");
+    (void)row;
+    const std::string dir = pc_card_save_dir();
+    if (SDL_OpenURL(("file://" + dir).c_str()) != 0) {
+        texturePackNotice(true, ("Could not open the folder: " + dir).c_str());
+    }
 #endif
 }
 
@@ -2820,6 +2985,15 @@ void hdModelsRowAction(int row) {
         
 }
 
+// Activa o desactiva un modelo HD instalado (lo mismo que el launcher). Se
+// aplica al momento: el juego consulta el ajuste en cada dibujo.
+void hdModelsToggle(int row) {
+    if (row < 0 || row >= 6 || !hdModelInstalled(row)) return;
+    sConfig.hdModelsDisabled ^= 1 << row;
+    sPending.hdModelsDisabled = sConfig.hdModelsDisabled;
+    saveConfig();
+}
+
 // Texto del valor de una fila de la página principal (compartido con
 // pc_settings_rows). Calcula la tabla completa y devuelve la fila pedida.
 void mainRowValue(int row, char* out, size_t n) {
@@ -2837,7 +3011,11 @@ void mainRowValue(int row, char* out, size_t n) {
 
     const char* fpsModeNames[3] = { "30 FPS (stable)", "60 FPS (experimental)", "120 FPS (experimental)" };
     char fpsModeBuf[32];
-    snprintf(fpsModeBuf, sizeof(fpsModeBuf), "%s", fpsModeNames[sPending.fpsMode >= 0 && sPending.fpsMode < 3 ? sPending.fpsMode : 0]);
+    if (sPending.fpsMode == 3) {
+        snprintf(fpsModeBuf, sizeof(fpsModeBuf), "Monitor (%.0f Hz)", pc_window_get_refresh_rate());
+    } else {
+        snprintf(fpsModeBuf, sizeof(fpsModeBuf), "%s", fpsModeNames[sPending.fpsMode >= 0 && sPending.fpsMode < 3 ? sPending.fpsMode : 0]);
+    }
 
     char valueBuf[ROW_DISPLAY_COUNT][128];
     snprintf(valueBuf[0], sizeof(valueBuf[0]), "%s",
@@ -2962,9 +3140,9 @@ void mainRowChange(int row, bool left, bool right, bool ok) {
         break;
     case ROW_FPS_MODE:
         if (left) {
-            sPending.fpsMode = (sPending.fpsMode - 1 + 3) % 3;
+            sPending.fpsMode = (sPending.fpsMode - 1 + 4) % 4;
         } else if (right) {
-            sPending.fpsMode = (sPending.fpsMode + 1) % 3;
+            sPending.fpsMode = (sPending.fpsMode + 1) % 4;
         }
         break;
 #if defined(VERSION_GPIP01)
@@ -3531,8 +3709,22 @@ void drawF1Page(DGXGraphics* gfx) {
         char value[128];
         pc_settings_row_value(sOpenGroup, sGroupSel, value, sizeof(value));
         const bool on = pc_settings_row_enabled(sOpenGroup, sGroupSel);
-        f1Plate(gfx, rx - 2, y, rw + 4, kF1OptH - 2, on ? 2 : 1);
-        f1Text(rx + (rw - f1TextW(value, 10)) / 2, y + 3, value, on ? kF1SelDark : kF1Off, 10, 15);
+        if (sOpenGroup == PC_SET_GROUP_ACHIEVEMENTS) {
+            // Progreso global de logros. La placa amarilla funciona como el
+            // relleno y deja visible de un vistazo la proporción conseguida.
+            const int unlocked = pc_achievements_unlocked_count();
+            const int total = (int)PC_ACH_COUNT;
+            const int barW = rw + 4;
+            f1Plate(gfx, rx - 2, y, barW, kF1OptH - 2, 1);
+            const int fillW = total > 0 ? barW * unlocked / total : 0;
+            if (fillW > 0) f1Plate(gfx, rx - 2, y, fillW, kF1OptH - 2, 2);
+            char progress[32];
+            snprintf(progress, sizeof(progress), "%d/%d", unlocked, total);
+            f1Text(rx + (rw - f1TextW(progress, 10)) / 2, y + 3, progress, kF1Section, 10, 15);
+        } else {
+            f1Plate(gfx, rx - 2, y, rw + 4, kF1OptH - 2, on ? 2 : 1);
+            f1Text(rx + (rw - f1TextW(value, 10)) / 2, y + 3, value, on ? kF1SelDark : kF1Off, 10, 15);
+        }
         y += kF1OptH;
         // Logros: su icono, a color si está conseguido y oscurecido si no.
         if (sOpenGroup == PC_SET_GROUP_ACHIEVEMENTS) {
@@ -3632,6 +3824,27 @@ void pc_settings_touch_tap(float x, float y) {
     sTouchTapPending = true;
 }
 
+// El launcher deja Load/Textures/.activate al descargar un pack: se
+// activa ese pack (su carpeta) y se borra el aviso. Al arrancar el juego y
+// en las órdenes del launcher (--settings-dump...).
+static void applyLauncherPackActivation() {
+    const std::filesystem::path activate = std::filesystem::path("Load") / "Textures" / ".activate";
+    std::string name;
+    {
+        std::ifstream in(activate);
+        if (in) std::getline(in, name);
+    }
+    while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+    if (!name.empty()) {
+        sConfig.texturePack = name;
+        sConfig.texturePackEnabled = 1;
+        sPending = sConfig;
+        saveConfig();
+    }
+    std::error_code activateEc;
+    std::filesystem::remove(activate, activateEc);
+}
+
 void pc_settings_init(void) {
     loadConfig();
 #ifdef __EMSCRIPTEN__
@@ -3665,6 +3878,7 @@ void pc_settings_init(void) {
     pc_gfx_set_aspect_ratio_mode(sPending.aspectRatioMode);
     applyControls(sConfig);
     applyGraphics(sConfig);
+    applyLauncherPackActivation();
     // PLAN_TEXTURAS_HD fase 2: si hay un pack activo, solicitar su
     // indexación antes de que pc_texpack_init() construya el mapa en
     // pc_gfx_init(). pc_texpack_select_pack() se llama aquí para que el
@@ -3681,7 +3895,7 @@ void pc_settings_init(void) {
 int pc_settings_menu_is_open(void) { return sMenuOpen ? 1 : 0; }
 
 bool pc_settings_consume_game_input(void) {
-    const bool promptWasOpen = pc_erased_notice_active() || pc_speedrun_intro_active() || pc_newgame_prompt_active() || pc_playercount_prompt_active() || pc_devassign_prompt_active()
+    const bool promptWasOpen = pc_erased_notice_active() || pc_speedrun_intro_active() || pc_randomizer_intro_active() || pc_newgame_prompt_active() || pc_playercount_prompt_active() || pc_devassign_prompt_active()
                             || pc_captain_prompt_active() || pc_glass_menu_active();
     pollMenuInput();   // edge-detect using the previous frame's snapshot
     latchKeys();       // snapshot AFTER polling so next frame sees this one
@@ -3798,16 +4012,18 @@ int  sSrSel  = 0;      // opción marcada en el menú del modo
 bool sErasedNoticeQueued = false;
 bool sErasedNoticeOpen   = false;
 bool sNewGamePromptOpen = false;
-int  sNewGamePromptStep = 0;     // 0 = normal/permadeath, 1 = difficulty
-int  sNewGamePromptChoice = 0;   // current step: 0 = left option, 1 = right
-int  sNewGamePromptRules = 0;    // 0 = normal file, 1 = permadeath
+int  sNewGamePromptRow = 0;      // 0 = Difficulty, 1 = Game mode, 2 = Skip tutorial, 3 = Start
+int  sNewGamePromptCol = 0;      // opción bajo el cursor en la fila con foco
+int  sNewGamePromptRules = 0;    // 0 = standard file, 1 = permadeath
 int  sNewGamePromptResult = PC_NEWGAME_PENDING;
 bool sNewGamePromptHard = false;
+bool sNewGamePromptSkipTutorial = false;
+bool sTutorialSkipPending = false;
 }
 
 // Menú del modo Speedrun: Start Run / Best Times / How It Works. La
 // explicación se abre sola la primera vez (speedrunIntroHidden = ya vista).
-enum SrPage { SR_Menu, SR_How, SR_Times, SR_ConfirmReset };
+enum SrPage { SR_Menu, SR_How, SR_Times, SR_ConfirmReset, SR_Settings };
 
 bool pc_speedrun_intro_open_if_needed(void) {
     sSpeedrunIntroOpen   = true;
@@ -3828,24 +4044,105 @@ bool pc_speedrun_intro_active(void) { return sSpeedrunIntroOpen; }
 int pc_speedrun_intro_result(void) { return sSpeedrunIntroResult; }
 
 namespace {
-constexpr int kSrMenuItems = 3;
-const char* const kSrMenuLabels[kSrMenuItems] = { "Start Run", "Best Times", "How It Works" };
+enum SrMenuRow {
+    SRM_Start, SRM_Category, SRM_Practice, SRM_Times, SRM_How, SRM_Settings, SRM_Splits, SRM_ResetKey, SRM_ResetPad,
+    SRM_LiveSplit, SRM_LsHideClock, kSrMenuItems
+};
+const char* const kSrMenuLabels[kSrMenuItems] = { "Start Run", "Category", "Practice", "Best Times", "How It Works",
+                                                  "Settings", "Splits shown", "Reset key", "Reset button",
+                                                  "LiveSplit", "Hide game clock" };
+// Filas de cada página: la principal y Settings (ajustes del modo).
+const int kSrMainRows[]     = { SRM_Start, SRM_Category, SRM_Practice, SRM_Times, SRM_How, SRM_Settings };
+const int kSrSettingsRows[] = { SRM_Splits, SRM_ResetKey, SRM_ResetPad, SRM_LiveSplit, SRM_LsHideClock };
+constexpr int kSrMenuRowH   = 44;
+
+const int* srRows(int& count) {
+    if (sSrPage == SR_Settings) {
+        count = int(sizeof(kSrSettingsRows) / sizeof(kSrSettingsRows[0]));
+        return kSrSettingsRows;
+    }
+    count = int(sizeof(kSrMainRows) / sizeof(kSrMainRows[0]));
+    return kSrMainRows;
+}
+int srPanelH(int count) { return 22 + count * kSrMenuRowH + 60; }
+
+// Captura de la tecla o el botón de reset (lo mismo que en Controls).
+char   sSrExportMsg[96] = "";
+Uint32 sSrExportMsgAt   = 0; // el aviso de la exportación dura unos segundos
+int  sSrCapture     = 0;     // 0 = no, SRM_ResetKey o SRM_ResetPad
+bool sSrCaptureWait = false; // esperar a soltar antes y después de capturar
+
+void srSetResetKey(int sc) {
+    sConfig.keyboardBindings[PC_KEY_ACT_SPEEDRUN_RESET] = sPending.keyboardBindings[PC_KEY_ACT_SPEEDRUN_RESET] = sc;
+    pc_window_set_key_binding(PC_KEY_ACT_SPEEDRUN_RESET, static_cast<SDL_Scancode>(sc));
+    saveConfig();
+}
+void srSetResetPad(int bind) {
+    sConfig.gamepadBindings[PC_KEY_ACT_SPEEDRUN_RESET] = sPending.gamepadBindings[PC_KEY_ACT_SPEEDRUN_RESET] = bind;
+    pc_window_set_gamepad_binding(PC_KEY_ACT_SPEEDRUN_RESET, bind);
+    saveConfig();
+}
+
+// true mientras la captura consume la entrada. Esc cancela; Supr o
+// Retroceso dejan la acción sin tecla o botón.
+bool srPollCapture() {
+    if (!sSrCapture && !sSrCaptureWait) return false;
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (sSrCaptureWait) {
+        if (!captureConfirmHeld(ctl) && !pc_window_gamepad_any_held(ctl)) sSrCaptureWait = false;
+        return true;
+    }
+    if (keyWentDown(SDL_SCANCODE_ESCAPE)) {
+        sSrCapture = 0;
+        return true;
+    }
+    const bool clear = keyWentDown(SDL_SCANCODE_DELETE) || keyWentDown(SDL_SCANCODE_BACKSPACE);
+    bool done = false;
+    if (sSrCapture == SRM_ResetKey) {
+        if (clear) {
+            srSetResetKey(SDL_SCANCODE_UNKNOWN);
+            done = true;
+        }
+        for (int sc = 1; sc < SDL_NUM_SCANCODES && !done; sc++) {
+            if (!keyWentDown(static_cast<SDL_Scancode>(sc))) continue;
+            srSetResetKey(sc);
+            done = true;
+        }
+    } else {
+        const int bind = clear ? -1 : pc_window_gamepad_first_held_binding(ctl);
+        if (clear || bind >= 0) {
+            srSetResetPad(bind);
+            done = true;
+        }
+    }
+    if (done) {
+        sSrCapture     = 0;
+        sSrCaptureWait = true;
+    }
+    return true;
+}
 
 void pcSpeedrunIntroInput() {
     if (!sSpeedrunIntroOpen) return;
+    if (srPollCapture()) return;
     bool accept = menuOkKey()
                || (sTouchFrameButtons & PAD_BUTTON_A) != 0;
     bool back   = menuCancelKey() || (sTouchFrameButtons & PAD_BUTTON_B) != 0;
     bool up     = keyWentDown(SDL_SCANCODE_UP) || (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
     bool down   = keyWentDown(SDL_SCANCODE_DOWN) || (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
     bool xPress = keyWentDown(SDL_SCANCODE_X) || (sTouchFrameButtons & PAD_BUTTON_X) != 0;
+    bool yPress = keyWentDown(SDL_SCANCODE_E) || (sTouchFrameButtons & PAD_BUTTON_Y) != 0;
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT) || (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
     if (sTouchTapPending) {
         sTouchTapPending = false;
         // En el menú, un toque sobre una opción la elige; en las páginas, vuelve.
-        if (sSrPage == SR_Menu) {
+        if (sSrPage == SR_Menu || sSrPage == SR_Settings) {
+            int count = 0;
+            srRows(count);
             const float y = sTouchTapY * 480.0f;
-            const int row = int((y - (240.0f - 70.0f)) / 44.0f);
-            if (row >= 0 && row < kSrMenuItems) { sSrSel = row; accept = true; }
+            const int row = int((y - (240.0f - srPanelH(count) / 2 + 22)) / kSrMenuRowH);
+            if (row >= 0 && row < count) { sSrSel = row; accept = true; }
         } else {
             accept = true;
         }
@@ -3856,33 +4153,83 @@ void pcSpeedrunIntroInput() {
         if (promptPadB(ctl)) back = true;
         if (padNavUp(ctl)) up = true;
         if (padNavDown(ctl)) down = true;
+        if (padNavLeft(ctl)) left = true;
+        if (padNavRight(ctl)) right = true;
         static bool sPadXWas = false;
         const bool padX = pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_X));
         if (padX && !sPadXWas) xPress = true;
         sPadXWas = padX;
+        static bool sPadYWas = false;
+        const bool padY = pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_Y));
+        if (padY && !sPadYWas) yPress = true;
+        sPadYWas = padY;
     }
 
     switch (sSrPage) {
     case SR_Menu:
-        if (up)   sSrSel = (sSrSel + kSrMenuItems - 1) % kSrMenuItems;
-        if (down) sSrSel = (sSrSel + 1) % kSrMenuItems;
-        if (accept) {
-            if (sSrSel == 0) {
+    case SR_Settings: {
+        int count = 0;
+        const int* rows = srRows(count);
+        if (up)   sSrSel = (sSrSel + count - 1) % count;
+        if (down) sSrSel = (sSrSel + 1) % count;
+        const int row = rows[sSrSel];
+        if (row == SRM_Category && (left || right || accept)) {
+            // Categoría: izquierda/derecha o A la cambian, en círculo.
+            int c = sConfig.speedrunCategory;
+            c = (c + (left ? PC_SR_CAT_COUNT - 1 : 1)) % PC_SR_CAT_COUNT;
+            sConfig.speedrunCategory = sPending.speedrunCategory = c;
+            saveConfig();
+        } else if (row == SRM_Practice && (left || right || accept)) {
+            // Práctica: Off, día 1 y los días con punto de práctica.
+            if (pc_speedrun_category_uses_days())
+                pc_speedrun_set_practice_day(pc_speedrun_next_practice_day(pc_speedrun_practice_day(), left ? -1 : 1));
+        } else if (row == SRM_Splits && (left || right || accept)) {
+            // Splits visibles: izquierda/derecha cambian, A avanza (de 10 vuelve a 1).
+            int n = sConfig.speedrunSplitsShown;
+            n = left ? std::max(1, n - 1) : right ? std::min(10, n + 1) : n % 10 + 1;
+            sConfig.speedrunSplitsShown = sPending.speedrunSplitsShown = n;
+            saveConfig();
+        } else if ((row == SRM_LiveSplit || row == SRM_LsHideClock) && (left || right || accept)) {
+            int& v = row == SRM_LiveSplit ? sConfig.speedrunLiveSplit : sConfig.speedrunLsHideClock;
+            v = !v;
+            (row == SRM_LiveSplit ? sPending.speedrunLiveSplit : sPending.speedrunLsHideClock) = v;
+            saveConfig();
+        } else if ((row == SRM_ResetKey || row == SRM_ResetPad) && accept) {
+            sSrCapture     = row;
+            sSrCaptureWait = true;
+        } else if (accept) {
+            if (row == SRM_Start) {
                 sSpeedrunIntroOpen   = false;
                 sSpeedrunIntroResult = PC_SPEEDRUN_INTRO_CONTINUE;
+            } else if (row == SRM_Settings) {
+                sSrPage = SR_Settings;
+                sSrSel  = 0;
             } else {
-                sSrPage = sSrSel == 1 ? SR_Times : SR_How;
+                sSrPage = row == SRM_Times ? SR_Times : SR_How;
             }
+        } else if (back && sSrPage == SR_Settings) {
+            // Settings vuelve a la página principal, con Settings marcado.
+            sSrPage = SR_Menu;
+            sSrSel  = 5;
         } else if (back) {
             sSpeedrunIntroOpen   = false;
             sSpeedrunIntroResult = PC_SPEEDRUN_INTRO_BACK;
         }
         break;
+    }
     case SR_How:
         if (accept || back) sSrPage = SR_Menu;
         break;
     case SR_Times:
-        if (xPress && pc_speedrun_has_pb()) sSrPage = SR_ConfirmReset;
+        if (yPress) {
+            // Exportar los splits a LiveSplit; el resultado sale en la página.
+            char name[64];
+            if (pc_speedrun_export_lss(name, sizeof(name)))
+                snprintf(sSrExportMsg, sizeof(sSrExportMsg), "Saved save/speedrun/%s", name);
+            else
+                snprintf(sSrExportMsg, sizeof(sSrExportMsg), "Nothing to export: finish a run first");
+            sSrExportMsgAt = SDL_GetTicks();
+        } else if (xPress && pc_speedrun_has_pb()) sSrPage = SR_ConfirmReset;
         else if (accept || back) sSrPage = SR_Menu;
         break;
     case SR_ConfirmReset:
@@ -3905,12 +4252,26 @@ void drawSrHow(DGXGraphics* gfx, int screenW, int screenH) {
     const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2 + 10;
     drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
     drawPikminHeader(gfx, panelX, panelY, panelW, "How It Works");
+    // Reglas de speedrun.com de la categoría elegida.
+    static const char* const kRules[PC_SR_CAT_COUNT][3] = {
+        { "All Parts: Start Run begins a new game. The timer",
+          "starts then and stops when the Secret Safe is",
+          "collected. One split per day." },
+        { "Low-Pikmin: All Parts, but the Onions may produce",
+          "at most " PC_SR_SPROUT_LIMIT_TEXT " sprouts. Going over voids the run.",
+          "One split per day." },
+        { "5 Parts: play Day 1 and save (25 Red Leaf Pikmin).",
+          "Later runs load that race file. The timer starts on",
+          "entering Forest of Hope; one split per part." },
+        { "200 Pikmin Challenge: all five stages are open. The",
+          "timer starts on the first stage and stops leaving the",
+          "last one with 200 in all five. One split per stage." },
+    };
+    const char* const* rules = kRules[pc_speedrun_category()];
     const char* lines[6] = { "Pikmin exactly as it shipped on GameCube.",
                              "No gameplay changes and no control upgrades:",
                              "every mod, cheat and port option that alters play is off.",
-                             "Start Run begins a new game right away, with no file",
-                             "select. The timer starts then and stops when the",
-                             "Secret Safe is collected. One split per day." };
+                             rules[0], rules[1], rules[2] };
     for (int i = 0; i < 6; i++) {
         const Colour c = i < 3 ? Colour(214, 224, 245, 255) : Colour(170, 190, 215, 255);
         drawTextOutline(panelX + panelW / 2 - menuTextWidth(lines[i]) / 2, panelY + 34 + i * 30 + (i >= 3 ? 8 : 0),
@@ -3923,7 +4284,9 @@ void drawSrTimes(DGXGraphics* gfx, int screenW, int screenH, bool confirm) {
     const int panelW = 600, panelH = 372;
     const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2 + 30;
     drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
-    drawPikminHeader(gfx, panelX, panelY, panelW, "Best Times");
+    char header[48];
+    snprintf(header, sizeof(header), "Best Times: %s", pc_speedrun_category_name(pc_speedrun_category()));
+    drawPikminHeader(gfx, panelX, panelY, panelW, header);
     const Colour kTitle(255, 205, 60, 255), kBody(214, 224, 245, 255), kDim(150, 165, 195, 255);
     const int lx = panelX + 36, rx = panelX + panelW - 36;
     char buf[64], t[32];
@@ -3936,7 +4299,8 @@ void drawSrTimes(DGXGraphics* gfx, int screenW, int screenH, bool confirm) {
         pc_speedrun_format_time(pc_speedrun_pb_ms(), t, sizeof(t));
         srText(lx, panelY + 26, "Personal Best", kTitle, 14, 21);
         srTextRight(rx, panelY + 26, t, kTitle, 14, 21);
-        snprintf(buf, sizeof(buf), "%d days   %s", pc_speedrun_pb_days(), pc_speedrun_pb_date());
+        if (pc_speedrun_category_uses_days()) snprintf(buf, sizeof(buf), "%d days   %s", pc_speedrun_pb_days(), pc_speedrun_pb_date());
+        else snprintf(buf, sizeof(buf), "%s", pc_speedrun_pb_date());
         srText(lx, panelY + 50, buf, kDim, 10, 15);
         pc_speedrun_format_time(pc_speedrun_sum_of_best(), t, sizeof(t));
         snprintf(buf, sizeof(buf), "Sum of Best  %s", t);
@@ -3958,7 +4322,8 @@ void drawSrTimes(DGXGraphics* gfx, int screenW, int screenH, bool confirm) {
             u64 ms = 0; int days = 0; const char* date = "";
             pc_speedrun_recent(i, &ms, &days, &date);
             pc_speedrun_format_time(ms, t, sizeof(t));
-            snprintf(buf, sizeof(buf), "%s   %dd   %s", t, days, date);
+            if (pc_speedrun_category_uses_days()) snprintf(buf, sizeof(buf), "%s   %dd   %s", t, days, date);
+            else snprintf(buf, sizeof(buf), "%s   %s", t, date);
             srText(lx + (i % 2) * colW, panelY + 274 + (i / 2) * 18, buf, kBody, 9, 14);
         }
     }
@@ -3966,9 +4331,12 @@ void drawSrTimes(DGXGraphics* gfx, int screenW, int screenH, bool confirm) {
     if (confirm) {
         drawHelpLine(panelX + panelW / 2, panelY + panelH - 36, "Erase all records?    A: erase    B: keep",
                      Colour(255, 160, 120, 255));
+    } else if (sSrExportMsg[0] && SDL_GetTicks() - sSrExportMsgAt < 4000) {
+        drawHelpLine(panelX + panelW / 2, panelY + panelH - 36, sSrExportMsg, Colour(255, 205, 60, 255));
     } else {
         drawHelpLine(panelX + panelW / 2, panelY + panelH - 36,
-                     pc_speedrun_has_pb() ? "B / Esc: back    X: erase records" : "B / Esc: back",
+                     pc_speedrun_has_pb() ? "B: back    X: erase records    Y / E: export to LiveSplit"
+                                          : "B: back    Y / E: export to LiveSplit",
                      Colour(150, 165, 195, 255));
     }
 }
@@ -3993,14 +4361,534 @@ void pc_speedrun_intro_draw(void) {
         return;
     }
 
-    const int panelW = 420, panelH = 200;
+    int count = 0;
+    const int* rows = srRows(count);
+    const int panelW = 560, panelH = srPanelH(count);
     const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2;
     drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
-    drawPikminHeader(gfx, panelX, panelY, panelW, "Speedrun");
-    for (int i = 0; i < kSrMenuItems; i++) {
-        drawGlassOption(panelX + 40, panelY + 22 + i * 44, panelW - 80, 40, kSrMenuLabels[i], i == sSrSel, 18, 26);
+    drawPikminHeader(gfx, panelX, panelY, panelW, sSrPage == SR_Settings ? "Speedrun Settings" : "Speedrun");
+    for (int r = 0; r < count; r++) {
+        const int i = rows[r];
+        char label[64];
+        if (i == SRM_Start && pc_speedrun_practice_day() > 0)
+            snprintf(label, sizeof(label), "Start Practice");
+        else if (i == SRM_Practice && !pc_speedrun_category_uses_days())
+            snprintf(label, sizeof(label), "%s: n/a", kSrMenuLabels[i]);
+        else if (i == SRM_Practice && pc_speedrun_practice_day() == 0)
+            snprintf(label, sizeof(label), "%s: < Off >", kSrMenuLabels[i]);
+        else if (i == SRM_Practice)
+            snprintf(label, sizeof(label), "%s: < Day %d >", kSrMenuLabels[i], pc_speedrun_practice_day());
+        else if (i == SRM_Category)
+            snprintf(label, sizeof(label), "%s: < %s >", kSrMenuLabels[i], pc_speedrun_category_name(pc_speedrun_category()));
+        else if (i == SRM_Splits)
+            snprintf(label, sizeof(label), "%s: < %d >", kSrMenuLabels[i], sConfig.speedrunSplitsShown);
+        else if (i == sSrCapture)
+            snprintf(label, sizeof(label), "%s", i == SRM_ResetKey ? "Press a key..." : "Press a button...");
+        else if (i == SRM_ResetKey)
+            snprintf(label, sizeof(label), "%s: %s", kSrMenuLabels[i],
+                     pc_window_binding_name(sConfig.keyboardBindings[PC_KEY_ACT_SPEEDRUN_RESET]));
+        else if (i == SRM_ResetPad)
+            snprintf(label, sizeof(label), "%s: %s", kSrMenuLabels[i],
+                     pc_window_get_gamepad_button_name(sConfig.gamepadBindings[PC_KEY_ACT_SPEEDRUN_RESET]));
+        else if (i == SRM_LiveSplit)
+            snprintf(label, sizeof(label), "%s: < %s >", kSrMenuLabels[i],
+                     !sConfig.speedrunLiveSplit ? "Off" : pc_livesplit_connected() ? "Connected" : "Waiting");
+        else if (i == SRM_LsHideClock)
+            snprintf(label, sizeof(label), "%s: < %s >", kSrMenuLabels[i], sConfig.speedrunLsHideClock ? "On" : "Off");
+        else snprintf(label, sizeof(label), "%s", kSrMenuLabels[i]);
+        drawGlassOption(panelX + 40, panelY + 22 + r * kSrMenuRowH, panelW - 80, kSrMenuRowH - 4, label, r == sSrSel, 18, 26);
     }
-    drawHelpLine(panelX + panelW / 2, panelY + 160, "A / Enter: select    B / Esc: back", Colour(150, 165, 195, 255));
+    const char* help = sSrCapture ? "Hold it 1 s in game to reset    Esc: cancel    Del: none"
+                                  : "A / Enter: select    B / Esc: back";
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 40, help, Colour(150, 165, 195, 255));
+}
+
+// ─── Randomizer: explicación y ajustes ───
+// Se abre al elegir Randomizer en el título, antes del capitán y los slots.
+// Dos páginas: la explicación (A sigue, B vuelve al título) y "Randomizer
+// Settings" (flechas para cambiar, Start sigue, B vuelve a la explicación).
+
+namespace {
+bool sRandomizerIntroOpen   = false;
+int  sRandomizerIntroResult = PC_RANDOMIZER_INTRO_PENDING;
+int  sRndPage = 0; // 0 = explicación, 1 = ajustes
+int  sRndRow  = 0;
+
+// Filas de ajustes. Cada una tiene sus valores y una línea de ayuda por valor.
+enum RndRow {
+    RND_Parts, RND_Enemies, RND_Bosses, RND_Mix, RND_Wisps, RND_Final, RND_Daily, RND_Share, RND_NewSeed,
+    RND_Start, RND_RowCount
+};
+const char* const kRndRowTitles[RND_RowCount] = {
+    "Ship parts", "Enemies", "Bosses", "Bosses <-> enemies", "Honeywisps & Flint Beetles",
+    "Final boss", "Daily layout", "Seed code", "", "",
+};
+
+bool sRndTextWasOn = false;
+
+// Código compartido (semilla + ajustes): campo de texto libre aparte, porque
+// lleva letras que el editor de la semilla no acepta.
+bool sShareEditing = false;
+Uint32 sShareErrorUntil = 0; ///< aviso de código no válido, tras salir de la edición
+char sShareEdit[32];
+int  sShareLen     = 0;
+
+/// Si el texto es un código compartido válido, aplica semilla y ajustes.
+bool rndApplyShareCode(const char* text) {
+    uint64_t seed  = 0;
+    uint32_t flags = 0;
+    if (!pc_randomizer_parse_share_code(text, &seed, &flags)) return false;
+    pc_randomizer_set_pending_seed(seed);
+    pc_randomizer_set_pending_flags(flags);
+    return true;
+}
+
+void rndCopyShareCode() {
+    char code[PC_RANDOMIZER_SHARE_CODE_LEN];
+    pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), code, sizeof(code));
+    SDL_SetClipboardText(code);
+}
+
+void rndTextInputOn() {
+    // En Android abre el teclado virtual; en escritorio solo activa los
+    // eventos de texto. Se deja como estaba al salir.
+    sRndTextWasOn = SDL_IsTextInputActive() == SDL_TRUE;
+    if (!sRndTextWasOn) SDL_StartTextInput();
+}
+
+void rndShareBegin() {
+    sShareLen     = 0;
+    sShareEdit[0] = '\0';
+    sShareEditing = true;
+    rndTextInputOn();
+}
+
+void rndShareEnd() {
+    sShareEditing = false;
+    if (!sRndTextWasOn) SDL_StopTextInput();
+}
+
+void rndShareType(char c) {
+    if (c >= 'a' && c <= 'z') c = char(c - 32);
+    const bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '-';
+    if (!ok || sShareLen >= int(sizeof(sShareEdit)) - 1) return;
+    sShareEdit[sShareLen++] = c;
+    sShareEdit[sShareLen]   = '\0';
+}
+
+/// Confirma. Un código no válido no bloquea: se sale de la edición, vuelve
+/// el código que había y se avisa unos segundos.
+void rndShareCommit() {
+    if (sShareLen > 0 && !rndApplyShareCode(sShareEdit)) sShareErrorUntil = SDL_GetTicks() + 3000;
+    rndShareEnd();
+}
+
+bool rndShareErrorShown() { return SDL_GetTicks() < sShareErrorUntil; }
+
+int rndValueCount(int row) {
+    return (row == RND_Enemies || row == RND_Bosses) ? 3 : 2;
+}
+
+int rndValue(int row) {
+    const uint32_t f = pc_randomizer_pending_flags();
+    switch (row) {
+    case RND_Parts:   return (f & PC_RND_ShuffleParts) ? 1 : 0;
+    case RND_Enemies: return int(pc_rnd_enemy_mode(f));
+    case RND_Bosses:  return int(pc_rnd_boss_mode(f));
+    case RND_Mix:     return (f & PC_RND_BossEnemyMix) ? 1 : 0;
+    case RND_Wisps:   return (f & PC_RND_IncludeWispsFlint) ? 1 : 0;
+    case RND_Final:   return (f & PC_RND_RandomFinalBoss) ? 1 : 0;
+    case RND_Daily:   return (f & PC_RND_DailyLayout) ? 1 : 0;
+    default:          return 0;
+    }
+}
+
+void rndSetValue(int row, int v) {
+    uint32_t f = pc_randomizer_pending_flags();
+    auto bit = [&](uint32_t b) { f = v ? (f | b) : (f & ~b); };
+    switch (row) {
+    case RND_Parts:   bit(PC_RND_ShuffleParts); break;
+    case RND_Enemies: f = pc_rnd_with_enemy_mode(f, uint32_t(v)); break;
+    case RND_Bosses:  f = pc_rnd_with_boss_mode(f, uint32_t(v)); break;
+    case RND_Mix:     bit(PC_RND_BossEnemyMix); break;
+    case RND_Wisps:   bit(PC_RND_IncludeWispsFlint); break;
+    case RND_Final:   bit(PC_RND_RandomFinalBoss); break;
+    case RND_Daily:   bit(PC_RND_DailyLayout); break;
+    default: break;
+    }
+    pc_randomizer_set_pending_flags(f);
+}
+
+const char* rndValueLabel(int row, int v) {
+    switch (row) {
+    case RND_Parts:   return v ? "Shuffled" : "Vanilla";
+    case RND_Enemies:
+    case RND_Bosses:  return v == 2 ? "Chaos" : v == 1 ? "Shuffled" : "Vanilla";
+    case RND_Mix:     return v ? "Yes" : "No";
+    case RND_Wisps:   return v ? "Randomized" : "Vanilla";
+    case RND_Final:   return v ? "Randomized" : "Fixed";
+    case RND_Daily:   return v ? "Changes each day" : "Same every day";
+    default:          return "";
+    }
+}
+
+const char* rndHelp(int row, int v) {
+    switch (row) {
+    case RND_Parts:
+        return v ? "The 29 remaining ship parts swap places. Each zone keeps its count."
+                 : "Every ship part is where it always was.";
+    case RND_Enemies:
+        return v == 2 ? "Any enemy can appear anywhere. Expect the unexpected."
+             : v == 1 ? "Enemies are replaced by others of the same kind."
+                      : "Regular enemies are left as they are.";
+    case RND_Bosses:
+        return v == 2 ? "Any boss can appear in any boss arena."
+             : v == 1 ? "Bosses trade arenas with each other."
+                      : "Bosses are left as they are.";
+    case RND_Mix:
+        return v ? "Bosses may replace regular enemies, and enemies may replace bosses."
+                 : "Bosses and regular enemies are shuffled separately.";
+    case RND_Wisps:
+        return v ? "Include the many Honeywisps and Flint Beetles. Much harder."
+                 : "Honeywisps and Flint Beetles stay as they are.";
+    case RND_Final:
+        return v ? "The Final Trial boss is randomized too. Experimental."
+                 : "The Emperor Bulblax keeps the Final Trial.";
+    case RND_Daily:
+        return v ? "Respawning enemies are re-rolled each day. Parts never move."
+                 : "Each spot keeps the same replacement for the whole run.";
+    case RND_Share:
+        return "This world and its settings in one code. A: enter a friend's. Ctrl+C: copy.";
+    case RND_NewSeed:
+        return "Roll a new random seed.";
+    default:
+        return "Next: difficulty and game mode. The tutorial is always skipped.";
+    }
+}
+
+// Geometría compartida por el dibujo y los toques.
+const int kRndPanelW = 640;
+const int kRndPanelH = 466;
+const int kRndRowH   = 32;
+const int kRndValueW = 250;
+int rndRowY(int panelY, int row) { return panelY + 30 + row * kRndRowH + (row == RND_Start ? 6 : 0); }
+int rndValueX(int panelX) { return panelX + kRndPanelW - 40 - kRndValueW; }
+}
+
+void pc_settings_text_input(const char* text) {
+    if (!sRandomizerIntroOpen || !text) return;
+    if (sShareEditing) {
+        for (const char* p = text; *p; ++p) rndShareType(*p);
+    }
+}
+
+// Ajustes de una partida nueva: se abren al elegir una ranura vacía desde el
+// menú Randomizer. Las partidas ya creadas usan los suyos, guardados en el
+// archivo. Cada partida nueva empieza con una semilla nueva.
+void pc_randomizer_settings_open(void) {
+    sRandomizerIntroOpen   = true;
+    sRandomizerIntroResult = PC_RANDOMIZER_INTRO_PENDING;
+    sRndPage               = 1;
+    sRndRow                = RND_Start;
+    if (sShareEditing) rndShareEnd();
+    pc_randomizer_reroll_pending_seed();
+    pc_menu_edge_reset();
+}
+
+void pc_randomizer_intro_open(void) {
+    sRandomizerIntroOpen   = true;
+    sRandomizerIntroResult = PC_RANDOMIZER_INTRO_PENDING;
+    sRndPage               = 0;
+    sRndRow                = 0;
+    pc_menu_edge_reset();
+}
+
+bool pc_randomizer_intro_active(void) { return sRandomizerIntroOpen; }
+
+int pc_randomizer_intro_result(void) { return sRandomizerIntroResult; }
+
+namespace {
+void pcRandomizerIntroInput() {
+    if (!sRandomizerIntroOpen) return;
+    if (sRndPage == 1 && sShareEditing) {
+        // Igual que la semilla: Enter/Esc en el teclado, A/B en el mando.
+        bool ok     = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_KP_ENTER);
+        bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+        SDL_GameController* ctl = pc_window_get_controller();
+        if (sTouchTapPending) {
+            sTouchTapPending = false;
+            ok = true;
+        }
+        if (ctl) {
+            if (promptPadA(ctl)) ok = true;
+            if (promptPadB(ctl)) cancel = true;
+        }
+        if ((sTouchFrameButtons & PAD_BUTTON_A) != 0) ok = true;
+        if ((sTouchFrameButtons & PAD_BUTTON_B) != 0) cancel = true;
+        if ((SDL_GetModState() & KMOD_CTRL) && keyWentDown(SDL_SCANCODE_V)) {
+            char* clip = SDL_GetClipboardText();
+            sShareLen  = 0;
+            sShareEdit[0] = '\0';
+            for (const char* q = clip ? clip : ""; *q; ++q) rndShareType(*q);
+            SDL_free(clip);
+            rndShareCommit(); // pegar un código completo lo aplica al momento
+        } else if (keyWentDown(SDL_SCANCODE_BACKSPACE)) {
+            if (sShareLen > 0) sShareEdit[--sShareLen] = '\0';
+        }
+        if (ok) rndShareCommit();
+        else if (cancel) rndShareEnd();
+        return;
+    }
+    bool accept = menuOkKey() || (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    bool back   = menuCancelKey() || (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+    bool up     = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W) || (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S) || (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A) || (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D) || (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    if (sTouchTapPending) {
+        sTouchTapPending = false;
+        if (sRndPage == 0) {
+            accept = true; // un toque en la explicación sigue adelante
+        } else {
+            int dw = 0, dh = 0;
+            pc_gfx_get_drawable_size(&dw, &dh);
+            const float aspect  = dh > 0 ? float(dw) / float(dh) : 4.0f / 3.0f;
+            const float screenW = aspect * 480.0f;
+            const float x = sTouchTapX * screenW, y = sTouchTapY * 480.0f;
+            const int panelX = int(screenW * 0.5f) - kRndPanelW / 2, panelY = 240 - kRndPanelH / 2;
+            for (int row = 0; row < RND_RowCount; row++) {
+                const float ry = float(rndRowY(panelY, row));
+                if (y < ry || y > ry + kRndRowH - 4) continue;
+                sRndRow = row;
+                if (row == RND_Start || row == RND_Share || row == RND_NewSeed) {
+                    accept = true;
+                } else {
+                    // Mitad izquierda del valor: anterior; derecha: siguiente.
+                    const float vx = float(rndValueX(panelX));
+                    if (x >= vx && x < vx + kRndValueW / 2) left = true;
+                    else if (x >= vx + kRndValueW / 2) right = true;
+                }
+            }
+        }
+    }
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl) {
+        if (promptPadA(ctl)) accept = true;
+        if (promptPadB(ctl)) back = true;
+        if (padNavUp(ctl)) up = true;
+        if (padNavDown(ctl)) down = true;
+        if (padNavLeft(ctl)) left = true;
+        if (padNavRight(ctl)) right = true;
+    }
+
+    if (sRndPage == 0) {
+        if (accept) {
+            sRandomizerIntroOpen   = false;
+            sRandomizerIntroResult = PC_RANDOMIZER_INTRO_CONTINUE;
+        } else if (back) {
+            sRandomizerIntroOpen   = false;
+            sRandomizerIntroResult = PC_RANDOMIZER_INTRO_BACK;
+        }
+        return;
+    }
+
+    if (up)   sRndRow = (sRndRow + RND_RowCount - 1) % RND_RowCount;
+    if (down) sRndRow = (sRndRow + 1) % RND_RowCount;
+    if ((left || right) && sRndRow < RND_Share) {
+        const int n = rndValueCount(sRndRow);
+        rndSetValue(sRndRow, (rndValue(sRndRow) + (right ? 1 : n - 1)) % n);
+    }
+    // Ctrl+C copia el código compartido (semilla + ajustes); Ctrl+V pega un
+    // código compartido (aplica ambos) o, si no lo es, una semilla.
+    const bool seedRows = sRndRow == RND_Share;
+    if (seedRows && (SDL_GetModState() & KMOD_CTRL) && keyWentDown(SDL_SCANCODE_C)) {
+        rndCopyShareCode();
+    }
+    if (seedRows && (SDL_GetModState() & KMOD_CTRL) && keyWentDown(SDL_SCANCODE_V)) {
+        char* clip = SDL_GetClipboardText();
+        if (clip && *clip && !rndApplyShareCode(clip)) sShareErrorUntil = SDL_GetTicks() + 3000;
+        SDL_free(clip);
+        return;
+    }
+    if (accept) {
+        if (sRndRow == RND_Share) {
+            rndShareBegin();
+        } else if (sRndRow == RND_NewSeed) {
+            pc_randomizer_reroll_pending_seed();
+        } else if (sRndRow == RND_Start) {
+            sRandomizerIntroOpen   = false;
+            sRandomizerIntroResult = PC_RANDOMIZER_INTRO_CONTINUE;
+        } else {
+            const int n = rndValueCount(sRndRow);
+            rndSetValue(sRndRow, (rndValue(sRndRow) + 1) % n);
+        }
+    } else if (back) {
+        // Vuelve a la selección de ranura sin crear nada.
+        sRandomizerIntroOpen   = false;
+        sRandomizerIntroResult = PC_RANDOMIZER_INTRO_BACK;
+    }
+}
+
+// Texto P2D que se encoge hasta caber en maxW (las descripciones largas no
+// deben salirse del panel). center: x es el centro.
+void rndText(int x, int y, const char* t, Colour c, int fw, int maxW, bool center) {
+    while (fw > 9 && pc_settings_p2d_text_width(t, fw) > maxW) fw--;
+    const int fh = fw * 3 / 2;
+    if (center) x -= pc_settings_p2d_text_width(t, fw) / 2;
+    srText(x, y, t, c, fw, fh);
+}
+
+void drawRndIntro(DGXGraphics* gfx, int screenW, int screenH) {
+    const int panelW = 620, panelH = 360;
+    const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2 + 10;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, panelW, "Randomizer");
+
+    const Colour kGold(255, 214, 90, 255), kBody(232, 238, 252, 255), kDim(176, 192, 222, 255);
+    rndText(panelX + panelW / 2, panelY + 34, "Every run is a brand new expedition.", kGold, 16, panelW - 60, true);
+
+    // Una idea por línea, con viñeta: qué se baraja, cómo se elige, la
+    // semilla, cómo empieza y dónde se guarda.
+    struct Bullet { const char* text; const char* sub; };
+    const Bullet bullets[] = {
+        { "Enemies, bosses and ship parts get shuffled.", "Choose how wild it gets when you start a new file." },
+        { "Same seed and settings, same world.", "Share your seed to race a friend." },
+        { "No tutorial: start on Day 2.", "With the Main Engine and 20 red Pikmin." },
+        { "Separate saves.", "Randomizer files never touch your normal ones." },
+    };
+    const int textX = panelX + 64, textW = panelW - 64 - 36;
+    for (int i = 0; i < 4; i++) {
+        const int y = panelY + 82 + i * 58;
+        fillRoundRectGrad(gfx, panelX + 40, y + 5, 10, 10, 5, Colour(255, 236, 140, 255), Colour(220, 160, 40, 255));
+        rndText(textX, y, bullets[i].text, kBody, 13, textW, false);
+        rndText(textX, y + 23, bullets[i].sub, kDim, 11, textW, false);
+    }
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "A / Enter: continue    B / Esc: back",
+                 Colour(150, 165, 195, 255));
+}
+
+void drawRndSettings(DGXGraphics* gfx, int screenW, int screenH) {
+    const int panelX = screenW / 2 - kRndPanelW / 2, panelY = screenH / 2 - kRndPanelH / 2;
+    drawPikminPanel(gfx, panelX, panelY, kRndPanelW, kRndPanelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, kRndPanelW, "Randomizer Settings");
+
+    const Colour kFocus(255, 229, 120, 255), kLabel(190, 200, 220, 255), kEdge(8, 12, 28, 255);
+    const int vx = rndValueX(panelX);
+    for (int row = 0; row < RND_RowCount; row++) {
+        const bool focus = row == sRndRow;
+        const int y      = rndRowY(panelY, row);
+        if (row == RND_Start) {
+            const int bw = 230, bx = panelX + kRndPanelW / 2 - bw / 2;
+            if (focus) drawTextOutline(bx - 18, y + 8, ">", kFocus, kEdge);
+            drawGlassOption(bx, y, bw, kRndRowH - 4, "Continue", focus, 18, 26);
+            continue;
+        }
+        if (row == RND_Share) {
+            char share[40];
+            if (sShareEditing) {
+                std::snprintf(share, sizeof(share), "%s|", sShareEdit);
+            } else {
+                pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), share,
+                                                sizeof(share));
+            }
+            if (focus) drawTextOutline(panelX + 22, y + 8, ">", kFocus, kEdge);
+            rndText(panelX + 40, y + 7, kRndRowTitles[row], focus ? kFocus : kLabel, 13, vx - panelX - 50, false);
+            drawGlassOption(vx, y, kRndValueW, kRndRowH - 4, share, focus, 11, 17);
+            continue;
+        }
+        if (row == RND_NewSeed) {
+            if (focus) drawTextOutline(vx - 18, y + 8, ">", kFocus, kEdge);
+            drawGlassOption(vx, y, kRndValueW, kRndRowH - 4, "New random seed", focus, 13, 20);
+            continue;
+        }
+        if (focus) drawTextOutline(panelX + 22, y + 8, ">", kFocus, kEdge);
+        rndText(panelX + 40, y + 7, kRndRowTitles[row], focus ? kFocus : kLabel, 13, vx - panelX - 50, false);
+        char value[48];
+        // "< valor >" muestra que se cambia con las flechas.
+        std::snprintf(value, sizeof(value), "<  %s  >", rndValueLabel(row, rndValue(row)));
+        drawGlassOption(vx, y, kRndValueW, kRndRowH - 4, value, focus, 15, 22);
+    }
+
+    const char* help = sShareEditing         ? "Type or paste (Ctrl+V) a friend's code: RND-XXXXXX-XXXXXX-XXXXXX"
+                     : rndShareErrorShown() ? "That code is not valid, so your code was kept."
+                                            : rndHelp(sRndRow, sRndRow < RND_Share ? rndValue(sRndRow) : 0);
+    rndText(panelX + kRndPanelW / 2, panelY + kRndPanelH - 64, help, Colour(232, 238, 252, 255), 12, kRndPanelW - 60, true);
+    drawHelpLine(panelX + kRndPanelW / 2, panelY + kRndPanelH - 34,
+                 sShareEditing ? "Enter / A: confirm    Esc / B: cancel"
+                             : "Arrows: change    A / Enter: select    B / Esc: back",
+                 Colour(150, 165, 195, 255));
+}
+}
+
+void pc_randomizer_intro_draw(void) {
+    if (!sRandomizerIntroOpen || !gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+
+    const int screenW = pc_gfx_menu_wide() ? pc_gfx_menu_virt_width() : gfx->mScreenWidth;
+    const int screenH = gfx->mScreenHeight;
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    GlassTextScope glassText;
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+
+    if (sRndPage == 0) drawRndIntro(gfx, screenW, screenH);
+    else drawRndSettings(gfx, screenW, screenH);
+}
+
+// ─── Semilla en el menú de pausa ───
+// En una partida Randomizer, bajo el recuadro de la pausa: la semilla y un
+// resumen de los ajustes, que es lo que hace falta para compartir el mundo.
+
+void pc_randomizer_pause_update(void) {
+    if (!pc_randomizer_active()) return;
+    // Ctrl+C copia el código. Flanco propio: la pausa no pasa por el
+    // latch de teclas de los prompts.
+    static bool sWasDown = false;
+    const Uint8* keys    = SDL_GetKeyboardState(nullptr);
+    const bool down      = keys && keys[SDL_SCANCODE_C] && (SDL_GetModState() & KMOD_CTRL);
+    if (down && !sWasDown) {
+        char code[PC_RANDOMIZER_SHARE_CODE_LEN];
+        pc_randomizer_format_share_code(pc_randomizer_rules().seed, pc_randomizer_rules().flags, code, sizeof(code));
+        SDL_SetClipboardText(code);
+    }
+    sWasDown = down;
+}
+
+void pc_randomizer_pause_draw(void) {
+    if (!pc_randomizer_active() || !gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+
+    const int screenW = pc_gfx_menu_wide() ? pc_gfx_menu_virt_width() : gfx->mScreenWidth;
+    const int screenH = gfx->mScreenHeight;
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    GlassTextScope glassText;
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+
+    const PcRandomizerRules& rules = pc_randomizer_rules();
+    char line[96], summary[128];
+    char share[PC_RANDOMIZER_SHARE_CODE_LEN];
+    pc_randomizer_format_share_code(rules.seed, rules.flags, share, sizeof(share));
+    std::snprintf(line, sizeof(line), "%s", share);
+
+    static const char* const kModes[] = { "Vanilla", "Shuffled", "Chaos", "?" };
+    std::snprintf(summary, sizeof(summary), "Parts %s  -  Enemies %s  -  Bosses %s%s%s%s%s",
+                  (rules.flags & PC_RND_ShuffleParts) ? "Shuffled" : "Vanilla", kModes[pc_rnd_enemy_mode(rules.flags)],
+                  kModes[pc_rnd_boss_mode(rules.flags)], (rules.flags & PC_RND_BossEnemyMix) ? "  +Mix" : "",
+                  (rules.flags & PC_RND_IncludeWispsFlint) ? "  +Wisps" : "",
+                  (rules.flags & PC_RND_RandomFinalBoss) ? "  +Final" : "",
+                  (rules.flags & PC_RND_DailyLayout) ? "  +Daily" : "");
+
+    const int panelW = 460, panelH = 74;
+    const int panelX = screenW / 2 - panelW / 2, panelY = screenH - panelH - 18;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 16);
+    rndText(panelX + panelW / 2, panelY + 10, line, Colour(255, 214, 90, 255), 15, panelW - 30, true);
+    rndText(panelX + panelW / 2, panelY + 36, summary, Colour(214, 224, 245, 255), 10, panelW - 30, true);
+    rndText(panelX + panelW / 2, panelY + 54, "Ctrl+C: copy code", Colour(150, 165, 195, 255), 9, panelW - 30, true);
 }
 
 void pc_erased_notice_queue(void) { sErasedNoticeQueued = true; }
@@ -4061,11 +4949,13 @@ void pc_erased_notice_draw(void) {
 
 void pc_newgame_prompt_open(void) {
     sNewGamePromptOpen   = true;
-    sNewGamePromptStep   = 0;
-    sNewGamePromptChoice = 0;
+    sNewGamePromptRow    = 0;
+    sNewGamePromptCol    = 0;
     sNewGamePromptRules  = 0;
     sNewGamePromptResult = PC_NEWGAME_PENDING;
     sNewGamePromptHard   = false;
+    // Randomizer: el tutorial se salta siempre (la fila queda bloqueada).
+    sNewGamePromptSkipTutorial = pc_randomizer_menu_pending();
     pc_menu_edge_reset();
 }
 
@@ -4075,17 +4965,58 @@ int pc_newgame_prompt_result(void) { return sNewGamePromptResult; }
 
 bool pc_newgame_prompt_chose_hard(void) { return sNewGamePromptHard; }
 
+bool pc_newgame_prompt_chose_skip_tutorial(void) { return sNewGamePromptSkipTutorial; }
+
+void pc_tutorial_skip_set_pending(bool on) { sTutorialSkipPending = on; }
+bool pc_tutorial_skip_pending(void) { return sTutorialSkipPending; }
+void pc_tutorial_skip_clear_pending(void) { sTutorialSkipPending = false; }
+
 namespace {
+// Geometría compartida por el dibujo y los toques: tres filas de dos
+// opciones (Difficulty / Game mode / Skip tutorial) y, debajo, el botón Start.
+// Las flechas mueven el cursor, A elige la opción bajo él y solo Start empieza.
+const int kNgPanelW = 620;
+const int kNgPanelH = 420;
+const int kNgBoxW   = 230;
+const int kNgBoxH   = 44;
+const int kNgRowCount = 3;
+const int kNgStartRow = kNgRowCount; // fila del botón Start
+int ngRowY(int panelY, int row) { return panelY + 72 + row * 70; }
+int ngStartX(int panelX) { return panelX + kNgPanelW / 2 - kNgBoxW / 2; }
+int ngBoxX(int panelX, int i) { return panelX + 40 + i * (kNgBoxW + 40); }
+
+// En una partida Randomizer la fila 2 (Skip tutorial) queda fija en Yes: el
+// tutorial depende de generadores y una pieza que el barajado cambia.
+bool ngSeedRow(int row) { return row == 2 && pc_randomizer_menu_pending(); }
+
+int ngRowValue(int row) {
+    if (row == 0) return sNewGamePromptHard ? 1 : 0;
+    if (row == 1) return sNewGamePromptRules;
+    if (ngSeedRow(row)) return 1;
+    return sNewGamePromptSkipTutorial ? 1 : 0;
+}
+
+void ngSetRowValue(int row, int v) {
+    if (row == 0) sNewGamePromptHard = v != 0;
+    else if (row == 1) sNewGamePromptRules = v;
+    else if (ngSeedRow(row)) { (void)v; }
+    else               sNewGamePromptSkipTutorial = v != 0;
+}
+
 void pcNewGamePromptInput() {
     if (!sNewGamePromptOpen) return;
 
     bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
     bool accept = menuOkKey();
     bool cancel = menuCancelKey();
 
     left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    up |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    down |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
     accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
     cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
 
@@ -4097,16 +5028,25 @@ void pcNewGamePromptInput() {
         const float screenW = aspect * 480.0f;
         const float x = sTouchTapX * screenW;
         const float y = sTouchTapY * 480.0f;
-        const float panelX = screenW * 0.5f - 310.0f;
-        const float panelY = 110.0f;
-        const float optY = panelY + 108.0f;
-        for (int i = 0; i < 2; ++i) {
-            const float boxX = panelX + 40.0f + i * 270.0f;
-            if (x >= boxX && x <= boxX + 230.0f && y >= optY - 8.0f && y <= optY + 52.0f) {
-                sNewGamePromptChoice = i;
-                accept = true;
-                break;
+        const int panelX = int(screenW * 0.5f) - kNgPanelW / 2;
+        const int panelY = 240 - kNgPanelH / 2;
+        // Un toque elige la opción; el de Start empieza.
+        for (int row = 0; row < kNgRowCount; ++row) {
+            const float optY = float(ngRowY(panelY, row));
+            for (int i = 0; i < 2; ++i) {
+                const float boxX = float(ngBoxX(panelX, i));
+                if (x >= boxX && x <= boxX + kNgBoxW && y >= optY - 8.0f && y <= optY + kNgBoxH + 8.0f) {
+                    sNewGamePromptRow = row;
+                    sNewGamePromptCol = i;
+                    ngSetRowValue(row, i);
+                }
             }
+        }
+        const float startY = float(ngRowY(panelY, kNgStartRow));
+        const float startX = float(ngStartX(panelX));
+        if (x >= startX && x <= startX + kNgBoxW && y >= startY - 8.0f && y <= startY + kNgBoxH + 8.0f) {
+            sNewGamePromptRow = kNgStartRow;
+            accept            = true;
         }
     }
 
@@ -4114,35 +5054,29 @@ void pcNewGamePromptInput() {
     if (ctl) {
         if (padNavLeft(ctl))  left   = true;
         if (padNavRight(ctl)) right  = true;
+        if (padNavUp(ctl))    up     = true;
+        if (padNavDown(ctl))  down   = true;
         if (promptPadA(ctl))  accept = true;
         if (promptPadB(ctl))  cancel = true;
     }
 
-    if (left || right) sNewGamePromptChoice = sNewGamePromptChoice ? 0 : 1;
+    const int rows = kNgRowCount + 1; // opciones + Start
+    if (up || down) {
+        sNewGamePromptRow = (sNewGamePromptRow + (up ? rows - 1 : 1)) % rows;
+        // El cursor entra en la fila sobre la opción ya elegida.
+        if (sNewGamePromptRow < kNgRowCount) sNewGamePromptCol = ngRowValue(sNewGamePromptRow);
+    }
+    if ((left || right) && sNewGamePromptRow < kNgRowCount) sNewGamePromptCol = sNewGamePromptCol ? 0 : 1;
 
     if (accept) {
-        if (sNewGamePromptStep == 0) {
-            sNewGamePromptRules  = sNewGamePromptChoice;
-            sNewGamePromptStep   = 1;
-            sNewGamePromptChoice = 0;
-            pc_menu_edge_reset();
-            // El reset olvida que A/B siguen pulsados y el frame siguiente
-            // los tomaría como pulsación nueva (autoaceptaba la dificultad).
-            if (ctl) { promptPadA(ctl); promptPadB(ctl); }
-            return;
+        if (sNewGamePromptRow < kNgRowCount) {
+            ngSetRowValue(sNewGamePromptRow, sNewGamePromptCol); // A elige
+        } else {
+            sNewGamePromptResult = sNewGamePromptRules ? PC_NEWGAME_PERMADEATH
+                                                       : PC_NEWGAME_NORMAL;
+            sNewGamePromptOpen   = false;
         }
-        sNewGamePromptHard   = sNewGamePromptChoice != 0;
-        sNewGamePromptResult = sNewGamePromptRules ? PC_NEWGAME_PERMADEATH
-                                                   : PC_NEWGAME_NORMAL;
-        sNewGamePromptOpen   = false;
     } else if (cancel) {
-        if (sNewGamePromptStep == 1) {
-            sNewGamePromptStep   = 0;
-            sNewGamePromptChoice = sNewGamePromptRules;
-            pc_menu_edge_reset();
-            if (ctl) { promptPadA(ctl); promptPadB(ctl); }
-            return;
-        }
         sNewGamePromptResult = PC_NEWGAME_CANCELLED;
         sNewGamePromptOpen   = false;
     }
@@ -4165,59 +5099,96 @@ void pc_newgame_prompt_draw(void) {
     Matrix4f ortho;
     gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
 
-
-    const int panelW = 620;
-    const int panelH = 260;
+    const int panelW = kNgPanelW;
+    const int panelH = kNgPanelH;
     const int panelX = screenW / 2 - panelW / 2;
     const int panelY = screenH / 2 - panelH / 2;
 
     drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
-    drawPikminHeader(gfx, panelX, panelY, panelW, "New Game");
+    const bool randomizer = pc_randomizer_menu_pending();
+    drawPikminHeader(gfx, panelX, panelY, panelW, randomizer ? "New Randomizer Game" : "New Game");
 
-    const bool difficultyStep = sNewGamePromptStep != 0;
-    const char* line1 = difficultyStep ? "How hard should this file be?"
-                                       : "How should this file play?";
-    drawTextOutline(panelX + panelW / 2 - menuTextWidth(line1) / 2, panelY + 62,
-                    "%s", Colour(214, 224, 245, 255), Colour(8, 12, 28, 255), line1);
-
-    const char* options[2] = { "Normal", difficultyStep ? "Hard" : "Permadeath" };
-    const int optY = panelY + 108;
-    for (int i = 0; i < 2; i++) {
-        const bool sel = (i == sNewGamePromptChoice);
-        const int boxW = 230;
-        const int boxX = panelX + 40 + i * (boxW + 40);
-        if (drawGlassOption(boxX, optY, boxW, 44, options[i], sel, 20, 29)) continue;
-        gfx->setColour(sel ? Colour(70, 92, 150, 240) : Colour(26, 30, 48, 220), true);
-        gfx->setAuxColour(sel ? Colour(70, 92, 150, 240) : Colour(26, 30, 48, 220));
-        gfx->fillRectangle(RectArea(boxX, optY, boxX + boxW, optY + 40));
-        const int tw = menuTextWidth(options[i]);
-        drawTextOutline(boxX + boxW / 2 - tw / 2, optY + 12, "%s",
-                        sel ? Colour(255, 229, 120, 255) : Colour(170, 180, 200, 255),
-                        Colour(8, 12, 28, 255), options[i]);
+    const char* titles[kNgRowCount] = { "Difficulty", "Game mode", "Skip tutorial" };
+    const char* options[kNgRowCount][2] = {
+        { "Normal", "Hard" },
+        { "Standard", "Permadeath" },
+        { "No", "Yes" },
+    };
+    if (randomizer) {
+        options[2][0] = "-";
+        options[2][1] = "Yes (required)";
+    }
+    for (int row = 0; row < kNgRowCount; row++) {
+        const bool rowFocus = (row == sNewGamePromptRow);
+        const int optY = ngRowY(panelY, row);
+        drawTextOutline(ngBoxX(panelX, 0), optY - 24, "%s",
+                        rowFocus ? Colour(255, 229, 120, 255) : Colour(170, 180, 200, 255),
+                        Colour(8, 12, 28, 255), titles[row]);
+        for (int i = 0; i < 2; i++) {
+            const bool chosen = (i == ngRowValue(row));
+            const bool cursor = rowFocus && i == sNewGamePromptCol;
+            const bool sel    = chosen;
+            const int boxX = ngBoxX(panelX, i);
+            // Cursor: marcador a la izquierda de la opción (la elegida va resaltada).
+            if (cursor)
+                drawTextOutline(boxX - 18, optY + 12, ">", Colour(255, 229, 120, 255), Colour(8, 12, 28, 255));
+            if (drawGlassOption(boxX, optY, kNgBoxW, kNgBoxH, options[row][i], sel, 20, 29)) continue;
+            const Colour fill = sel      ? Colour(70, 92, 150, 240)
+                              : chosen   ? Colour(48, 60, 96, 230)
+                                         : Colour(26, 30, 48, 220);
+            gfx->setColour(fill, true);
+            gfx->setAuxColour(fill);
+            gfx->fillRectangle(RectArea(boxX, optY, boxX + kNgBoxW, optY + 40));
+            const int tw = menuTextWidth(options[row][i]);
+            drawTextOutline(boxX + kNgBoxW / 2 - tw / 2, optY + 12, "%s",
+                            chosen ? Colour(255, 229, 120, 255) : Colour(170, 180, 200, 255),
+                            Colour(8, 12, 28, 255), options[row][i]);
+        }
     }
 
-    // Say plainly what the current option does. The first screen is the only
-    // place permadeath is explained; the second is the only place Hard is.
+    // Botón Start: el único que empieza la partida.
+    {
+        const bool focus = sNewGamePromptRow == kNgStartRow;
+        const int bx = ngStartX(panelX), by = ngRowY(panelY, kNgStartRow);
+        if (focus)
+            drawTextOutline(bx - 18, by + 12, ">", Colour(255, 229, 120, 255), Colour(8, 12, 28, 255));
+        if (!drawGlassOption(bx, by, kNgBoxW, kNgBoxH, "Start", focus, 20, 29)) {
+            const Colour fill = focus ? Colour(70, 92, 150, 240) : Colour(26, 30, 48, 220);
+            gfx->setColour(fill, true);
+            gfx->setAuxColour(fill);
+            gfx->fillRectangle(RectArea(bx, by, bx + kNgBoxW, by + 40));
+            drawTextOutline(bx + kNgBoxW / 2 - menuTextWidth("Start") / 2, by + 12, "%s",
+                            focus ? Colour(255, 229, 120, 255) : Colour(170, 180, 200, 255), Colour(8, 12, 28, 255),
+                            "Start");
+        }
+    }
+
+    // Describe la opción bajo el cursor: es el único sitio donde se explican
+    // Hard y Permadeath.
+    const int value = sNewGamePromptRow < kNgRowCount && !ngSeedRow(sNewGamePromptRow) ? sNewGamePromptCol : 0;
     const char* detail;
-    if (!difficultyStep) {
-        detail = sNewGamePromptChoice
-                     ? "If Olimar loses all his health, this file is erased."
-                     : "Losing Olimar ends the day. The original rules.";
+    if (sNewGamePromptRow == kNgStartRow) {
+        detail = randomizer ? "Begin the randomized expedition."
+                            : "Begin the expedition with these settings.";
+    } else if (ngSeedRow(sNewGamePromptRow)) {
+        detail = "Required in Randomizer: Day 2, Main Engine and 20 red Pikmin.";
+    } else if (sNewGamePromptRow == 0) {
+        detail = value ? "Tougher enemies, Olimar takes more damage. 8-minute days, 80 Pikmin."
+                       : "Original enemy health, day length and field limit.";
+    } else if (sNewGamePromptRow == 1) {
+        detail = value ? "If Olimar loses all his health, this file is erased."
+                       : "Losing Olimar ends the day. The original rules.";
     } else {
-        detail = sNewGamePromptChoice
-                     ? "Tougher enemies, Olimar takes more damage. 8-minute days, 80 Pikmin."
-                     : "Original enemy health, day length and field limit.";
+        detail = value ? "Begin on Day 2 with the Main Engine and 20 red Pikmin."
+                       : "Play The Impact Site tutorial normally.";
     }
-    drawTextOutline(panelX + panelW / 2 - menuTextWidth(detail) / 2, panelY + 172,
+    drawTextOutline(panelX + panelW / 2 - menuTextWidth(detail) / 2, panelY + 344,
                     "%s",
-                    sNewGamePromptChoice ? Colour(255, 150, 150, 255)
-                                         : Colour(190, 200, 220, 255),
+                    value ? Colour(255, 150, 150, 255) : Colour(190, 200, 220, 255),
                     Colour(8, 12, 28, 255), detail);
 
-    const char* help = difficultyStep
-                           ? "Left/Right: choose    A / Enter: start    B / Esc: back"
-                           : "Left/Right: choose    A / Enter: next    B / Esc: back";
-    drawHelpLine(panelX + panelW / 2, panelY + 212, help, Colour(150, 165, 195, 255));
+    const char* help = "Arrows: move    A / Enter: select    B / Esc: back";
+    drawHelpLine(panelX + panelW / 2, panelY + 382, help, Colour(150, 165, 195, 255));
 }
 
 
@@ -4231,6 +5202,11 @@ namespace {
 bool sPlayerCountOpen    = false;
 int  sPlayerCountChoice  = 0;   // 0 = 1 jugador, 1 = 2 jugadores
 int  sPlayerCountResult  = PC_PLAYERCOUNT_PENDING;
+// Modo Desafío: tercera opción, 1 vs 1, que aún no se puede elegir.
+bool sPlayerCountChallenge = false;
+constexpr bool kChallengeVsReady = false;
+int playerCountOptions() { return sPlayerCountChallenge ? 3 : 2; }
+bool playerCountEnabled(int i) { return i < 2 || kChallengeVsReady; }
 
 bool playerCountSpanish() { return pc_settings_get_language() == 3; } // OS_LANG_SPANISH
 }
@@ -4239,7 +5215,13 @@ void pc_playercount_prompt_open(void) {
     sPlayerCountOpen    = true;
     sPlayerCountChoice  = sConfig.coopPlayers == 2 ? 1 : 0;
     sPlayerCountResult  = PC_PLAYERCOUNT_PENDING;
+    sPlayerCountChallenge = false;
     pc_menu_edge_reset();
+}
+
+void pc_playercount_prompt_open_challenge(void) {
+    pc_playercount_prompt_open();
+    sPlayerCountChallenge = true;
 }
 
 bool pc_playercount_prompt_active(void) { return sPlayerCountOpen; }
@@ -4271,9 +5253,13 @@ void pcPlayerCountPromptInput() {
         const float panelX = screenW * 0.5f - 310.0f;
         const float panelY = 110.0f;
         const float optY = panelY + 108.0f;
-        for (int i = 0; i < 2; ++i) {
-            const float boxX = panelX + 40.0f + i * 270.0f;
-            if (x >= boxX && x <= boxX + 230.0f && y >= optY - 8.0f && y <= optY + 52.0f) {
+        const int n = playerCountOptions();
+        const float boxW = n == 3 ? 170.0f : 230.0f, gap = n == 3 ? 20.0f : 40.0f;
+        const float left0 = panelX + (620.0f - (n * boxW + (n - 1) * gap)) * 0.5f;
+        for (int i = 0; i < n; ++i) {
+            const float boxX = left0 + i * (boxW + gap);
+            if (!playerCountEnabled(i)) continue;
+            if (x >= boxX && x <= boxX + boxW && y >= optY - 8.0f && y <= optY + 52.0f) {
                 sPlayerCountChoice = i;
                 accept = true;
                 break;
@@ -4289,12 +5275,19 @@ void pcPlayerCountPromptInput() {
         if (promptPadB(ctl))  cancel = true;
     }
 
-    if (left || right) sPlayerCountChoice = sPlayerCountChoice ? 0 : 1;
+    if (left || right) {
+        const int n = playerCountOptions();
+        do {
+            sPlayerCountChoice = (sPlayerCountChoice + (left ? n - 1 : 1)) % n;
+        } while (!playerCountEnabled(sPlayerCountChoice));
+    }
 
     if (accept) {
         sConfig.coopPlayers = sPlayerCountChoice ? 2 : 1;
         saveConfig();
-        sPlayerCountResult = sPlayerCountChoice ? PC_PLAYERCOUNT_TWO : PC_PLAYERCOUNT_ONE;
+        sPlayerCountResult = sPlayerCountChoice == 2 ? PC_PLAYERCOUNT_VS
+                           : sPlayerCountChoice      ? PC_PLAYERCOUNT_TWO
+                                                     : PC_PLAYERCOUNT_ONE;
         sPlayerCountOpen   = false;
     } else if (cancel) {
         sPlayerCountResult = PC_PLAYERCOUNT_CANCELLED;
@@ -4335,12 +5328,16 @@ void pc_playercount_prompt_draw(void) {
     drawTextOutline(panelX + panelW / 2 - menuTextWidth(line1) / 2, panelY + 62,
                     "%s", Colour(214, 224, 245, 255), Colour(8, 12, 28, 255), line1);
 
-    const char* options[2] = { es ? "1 jugador" : "1 player", es ? "2 jugadores" : "2 players" };
+    const char* options[3] = { es ? "1 jugador" : "1 player", es ? "2 jugadores" : "2 players", "1 vs 1" };
+    if (sPlayerCountChallenge) options[1] = es ? "Cooperativo" : "Co-op";
     const int optY = panelY + 108;
-    for (int i = 0; i < 2; i++) {
+    const int n    = playerCountOptions();
+    const int boxW = n == 3 ? 170 : 230, gap = n == 3 ? 20 : 40;
+    const int left0 = panelX + (panelW - (n * boxW + (n - 1) * gap)) / 2;
+    for (int i = 0; i < n; i++) {
         const bool sel = (i == sPlayerCountChoice);
-        const int boxW = 230;
-        const int boxX = panelX + 40 + i * (boxW + 40);
+        const bool on  = playerCountEnabled(i);
+        const int boxX = left0 + i * (boxW + gap);
         if (pc_settings_p2d_active()) {
             if (sel) pc_settings_p2d_plate(boxX, optY, boxW, 44, 2);
             pc_settings_p2d_plate(boxX, optY, boxW, 44, 1);
@@ -4352,11 +5349,16 @@ void pc_playercount_prompt_draw(void) {
         }
         const int tw = menuTextWidth(options[i]);
         drawTextOutline(boxX + boxW / 2 - tw / 2, optY + 12, "%s",
-                        sel ? Colour(255, 229, 120, 255) : Colour(170, 180, 200, 255),
+                        sel ? Colour(255, 229, 120, 255) : on ? Colour(170, 180, 200, 255) : Colour(90, 96, 112, 255),
                         Colour(8, 12, 28, 255), options[i]);
     }
 
-    const char* detail = sPlayerCountChoice
+    const char* detail = sPlayerCountChallenge
+        ? (sPlayerCountChoice == 2 ? (es ? "Cada uno con sus Pikmin: gana quien tenga más." : "Each with their own Pikmin: most Pikmin wins.")
+           : sPlayerCountChoice    ? (es ? "Los dos juntos, un solo marcador. Luego se asignan los mandos."
+                                         : "Both together, one shared score. Controllers are assigned next.")
+                                   : (es ? "El desafío original, un solo Olimar." : "The original challenge, a single Olimar."))
+        : sPlayerCountChoice
         ? (es ? "Cooperativo a pantalla partida. Luego se asignan los mandos."
               : "Split-screen co-op. Controllers are assigned next.")
         : (es ? "La aventura original, un solo Olimar."
@@ -4403,16 +5405,53 @@ void devAssignRestart() {
 }
 
 // Tarjetas del selector de capitán, en orden (índice = PcCaptain).
-const char* const kCaptainNames[PC_CAPTAIN_COUNT] = { "Olimar", "Louie", "Red", "Yellow", "Blue" };
+const char* const kCaptainNames[PC_CAPTAIN_COUNT] = { "Olimar", "Louie", "Red", "Yellow", "Blue",
+                                                      "President", "White", "Purple", "Bulbmin", "Puffmin" };
 // Sprites al doble (Olimar/Louie de Pikmin 2-e; los Pikmin, de Pikmin Puzzle
 // Cards de GBA, de pie con la hoja).
 const char* const kCaptainArt[PC_CAPTAIN_COUNT] = { "coop_olimar", "coop_louie", "coop_piki_red", "coop_piki_yellow",
-                                                    "coop_piki_blue" };
+                                                    "coop_piki_blue", "coop_president", "coop_piki_white",
+                                                    "coop_piki_purple", "coop_bulbmin", "coop_puffmin" };
 // Si falta el PNG de un Pikmin, sale de la textura del juego piki3 (116x64):
 // rojo, amarillo y azul tumbados con su hoja. Columnas de cada uno.
 const int kCaptainPikiCol[PC_CAPTAIN_COUNT][2] = { { 0, 0 }, { 0, 0 }, { 0, 38 }, { 34, 78 }, { 76, 116 } };
 constexpr int kCaptainBoxW = 104, kCaptainBoxH = 120, kCaptainBoxGap = 9;
-constexpr int kCaptainBoxLeft = (620 - (PC_CAPTAIN_COUNT * kCaptainBoxW + (PC_CAPTAIN_COUNT - 1) * kCaptainBoxGap)) / 2;
+// Primera fila: los de Pikmin 1; segunda: los de Pikmin 2 que estén
+// instalados y el Puffmin, que siempre está.
+constexpr int captainRowLeft(int count) { return (620 - (count * kCaptainBoxW + (count - 1) * kCaptainBoxGap)) / 2; }
+int captainRowOf(int captain) { return captain >= PC_CAPTAIN_FIRST_PIKMIN2 ? 1 : 0; }
+// Tarjetas visibles de una fila, y la de la columna col (-1 si no hay).
+int captainRowCount(int row) {
+    if (row == 0) return PC_CAPTAIN_FIRST_PIKMIN2;
+    int n = 0;
+    for (int i = PC_CAPTAIN_FIRST_PIKMIN2; i < PC_CAPTAIN_COUNT; i++) n += pc_captain_available(i) ? 1 : 0;
+    return n;
+}
+int captainRowAt(int row, int col) {
+    if (row == 0) return (col >= 0 && col < PC_CAPTAIN_FIRST_PIKMIN2) ? col : -1;
+    for (int i = PC_CAPTAIN_FIRST_PIKMIN2; i < PC_CAPTAIN_COUNT; i++) {
+        if (pc_captain_available(i) && col-- == 0) return i;
+    }
+    return -1;
+}
+int captainColOf(int captain) {
+    if (captainRowOf(captain) == 0) return captain;
+    int col = 0;
+    for (int i = PC_CAPTAIN_FIRST_PIKMIN2; i < captain; i++) col += pc_captain_available(i) ? 1 : 0;
+    return col;
+}
+bool captainSecondRow() { return captainRowCount(1) > 0; }
+// Alto extra del panel con la segunda fila.
+int captainExtraH() { return captainSecondRow() ? kCaptainBoxH + kCaptainBoxGap : 0; }
+// Esquina de la tarjeta de un capitán dentro del panel; false si no se muestra.
+bool captainCardPos(int captain, int panelX, int panelY, int* x, int* y) {
+    if (captain < 0 || captain >= PC_CAPTAIN_COUNT) return false;
+    const int row = captainRowOf(captain);
+    if (row == 1 && !pc_captain_available(captain)) return false;
+    *x = panelX + captainRowLeft(captainRowCount(row)) + captainColOf(captain) * (kCaptainBoxW + kCaptainBoxGap);
+    *y = panelY + 84 + row * (kCaptainBoxH + kCaptainBoxGap);
+    return true;
+}
 const char* devAssignCaptainName(int captain) {
     return (captain >= 0 && captain < PC_CAPTAIN_COUNT) ? kCaptainNames[captain] : kCaptainNames[0];
 }
@@ -4433,16 +5472,20 @@ const char* devAssignName(int player) {
 // Selector de capitán (Olimar, Louie o un Pikmin) compartido por el prompt de mandos del
 // coop y el de 1 jugador. Devuelve 0 nada, 1 aceptado, 2 atrás.
 int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* captain, bool ignoreWindow) {
-    bool left = false, right = false, accept = false, back = false;
+    bool left = false, right = false, up = false, down = false, accept = false, back = false;
     if (keyboardOk) {
         left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
         right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+        up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
+        down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
         accept = menuOkKey();
         back   = menuCancelKey();
     }
     if (player == 0) {
         left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
         right |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+        up |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+        down |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
         accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
         back |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
         if (sTouchTapPending) {
@@ -4453,9 +5496,10 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
             const float aspect = dh > 0 ? float(dw) / float(dh) : 4.0f / 3.0f;
             const float screenW = aspect * 480.0f;
             const float x = sTouchTapX * screenW, y = sTouchTapY * 480.0f;
-            const float panelX = screenW * 0.5f - 310.0f, boxY = 110.0f + 84.0f;
+            const int panelX = int(screenW * 0.5f) - 310, panelY = 240 - (260 + captainExtraH()) / 2;
             for (int i = 0; i < PC_CAPTAIN_COUNT; ++i) {
-                const float boxX = panelX + kCaptainBoxLeft + i * (kCaptainBoxW + kCaptainBoxGap);
+                int boxX = 0, boxY = 0;
+                if (!captainCardPos(i, panelX, panelY, &boxX, &boxY) || !pc_captain_available(i)) continue;
                 if (x >= boxX && x <= boxX + kCaptainBoxW && y >= boxY && y <= boxY + kCaptainBoxH) {
                     *captain = i;
                     accept = true;
@@ -4470,12 +5514,30 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
         const bool hB     = pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_B));
         if (padEdge(hLeft, 2))  left   = true;
         if (padEdge(hRight, 3)) right  = true;
+        const bool hUp   = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_UP) || menuStickVertical(ctl, -1);
+        const bool hDown = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) || menuStickVertical(ctl, 1);
+        if (padEdge(hUp, 0))   up   = true;
+        if (padEdge(hDown, 1)) down = true;
         if (padEdge(hA, 4))     accept = true;
         if (padEdge(hB, 5))     back   = true;
     }
     if (ignoreWindow) return 0;
-    if (left)  *captain = (*captain + PC_CAPTAIN_COUNT - 1) % PC_CAPTAIN_COUNT;
-    if (right) *captain = (*captain + 1) % PC_CAPTAIN_COUNT;
+    // Izquierda/derecha dan la vuelta dentro de la fila; arriba/abajo cambian
+    // de fila (la segunda solo con Pikmin 2), a la misma columna o la última.
+    if (!pc_captain_available(*captain)) *captain = PC_CAPTAIN_OLIMAR;
+    {
+        const int row   = captainRowOf(*captain);
+        const int count = captainRowCount(row);
+        if ((left || right) && count > 0) {
+            *captain = captainRowAt(row, (captainColOf(*captain) + (left ? count - 1 : 1)) % count);
+        }
+        if ((up || down) && captainSecondRow() && (row == 0 ? down : up)) {
+            const int col    = captainColOf(*captain);
+            const int oCount = captainRowCount(1 - row);
+            const int target = captainRowAt(1 - row, col < oCount ? col : oCount - 1);
+            if (target >= 0) *captain = target;
+        }
+    }
     if (accept && *captain == PC_CAPTAIN_LOUIE && !devAssignLouieInstalled()) {
         // Sin el modelo no se puede jugar con Louie: aviso y se queda.
         sDevAssignLouieNoticeUntil = SDL_GetTicks() + 3000;
@@ -4486,6 +5548,10 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
     return 0;
 }
 
+// Prueba de tarjetas con el modelo 3D del juego (pc_captain_preview): lo
+// activa el selector de 1 jugador; las tarjetas con modelo no pintan su PNG.
+bool sCaptainCards3D = false;
+
 // Dibujo del selector dentro de un panel (panelX/Y/W del prompt).
 void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int player, int captain, const char* helpDefault) {
     char line1[64];
@@ -4493,10 +5559,10 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
     drawTextOutline(panelX + panelW / 2 - menuTextWidth(line1) / 2, panelY + 56,
                     "%s", Colour(255, 229, 120, 255), Colour(8, 12, 28, 255), line1);
     const int boxW = kCaptainBoxW, boxH = kCaptainBoxH;
-    const int boxY = panelY + 84;
     for (int i = 0; i < PC_CAPTAIN_COUNT; i++) {
         const bool sel = captain == i;
-        const int boxX = panelX + kCaptainBoxLeft + i * (boxW + kCaptainBoxGap);
+        int boxX = 0, boxY = 0;
+        if (!captainCardPos(i, panelX, panelY, &boxX, &boxY)) continue;
         if (pc_settings_p2d_active()) {
             // Cada capitán en su burbuja de cristal.
             pc_settings_p2d_plate(boxX, boxY, boxW, boxH, 1);
@@ -4509,9 +5575,10 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
         // misma línea que Olimar (32 px de alto). Sin PNG, un Pikmin usa su
         // trozo de piki3 a tamaño real.
         int ax = 0, aw = 0, ah = 0, scale = 2;
-        Texture* art = pc_art_texture(kCaptainArt[i]);
+        Texture* art = (sCaptainCards3D && pc_captain_preview_ready(i)) ? nullptr : pc_art_texture(kCaptainArt[i]);
         if (art && !pc_art_size(kCaptainArt[i], &aw, &ah)) art = nullptr;
-        if (!art && i >= PC_CAPTAIN_PIKMIN_RED) {
+        if (!art && i >= PC_CAPTAIN_PIKMIN_RED && i <= PC_CAPTAIN_PIKMIN_BLUE
+            && !(sCaptainCards3D && pc_captain_preview_ready(i))) {
             static Texture* sPiki3 = nullptr;
             if (!sPiki3) sPiki3 = zen::loadTexExp("screen/tex/piki3.bti", true, true);
             art   = sPiki3;
@@ -4535,7 +5602,9 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
                 gfx->useTexture(nullptr, GX_TEXMAP0);
             }
         }
-        if (drawGlassOption(boxX, boxY + boxH - 38, boxW, 30, kCaptainNames[i], sel)) continue;
+        // Metido en la tarjeta: a lo ancho entero, los bordes del brillo de
+        // selección asomaban por fuera como paréntesis.
+        if (drawGlassOption(boxX + 8, boxY + boxH - 38, boxW - 16, 30, kCaptainNames[i], sel)) continue;
         const int tw = menuTextWidth(kCaptainNames[i]);
         drawTextOutline(boxX + boxW / 2 - tw / 2, boxY + boxH - 30, "%s",
                         sel ? Colour(255, 229, 120, 255) : Colour(170, 180, 200, 255),
@@ -4545,7 +5614,7 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
     const bool noticing = louieMissing && SDL_GetTicks() < sDevAssignLouieNoticeUntil;
     const char* help = noticing ? "Louie model not installed: Advanced Options > HD Models (Louie zip)."
                      : (louieMissing ? "Louie: model not installed (Advanced Options > HD Models)." : helpDefault);
-    drawHelpLine(panelX + panelW / 2, panelY + 220, help, noticing ? Colour(255, 160, 120, 255) : Colour(150, 165, 195, 255));
+    drawHelpLine(panelX + panelW / 2, panelY + 220 + captainExtraH(), help, noticing ? Colour(255, 160, 120, 255) : Colour(150, 165, 195, 255));
 }
 }
 
@@ -4564,9 +5633,11 @@ void pcCaptainPromptInput() {
         pc_coop_set_captain(0, sCaptainPromptChoice);
         sCaptainPromptResult = PC_DEVASSIGN_OK;
         sCaptainPromptOpen   = false;
+        pc_captain_preview_release();
     } else if (r == 2) {
         sCaptainPromptResult = PC_DEVASSIGN_CANCELLED;
         sCaptainPromptOpen   = false;
+        pc_captain_preview_release();
     }
 }
 }
@@ -4589,16 +5660,33 @@ void pc_captain_prompt_draw(void) {
     if (!sFont) return;
     const int screenW = pc_gfx_menu_wide() ? pc_gfx_menu_virt_width() : gfx->mScreenWidth;
     const int screenH = gfx->mScreenHeight;
-    PcSettingsP2DFrame nativeFrame(screenW, screenH);
-    GlassTextScope glassText;
-    Matrix4f ortho;
-    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
-    const int panelW = 620, panelH = 260;
+    const int panelW = 620, panelH = 260 + captainExtraH();
     const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2;
-    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
-    drawPikminHeader(gfx, panelX, panelY, panelW, "Captain");
-    captainPickDraw(gfx, panelX, panelY, panelW, 0, sCaptainPromptChoice,
-                    "Left/Right: choose    A / Enter: confirm    B / Esc: back");
+    // Prueba: modelos 3D en las tarjetas (solo con el menú a pantalla
+    // ancha, cuyo espacio virtual cubre toda la ventana).
+    sCaptainCards3D = pc_gfx_menu_wide() != 0;
+    {
+        PcSettingsP2DFrame nativeFrame(screenW, screenH);
+        GlassTextScope glassText;
+        Matrix4f ortho;
+        gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+        drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+        drawPikminHeader(gfx, panelX, panelY, panelW, "Captain");
+        captainPickDraw(gfx, panelX, panelY, panelW, 0, sCaptainPromptChoice,
+                        captainSecondRow() ? "Arrows: choose    A / Enter: confirm    B / Esc: back"
+                                            : "Left/Right: choose    A / Enter: confirm    B / Esc: back");
+    }
+    if (sCaptainCards3D) {
+        // Mismo hueco que el sprite: encima del nombre de la tarjeta.
+        for (int i = 0; i < PC_CAPTAIN_COUNT; i++) {
+            int boxX = 0, boxY = 0;
+            if (!captainCardPos(i, panelX, panelY, &boxX, &boxY)) continue;
+            pc_captain_preview_draw(i, boxX + 4, boxY + 4, kCaptainBoxW - 8, kCaptainBoxH - 44, screenW, screenH,
+                                    i == sCaptainPromptChoice);
+        }
+        Matrix4f ortho;
+        gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+    }
 }
 
 void pc_devassign_prompt_open(void) {
@@ -4648,6 +5736,7 @@ void pcDevAssignPromptInput() {
         if (cancel) {
             sDevAssignResult = PC_DEVASSIGN_CANCELLED;
             sDevAssignOpen   = false;
+            pc_captain_preview_release();
             return;
         }
         if (!pressed || SDL_GetTicks() < sDevAssignIgnoreUntil) return;
@@ -4675,6 +5764,7 @@ void pcDevAssignPromptInput() {
         if (cancel) {
             sDevAssignResult = PC_DEVASSIGN_CANCELLED;
             sDevAssignOpen   = false;
+            pc_captain_preview_release();
             return;
         }
         // El botón con el que se acaba de reclamar el mando sigue pulsado.
@@ -4728,9 +5818,11 @@ void pcDevAssignPromptInput() {
         if (sDevAssignChoice == 1) { devAssignRestart(); return; }
         sDevAssignResult = PC_DEVASSIGN_OK;
         sDevAssignOpen   = false;
+        pc_captain_preview_release();
     } else if (cancel) {
         sDevAssignResult = PC_DEVASSIGN_CANCELLED;
         sDevAssignOpen   = false;
+        pc_captain_preview_release();
     }
 }
 } // namespace
@@ -4744,27 +5836,53 @@ void pc_devassign_prompt_draw(void) {
 
     const int screenW = pc_gfx_menu_wide() ? pc_gfx_menu_virt_width() : gfx->mScreenWidth;
     const int screenH = gfx->mScreenHeight;
+    const int panelW = 620;
+
+    if (sDevAssignStep == DEVASSIGN_PickP1 || sDevAssignStep == DEVASSIGN_PickP2) {
+        // El mismo selector que el de 1 jugador (pc_captain_prompt_draw):
+        // con Pikmin 2 cabe la segunda fila y, a pantalla ancha, las
+        // tarjetas llevan el modelo 3D.
+        const int player = devAssignPlayer();
+        const int panelH = 260 + captainExtraH();
+        const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2;
+        sCaptainCards3D  = pc_gfx_menu_wide() != 0;
+        {
+            PcSettingsP2DFrame nativeFrame(screenW, screenH);
+            GlassTextScope glassText;
+            Matrix4f ortho;
+            gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+            drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+            drawPikminHeader(gfx, panelX, panelY, panelW, "Captain");
+            captainPickDraw(gfx, panelX, panelY, panelW, player, sDevAssignCaptain[player],
+                            captainSecondRow() ? "Arrows: choose    A / Enter: confirm    B: reassign    Esc: back"
+                                               : "Left/Right: choose    A / Enter: confirm    B: reassign    Esc: back");
+        }
+        if (sCaptainCards3D) {
+            // Mismo hueco que el sprite: encima del nombre de la tarjeta.
+            for (int i = 0; i < PC_CAPTAIN_COUNT; i++) {
+                int boxX = 0, boxY = 0;
+                if (!captainCardPos(i, panelX, panelY, &boxX, &boxY)) continue;
+                pc_captain_preview_draw(i, boxX + 4, boxY + 4, kCaptainBoxW - 8, kCaptainBoxH - 44, screenW, screenH,
+                                        i == sDevAssignCaptain[player]);
+            }
+            Matrix4f ortho;
+            gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+        }
+        return;
+    }
+
     PcSettingsP2DFrame nativeFrame(screenW, screenH);
     GlassTextScope glassText;
 
     Matrix4f ortho;
     gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
 
-
-    const int panelW = 620;
     const int panelH = 260;
     const int panelX = screenW / 2 - panelW / 2;
     const int panelY = screenH / 2 - panelH / 2;
 
     drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
     drawPikminHeader(gfx, panelX, panelY, panelW, "Controllers");
-
-    if (sDevAssignStep == DEVASSIGN_PickP1 || sDevAssignStep == DEVASSIGN_PickP2) {
-        const int player = devAssignPlayer();
-        captainPickDraw(gfx, panelX, panelY, panelW, player, sDevAssignCaptain[player],
-                        "Left/Right: choose    A / Enter: confirm    B: reassign    Esc: back");
-        return;
-    }
 
     if (sDevAssignStep != DEVASSIGN_Confirm) {
         const int player = devAssignPlayer();
@@ -4839,6 +5957,7 @@ int pc_settings_in_gameplay(void) {
 
 void pc_settings_note_gameplay_frame(void) {
     sLastGameplayFrameMs = SDL_GetTicks();
+    pc_vs_note_gameplay_tick();
 }
 
 // El objetivo fijado se marca en el mundo (anillo y marcador, en navi.cpp);
@@ -4957,14 +6076,28 @@ void vsRuleText(int row, const char** label, char* value, size_t n)
 }
 
 bool sVsRulesOpen   = false;
-int sVsRulesRow     = 0;
+int sVsRulesRow     = 0; // 0 = mapa, 1.. = reglas (vsRuleField(row - 1))
 int sVsRulesResult  = PC_DEVASSIGN_PENDING;
+constexpr int kVsMenuRows = kVsRuleRows + 1;
+
+// Selector de mapa: posición en pc_vs_map_list y, si al pulsar A no se pudo
+// montar, por qué (se enseña en la tarjeta de abajo y no se empieza).
+int sVsMapIndex = 0;
+std::string sVsMapError;
+
+const PcVsMapEntry& vsMapEntry()
+{
+    const std::vector<PcVsMapEntry>& list = pc_vs_map_list(false);
+    return list[std::clamp(sVsMapIndex, 0, int(list.size()) - 1)];
+}
 int sVsEndChoice    = 0; // 0 revancha, 1 título
 Uint32 sVsOverSince = 0; // cuándo acabó la partida (la pantalla final sale un poco después)
 constexpr Uint32 kVsEndScreenDelayMs = 2500;
 
 bool vsEndScreenShown()
 {
+    // Netplay: the end screen is sim state (pc_vs_det_end_screen_shown).
+    if (pc_netplay_deterministic()) return pc_vs_det_end_screen_shown();
     return pc_vs_active() && pc_vs_match_over() && sVsOverSince && SDL_GetTicks() - sVsOverSince >= kVsEndScreenDelayMs;
 }
 
@@ -4993,14 +6126,26 @@ void pcVsRulesInput()
         if (promptPadA(ctl)) accept = true;
         if (promptPadB(ctl)) cancel = true;
     }
-    if (up) sVsRulesRow = (sVsRulesRow + kVsRuleRows - 1) % kVsRuleRows;
-    if (down) sVsRulesRow = (sVsRulesRow + 1) % kVsRuleRows;
-    if (left || right) {
-        int* field  = vsRuleField(sVsRulesRow);
-        const int n = vsRuleCount(sVsRulesRow);
+    if (up) sVsRulesRow = (sVsRulesRow + kVsMenuRows - 1) % kVsMenuRows;
+    if (down) sVsRulesRow = (sVsRulesRow + 1) % kVsMenuRows;
+    if ((left || right) && sVsRulesRow == 0) {
+        const int n   = int(pc_vs_map_list(false).size());
+        sVsMapIndex   = (sVsMapIndex + (left ? n - 1 : 1)) % n;
+        sConfig.vsMap = vsMapEntry().id;
+        sVsMapError.clear();
+    } else if (left || right) {
+        int* field  = vsRuleField(sVsRulesRow - 1);
+        const int n = vsRuleCount(sVsRulesRow - 1);
         *field      = (*field + (left ? n - 1 : 1)) % n;
     }
     if (accept) {
+        // Se monta ya: si el mapa no vale, se dice aquí y no se empieza.
+        pc_vs_map_select(sConfig.vsMap);
+        if (const char* why = pc_vs_arena_prepare()) {
+            sVsMapError = why;
+            sVsRulesRow = 0;
+            return;
+        }
         saveConfig();
         sVsRulesResult = PC_DEVASSIGN_OK;
         sVsRulesOpen   = false;
@@ -5049,10 +6194,20 @@ void pc_settings_apply_vs_rules(void) {
     pc_vs_set_rules(r);
 }
 
+const char* pc_settings_get_vs_map(void) { return sConfig.vsMap.c_str(); }
+
 void pc_vsrules_prompt_open(void) {
     sVsRulesOpen   = true;
     sVsRulesRow    = 0;
     sVsRulesResult = PC_DEVASSIGN_PENDING;
+    // La lista se vuelve a leer cada vez (mapas copiados con el juego abierto).
+    const std::vector<PcVsMapEntry>& maps = pc_vs_map_list(true);
+    sVsMapIndex = 0;
+    for (size_t i = 0; i < maps.size(); i++) {
+        if (maps[i].id == sConfig.vsMap) sVsMapIndex = int(i);
+    }
+    sConfig.vsMap = vsMapEntry().id;
+    sVsMapError.clear();
     pc_menu_edge_reset();
 }
 bool pc_vsrules_prompt_active(void) { return sVsRulesOpen; }
@@ -5066,6 +6221,22 @@ void vsText(int x, int y, const char* s, Colour c, int fw = 12, int fh = 18)
     else drawTextOutline(x, y, "%s", c, Colour(8, 12, 28, 255), s);
 }
 int vsTextW(const char* s, int fw = 12) { return pc_settings_p2d_active() ? pc_settings_p2d_text_width(s, fw) : menuTextWidth(s); }
+
+// Copia `s` en `out` recortada con "..." para que quepa en maxW (sin partir
+// letras UTF-8: los mapas pueden traer tildes).
+void vsFitText(const char* s, char* out, size_t n, int maxW, int fw)
+{
+    snprintf(out, n, "%s", s);
+    if (vsTextW(out, fw) <= maxW) return;
+    std::string cut(out);
+    while (!cut.empty()) {
+        cut.pop_back();
+        while (!cut.empty() && (u8(cut.back()) & 0xC0) == 0x80) cut.pop_back();
+        if (!cut.empty() && (u8(cut.back()) & 0x80)) cut.pop_back(); // primer byte de la letra partida
+        snprintf(out, n, "%s...", cut.c_str());
+        if (vsTextW(out, fw) <= maxW) return;
+    }
+}
 
 Texture* vsIcon(const char* name)
 {
@@ -5183,12 +6354,20 @@ void pc_vsrules_prompt_draw(void) {
     // ── Derecha: reglas ─────────────────────────────────────────────────────
     vsText(rx + 8, panelY + 56, es ? "REGLAS" : "RULES", title, 14, 21);
     const int rowsY = panelY + 88;
-    for (int row = 0; row < kVsRuleRows; row++) {
+    constexpr int kRowH = 34;
+    const PcVsMapEntry& map = vsMapEntry();
+    const bool mapBad       = !map.error.empty() || !sVsMapError.empty();
+    for (int row = 0; row < kVsMenuRows; row++) {
         const char* label = "";
         char value[48];
-        vsRuleText(row, &label, value, sizeof(value));
+        if (row == 0) {
+            label = es ? "Mapa" : "Map";
+            vsFitText(map.name.c_str(), value, sizeof(value), colW / 2, 11);
+        } else {
+            vsRuleText(row - 1, &label, value, sizeof(value));
+        }
         const bool sel = row == sVsRulesRow;
-        const int ry   = rowsY + row * 38;
+        const int ry   = rowsY + row * kRowH;
         // Fila elegida: bolita de cristal delante y valor en naranja (estilo
         // burbuja), en vez de la placa amarilla.
         if (sel && pc_settings_p2d_active())
@@ -5197,15 +6376,54 @@ void pc_vsrules_prompt_draw(void) {
         vsText(rx + 10, ry, label, c, 11, 17);
         char shown[64];
         snprintf(shown, sizeof(shown), sel ? "< %s >" : "%s", value);
-        vsText(rx + colW - 10 - vsTextW(shown, 11), ry, shown, sel ? Colour(255, 170, 30, 255) : c, 11, 17);
+        const Colour valueC = row == 0 && mapBad ? Colour(255, 110, 90, 255) : (sel ? Colour(255, 170, 30, 255) : c);
+        vsText(rx + colW - 10 - vsTextW(shown, 11), ry, shown, valueC, 11, 17);
     }
-    const char* h1;
-    const char* h2;
-    vsRuleHelp(sVsRulesRow, &h1, &h2);
-    const int descY = rowsY + kVsRuleRows * 38 + 6;
+    const int descY = rowsY + kVsMenuRows * kRowH + 6;
     vsCard(gfx, rx - 4, descY, colW + 8, 60);
-    vsText(rx + 10, descY + 12, h1, body, 10, 15);
-    vsText(rx + 10, descY + 32, h2, body, 10, 15);
+    if (sVsRulesRow == 0 || !sVsMapError.empty()) {
+        // Mapa: miniatura (si trae thumb.png) y autor, o por qué no vale.
+        int tx = rx + 10;
+        int aw = 0, ah = 0;
+        const std::string thumbName = map.thumb.empty() ? std::string() : "@" + map.thumb;
+        Texture* thumb = thumbName.empty() ? nullptr : pc_art_texture(thumbName.c_str());
+        if (thumb && pc_art_size(thumbName.c_str(), &aw, &ah) && aw > 0 && ah > 0) {
+            const int th = 48, tw = std::min(80, aw * th / ah);
+            const Colour tint(255, 255, 255, 255);
+            const float u1 = float(aw) / thumb->mWidth, v1 = float(ah) / thumb->mHeight;
+            if (pc_settings_p2d_active()) {
+                pc_settings_p2d_image(rx + 2, descY + 6, tw, th, thumb, u1, v1, tint, 0.0f);
+            } else {
+                gfx->setColour(tint, true);
+                gfx->setAuxColour(tint);
+                gfx->useTexture(thumb, GX_TEXMAP0);
+                gfx->drawRectangle(RectArea(rx + 2, descY + 6, rx + 2 + tw, descY + 6 + th), RectArea(0, 0, aw, ah), nullptr);
+                gfx->useTexture(nullptr, GX_TEXMAP0);
+            }
+            tx = rx + 2 + tw + 10;
+        }
+        const int textW = rx + colW - 6 - tx;
+        char l1[96], l2[128];
+        const std::string& why = !sVsMapError.empty() ? sVsMapError : map.error;
+        if (!why.empty()) {
+            snprintf(l1, sizeof(l1), "%s", es ? "No se puede jugar:" : "Can't be played:");
+            vsFitText(why.c_str(), l2, sizeof(l2), textW, 10);
+        } else {
+            if (map.id.empty()) snprintf(l1, sizeof(l1), "%s", es ? "Arena de serie" : "Built-in arena");
+            else snprintf(l1, sizeof(l1), "%s", es ? "Mapa de la comunidad" : "Community map");
+            char by[96];
+            snprintf(by, sizeof(by), "%s %s", es ? "De" : "By", map.author.empty() ? "?" : map.author.c_str());
+            vsFitText(by, l2, sizeof(l2), textW, 10);
+        }
+        vsText(tx, descY + 12, l1, why.empty() ? body : Colour(255, 110, 90, 255), 10, 15);
+        vsText(tx, descY + 32, l2, body, 10, 15);
+    } else {
+        const char* h1;
+        const char* h2;
+        vsRuleHelp(sVsRulesRow - 1, &h1, &h2);
+        vsText(rx + 10, descY + 12, h1, body, 10, 15);
+        vsText(rx + 10, descY + 32, h2, body, 10, 15);
+    }
 
     const char* help = es ? "Arriba/Abajo: opción   Izq/Der: cambiar   A: jugar   B: salir"
                           : "Up/Down: option   Left/Right: change   A: play   B: back";
@@ -5231,11 +6449,15 @@ void pc_settings_draw_vs_hud(void) {
         sVsOverSince = 0;
         sVsEndChoice = 0;
     }
+    // Netplay (deterministic mode): the countdown, the pause and the end
+    // screen are sim state (pc_vs_det_tick_end); this only draws and plays
+    // the local sounds. A local menu never holds the shared countdown.
+    const bool det = pc_netplay_deterministic();
     // Con un menú del port encima, la cuenta atrás espera (va con reloj real).
     const bool menuOver = sMenuOpen || pc_glass_menu_active();
-    pc_vs_countdown_set_frozen(menuOver);
+    if (!det) pc_vs_countdown_set_frozen(menuOver);
     if (menuOver) return;
-    const bool live = sLastGameplayFrameMs != 0 && SDL_GetTicks() - sLastGameplayFrameMs <= 250;
+    const bool live = det ? pc_vs_det_live() : sLastGameplayFrameMs != 0 && SDL_GetTicks() - sLastGameplayFrameMs <= 250;
     if (!live && !sPausedByVs) return;
     if (!gsys || !gsys->mDGXGfx) return;
 
@@ -5243,7 +6465,7 @@ void pc_settings_draw_vs_hud(void) {
     const int phase    = pc_vs_countdown_phase();
     const bool over    = pc_vs_match_over();
     const bool wantPause = phase > 0 || over;
-    if (wantPause != sPausedByVs) {
+    if (!det && wantPause != sPausedByVs) {
         gameflow.mPauseAll = wantPause ? TRUE : FALSE;
         sPausedByVs        = wantPause;
     }
@@ -5306,7 +6528,7 @@ void pc_settings_draw_vs_hud(void) {
         }
         const char* opts[2] = { es ? "Revancha" : "Rematch", es ? "Volver al título" : "Back to title" };
         for (int i = 0; i < 2; i++) {
-            const bool sel = i == sVsEndChoice;
+            const bool sel = i == (pc_netplay_deterministic() ? pc_vs_end_choice() : sVsEndChoice);
             char o[40];
             snprintf(o, sizeof(o), sel ? "> %s <" : "%s", opts[i]);
             const int ox = i == 0 ? panelX + 130 : panelX + panelW - 130;
@@ -5372,7 +6594,7 @@ void pc_settings_draw_achievement_toast(void) {
     char head[48], title[96];
     if (id >= 0) {
         const PcAchievementInfo& info = pc_achievement_info(id);
-        snprintf(head, sizeof(head), "Achievement unlocked  (%d pts)", info.points);
+        snprintf(head, sizeof(head), "Achievement unlocked");
         snprintf(title, sizeof(title), "%s", info.title);
     } else {
         snprintf(head, sizeof(head), "Achievements");
@@ -5652,8 +6874,8 @@ void pc_settings_draw(void) {
         const int subX = px1 + 18, subY = py1 + 44;
         const int subW = panelW - 36, subH = panelH - 58;
         drawSubmenuSurface(gfx, subX, subY, subW, subH, "HD Models",
-                           "Up/Down: model   A: install",
-                           "Esc/B: back   Restart required");
+                           "Up/Down: model   Left/Right: on/off   A: install zip",
+                           "Esc/B: back   A new install needs a restart");
 
         std::error_code modelEc;
         const bool olimarInstalled = std::filesystem::is_regular_file(pc_hd_model_path(PC_HD_MODEL_OLIMAR), modelEc);
@@ -5676,7 +6898,8 @@ void pc_settings_draw(void) {
             else if (busy)
                 snprintf(value, sizeof(value), "Selecting file...");
             else
-                snprintf(value, sizeof(value), "%s", installed[row] ? "Installed" : "Not installed");
+                snprintf(value, sizeof(value), "%s",
+                         !installed[row] ? "Not installed" : (pc_settings_get_hd_model_enabled(row) ? "On" : "Off"));
             drawSubmenuRow(gfx, subX + 20, subY + 70 + row * 28, subW - 40,
                            labels[row], value, row == sHdModelsSelection);
         }
@@ -5838,6 +7061,13 @@ void pc_settings_draw(void) {
     drawF1Page(gfx);
 }
 
+int pc_settings_get_speedrun_splits_shown(void) { return sConfig.speedrunSplitsShown; }
+int pc_settings_get_speedrun_category(void) { return sConfig.speedrunCategory; }
+int pc_settings_get_speedrun_livesplit(void) { return sConfig.speedrunLiveSplit; }
+int pc_settings_get_speedrun_ls_hide_clock(void) { return sConfig.speedrunLsHideClock; }
+const char* pc_settings_get_speedrun_ls_host(void) { return sConfig.speedrunLsHost; }
+int pc_settings_get_speedrun_ls_port(void) { return sConfig.speedrunLsPort; }
+int pc_settings_get_online_stun(void) { return sConfig.onlineStun; }
 int pc_settings_get_fps_mode(void) { if (pc_speedrun_active()) return 0;
     return sConfig.fpsMode;
 }
@@ -5907,6 +7137,7 @@ int pc_settings_get_breakable_gates(void) { if (pc_speedrun_active()) return 0;
 }
 int pc_settings_get_p2_selection(void) { return sConfig.p2Selection; }
 int pc_settings_get_eternal_night(void) { return sConfig.eternalNight; }
+int pc_settings_get_fireflies(void) { return sConfig.fireflies; }
 float pc_settings_get_free_camera_pad_scale(void) { return sConfig.freeCamPadPct / 100.0f; }
 int pc_settings_get_bomb_control(void) { if (pc_speedrun_active()) return 0;
     return sConfig.bombControl;
@@ -6051,6 +7282,93 @@ int pc_settings_get_debug_keys(void) { if (pc_speedrun_active()) return 0;
     return sConfig.debugKeys;
 }
 
+void pc_settings_record_original_look(int original) {
+    // Copia de lo que había antes de pasar al aspecto original; se repone tal cual.
+    static PcConfig sBefore;
+    static bool sInOriginal = false;
+    if (original && !sInOriginal) {
+        sBefore = sConfig;
+        sConfig.shadows = 0;
+        sConfig.ssao = 0;
+        sConfig.bloom = 0;
+        sConfig.dof = 0;
+        sConfig.antialiasing = 0;
+        sConfig.perPixelLighting = 0;
+        sConfig.anisotropy = 0;
+        sConfig.colourGrading = 0;
+        sConfig.fog = 1;
+        sConfig.hdModelsDisabled = 0x3F; // las seis filas del selector de modelos HD
+        sInOriginal = true;
+    } else if (!original && sInOriginal) {
+        sConfig.shadows = sBefore.shadows;
+        sConfig.ssao = sBefore.ssao;
+        sConfig.bloom = sBefore.bloom;
+        sConfig.dof = sBefore.dof;
+        sConfig.antialiasing = sBefore.antialiasing;
+        sConfig.perPixelLighting = sBefore.perPixelLighting;
+        sConfig.anisotropy = sBefore.anisotropy;
+        sConfig.colourGrading = sBefore.colourGrading;
+        sConfig.fog = sBefore.fog;
+        sConfig.hdModelsDisabled = sBefore.hdModelsDisabled;
+        sInOriginal = false;
+    }
+    applyGraphics(sConfig);
+    fprintf(stderr, "[RECORD] graphics: %s\n", sInOriginal ? "original" : "Open Nectar");
+    fflush(stderr);
+}
+
+#if PIKI_NETPLAY_BUILD
+const char* pc_settings_netplay_config_text(void) {
+    static std::string text;
+    text.clear();
+    char cell[96];
+#define PC_NETPLAY_TEXT_FIELD(f)                                        \
+    snprintf(cell, sizeof(cell), "%s=%d;", #f, (int)sConfig.f);        \
+    text += cell;
+    PC_NETPLAY_SESSION_FIELDS(PC_NETPLAY_TEXT_FIELD)
+#undef PC_NETPLAY_TEXT_FIELD
+    text += "vsMap=" + sConfig.vsMap + ";";
+    return text.c_str();
+}
+
+void pc_settings_netplay_session_begin(const char* adoptConfigText) {
+    if (sNetplaySessionLocked) return;
+    if (adoptConfigText != nullptr) {
+        sNetplayDiskConfig = sConfig;
+        const std::string own = pc_settings_netplay_config_text();
+        const int applied = netplayApplyConfigText(adoptConfigText);
+        const std::string adopted = pc_settings_netplay_config_text();
+        sNetplayAdopted = true;
+        sPending = sConfig;
+        printf("[PC Settings] netplay session: adopted the host's sim settings for this session only "
+               "(%d keys, %s); the settings file keeps this player's own values\n",
+               applied, own == adopted ? "same as this player's" : "some differ from this player's");
+        if (own != adopted) {
+            printf("[PC Settings] netplay session: own   %s\n", own.c_str());
+            printf("[PC Settings] netplay session: host  %s\n", adopted.c_str());
+        }
+    }
+    // The session ticks at 30 Hz, and each tick advances the game by the
+    // frame clamp's period: 60/120 FPS mode would play at half/quarter speed.
+    // Both peers force 30 FPS for the session; the settings file keeps the
+    // player's own mode (the disk values are restored when saving).
+    if (sConfig.fpsMode != 0) {
+        if (!sNetplayAdopted) {
+            sNetplayDiskConfig = sConfig;
+            sNetplayAdopted    = true;
+        }
+        printf("[PC Settings] netplay session: FPS mode %d -> 30 FPS for the session (the netplay tick is 30 Hz)\n",
+               sConfig.fpsMode);
+        sConfig.fpsMode  = 0;
+        sPending.fpsMode = 0;
+    }
+    sNetplaySessionConfig = sConfig;
+    sNetplaySessionLocked = true;
+    printf("[PC Settings] netplay session: sim-relevant settings locked for the session\n");
+    fflush(stdout);
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // Modelo de filas para otras interfaces (pc_settings_rows.h)
 // ---------------------------------------------------------------------------
@@ -6081,19 +7399,19 @@ const char* pc_settings_group_name(int group) {
 const char* pc_settings_group_summary(int group) {
     switch (group) {
     case PC_SET_GROUP_DISPLAY: return "Window, resolution, frame rate";
-    case PC_SET_GROUP_GRAPHICS: return "Effects, colour, texture packs";
+    case PC_SET_GROUP_GRAPHICS: return "Effects, colour, texture packs, HD models";
 #ifdef __EMSCRIPTEN__
     case PC_SET_GROUP_CONTROLS: return "Actions, lock-on, sticks, bindings";
 #else
     case PC_SET_GROUP_CONTROLS: return "Actions, lock-on, sticks, gyro, bindings";
 #endif
     case PC_SET_GROUP_CAMERA: return "Free camera, first person, co-op view";
-    case PC_SET_GROUP_GAMEPLAY: return "Pikmin behaviour, eternal night, HUD";
+    case PC_SET_GROUP_GAMEPLAY: return "Pikmin behaviour, night, fireflies, HUD";
     case PC_SET_GROUP_CHEATS: return "Day, health, Pikmin limit, whistle";
 #ifdef __EMSCRIPTEN__
     case PC_SET_GROUP_DATA: return "Export or restore saves, reset settings";
 #else
-    case PC_SET_GROUP_DATA: return "Save transfer, reset settings";
+    case PC_SET_GROUP_DATA: return "Saves, reset settings";
 #endif
     case PC_SET_GROUP_ACHIEVEMENTS: return "Unlocked achievements and how to get the rest";
     default: return "";
@@ -6109,14 +7427,14 @@ void graphicsRowValue(int i, char* value, size_t n) {
     const char* levels[4] = { "Off", "Subtle", "Normal", "Strong" };
     auto level = [&](int v) { return levels[(v >= 0 && v <= 3) ? v : 0]; };
     switch (i) {
-    case 0: snprintf(value, n, "%s", sPending.antialiasing ? "FXAA" : "Off"); break;
+    case 0: snprintf(value, n, "%s", sPending.antialiasing ? "On" : "Off"); break;
     case 1: snprintf(value, n, "%s", sPending.fog ? "On  (original)" : "Off"); break;
     case 2: snprintf(value, n, "%s", level(sPending.bloom)); break;
     case 3: snprintf(value, n, "%s", level(sPending.ssao)); break;
     case 4: snprintf(value, n, "%s", level(sPending.dof)); break;
     case 5:
-        if (sPending.anisotropy <= 1) snprintf(value, n, "Trilinear");
-        else snprintf(value, n, "Anisotropic %dx", sPending.anisotropy);
+        if (sPending.anisotropy <= 1) snprintf(value, n, "Standard");
+        else snprintf(value, n, "Sharp %dx", sPending.anisotropy);
         break;
     case 6: snprintf(value, n, "%s", gradingOn ? "On" : "Off"); break;
     case 7: if (!gradingOn) snprintf(value, n, "--"); else snprintf(value, n, sPending.gamma == 1.0f ? "%.2f  (neutral)" : "%.2f", sPending.gamma); break;
@@ -6131,12 +7449,12 @@ void graphicsRowValue(int i, char* value, size_t n) {
     case 11: {
         std::error_code ec;
         int installed = 0;
-        for (int id = 0; id < PC_HD_MODEL_COUNT; id++)
+        for (int id = 0; id < PC_HD_MODEL_PRESIDENT; id++) // los de Pikmin 2 no son packs
             if (std::filesystem::is_regular_file(pc_hd_model_path((PcHdModelId)id), ec)) installed++;
-        snprintf(value, n, "%d / %d files  >", installed, (int)PC_HD_MODEL_COUNT);
+        snprintf(value, n, "%d / %d files  >", installed, (int)PC_HD_MODEL_PRESIDENT);
         break;
     }
-    case 12: snprintf(value, n, "%s", sPending.perPixelLighting ? "Per-pixel" : "Per-vertex (original)"); break;
+    case 12: snprintf(value, n, "%s", sPending.perPixelLighting ? "Smooth" : "Original"); break;
     case 13: {
         const char* names[4] = { "Off (original)", "Soft", "Normal", "Strong" };
         snprintf(value, n, "%s", names[(sPending.shadows >= 0 && sPending.shadows <= 3) ? sPending.shadows : 0]);
@@ -6201,6 +7519,7 @@ void modsRowValue(int i, char* value, size_t n) {
         break;
     case 39: snprintf(value, n, "%s", sPending.p2Selection ? "On" : "Off"); break;
     case 40: snprintf(value, n, "%s", sPending.eternalNight ? "On" : "Off (original)"); break;
+    case 41: snprintf(value, n, "%s", sPending.fireflies ? "On" : "Off (original)"); break;
     case 38: snprintf(value, n, sPending.freeCamPadPct == 100 ? "%d%%  (original)" : "%d%%", sPending.freeCamPadPct); break;
     case 28: speedPctLabel(sPending.carrySpeedPct, value, n); break;
     case 29: speedPctLabel(sPending.naviSpeedPct, value, n); break;
@@ -6280,74 +7599,74 @@ const GroupRow kDisplayRows[] = {
     { SRC_MAIN, ROW_DISPLAY_MODE, "Fullscreen", "Enter or leave browser fullscreen. Escape leaves it." },
     { SRC_MAIN, ROW_RESOLUTION, "Render Resolution", "Internal render size. The canvas follows the browser window." },
 #else
-    { SRC_MAIN, ROW_DISPLAY_MODE, "Display Mode", "Windowed, exclusive fullscreen, or a borderless window at desktop size." },
-    { SRC_MAIN, ROW_RESOLUTION, "Resolution", "Window or fullscreen size. A opens the full list; Left/Right steps through it." },
+    { SRC_MAIN, ROW_DISPLAY_MODE, "Display Mode", "Windowed, fullscreen, or a borderless window that fills the screen." },
+    { SRC_MAIN, ROW_RESOLUTION, "Resolution", "Size of the window or the fullscreen picture. A: full list. Left/Right: next size." },
 #endif
-    { SRC_MAIN, ROW_ASPECT_RATIO, "Aspect Ratio", "Auto fills the window. The others keep that shape and add bars." },
-    { SRC_MAIN, ROW_RENDER_SCALE, "3D Resolution", "Detail of the 3D scene. Higher is sharper, lower is faster." },
+    { SRC_MAIN, ROW_ASPECT_RATIO, "Aspect Ratio", "Auto fills the window. The others keep that shape and add black bars." },
+    { SRC_MAIN, ROW_RENDER_SCALE, "3D Resolution", "Detail of the 3D world. Higher looks sharper, lower runs faster." },
 #ifndef __EMSCRIPTEN__
-    { SRC_MAIN, ROW_REFRESH_RATE, "Refresh Rate", "Fullscreen refresh rate. Auto keeps the monitor's current rate." },
-    { SRC_MAIN, ROW_VSYNC, "Frame Sync (VSync)", "Waits for the monitor between frames. Stops tearing, adds a little lag." },
+    { SRC_MAIN, ROW_REFRESH_RATE, "Refresh Rate", "How often the screen updates in fullscreen. Auto keeps your monitor's setting." },
+    { SRC_MAIN, ROW_VSYNC, "Frame Sync (VSync)", "Waits for the screen before showing each frame. Stops tearing (a picture split in two), adds a little input delay." },
 #endif
-    { SRC_MAIN, ROW_FPS_MODE, "FPS Mode", "30 is the original and the most stable. 60 and 120 are smoother but experimental." },
+    { SRC_MAIN, ROW_FPS_MODE, "FPS Mode", "Frames per second. 30 is the original and the most stable. 60 and 120 are smoother but experimental." },
 #if defined(VERSION_GPIP01)
     { SRC_MAIN, ROW_LANGUAGE, "Language", "Language of the game's text. Takes effect after a restart." },
 #endif
 };
 
 const GroupRow kGraphicsRows[] = {
-    { SRC_GFX, 0, "Antialiasing", "Smooths jagged edges (FXAA). Small performance cost." },
-    { SRC_GFX, 5, "Texture Filtering", "Keeps textures sharp at steep angles. Anisotropic costs a little GPU." },
-    { SRC_GFX, 12, "Lighting", "Per-pixel gives smoother light on models than the original per-vertex." },
+    { SRC_GFX, 0, "Antialiasing", "Smooths jagged edges on characters and scenery. Small performance cost." },
+    { SRC_GFX, 5, "Texture Filtering", "Keeps the ground and walls sharp when seen at an angle. Higher costs a little performance." },
+    { SRC_GFX, 12, "Lighting", "Smooth: softer, more detailed light on characters. Original: as on GameCube." },
     { SRC_GFX, 13, "Shadows", "Real-time shadows cast by characters and objects." },
     { SRC_GFX, 1, "Fog", "The game's own distance fog. On is how the original looks." },
-    { SRC_GFX, 2, "Bloom", "Soft glow around bright areas." },
-    { SRC_GFX, 3, "Ambient Occlusion", "Contact shadows in corners and under objects." },
-    { SRC_GFX, 4, "Depth of Field", "Blurs the far distance so the action stands out." },
-    { SRC_GFX, 6, "Colour Grading", "Turns on the Gamma, Brightness and Saturation controls below." },
-    { SRC_GFX, 7, "Gamma", "Brightness of the mid-tones. 1.00 is neutral." },
-    { SRC_GFX, 8, "Brightness", "Lifts or darkens the whole image. 0.00 is neutral." },
-    { SRC_GFX, 9, "Saturation", "Colour intensity. 1.00 is neutral, 0.00 is black and white." },
+    { SRC_GFX, 2, "Bloom", "Soft glow around bright lights and bright areas." },
+    { SRC_GFX, 3, "Ambient Occlusion", "Soft shadows in corners and where objects meet the ground." },
+    { SRC_GFX, 4, "Depth of Field", "Blurs the far distance so what is close to you stands out." },
+    { SRC_GFX, 6, "Colour Adjustments", "Turns on the Gamma, Brightness and Saturation sliders below. Off shows the original colours." },
+    { SRC_GFX, 7, "Gamma", "Lightens or darkens the middle shades, leaving the darkest and brightest parts alone. 1.00 is neutral." },
+    { SRC_GFX, 8, "Brightness", "Makes the whole picture lighter or darker. 0.00 is neutral." },
+    { SRC_GFX, 9, "Saturation", "Colour strength. 1.00 is neutral, 0.00 is black and white." },
 #ifdef __EMSCRIPTEN__
     { SRC_GFX, 10, "Texture Packs", "Choose a texture pack ZIP. Installs and applies without restarting." },
 #else
-    { SRC_GFX, 10, "Texture Packs", "Install or switch replacement texture packs. Needs a restart." },
+    { SRC_GFX, 10, "Texture Packs", "Replacement textures made by the community. Install one from its zip or switch between them. Changes need a restart." },
 #endif
-    { SRC_GFX, 11, "HD Models", "Install HD character models from their zips. Needs a restart." },
+    { SRC_GFX, 11, "HD Models", "High-detail character models. Install each one from its zip, then turn it On or Off." },
 };
 
 const GroupRow kControlsRows[] = {
-    { SRC_MODS, 0, "Control Scheme", "Classic: the stick moves the cursor, as on GameCube. Mouse Cursor: aim with the mouse." },
-    { SRC_ADV, 0, "Mouse Sensitivity", "How far the cursor moves for each movement of the mouse." },
-    { SRC_MODS, 3, "Mouse Wheel", "What the wheel does: change the Pikmin colour to throw, or zoom the camera." },
-    { SRC_MODS, 2, "Hold to Pluck", "Keep the button held to pluck sprouts one after another." },
+    { SRC_MODS, 0, "Control Scheme", "Classic: the stick moves the cursor, as on GameCube. Mouse Cursor: aim the cursor with the mouse." },
+    { SRC_ADV, 0, "Mouse Sensitivity", "How far the cursor moves when you move the mouse." },
+    { SRC_MODS, 3, "Mouse Wheel", "What the mouse wheel does: choose the Pikmin colour to throw, or zoom the camera." },
+    { SRC_MODS, 2, "Hold to Pluck", "Hold the pluck button to pull up sprouts one after another." },
     { SRC_MODS, 34, "Whistle Pluck", "Hold the whistle over sprouts to pluck them one after another." },
     { SRC_MODS, 17, "Throw While Moving", "Throw Pikmin while running, instead of Olimar stopping first." },
-    { SRC_MODS, 22, "Cancel Throw With B", "While holding a Pikmin with A, press B to put it back in the squad." },
-    { SRC_MODS, 33, "Quick Grab", "The Pikmin to throw appears in Olimar's hand at once, so throwing is just as fast with the squad behind him." },
-    { SRC_MODS, 39, "Pikmin 2 Selection", "D-pad as in Pikmin 2: Left/Right keeps the chosen colour for every throw, and with A held Up/Down picks leaf, bud, flower or a Yellow with a bomb rock. Off: Left/Right only picks the next throw." },
-    { SRC_MODS, 24, "Onion: Y for Steps of 10", "In the Onion menu, hold Y while moving up or down to move 10 Pikmin at a time." },
-    { SRC_MODS, 35, "Bomb Control", "Bomb button (B / assign on a pad): a Yellow with a bomb rock throws it at the cursor, or drops it lit at its feet if the cursor is too close. Ones already thrown go first." },
-    { SRC_MODS, 15, "Lock-On", "Automatic: locks onto the nearest enemy or object as you approach. Manual: lock with the Lock-On button (bindable in Controls)." },
+    { SRC_MODS, 22, "Cancel a Throw", "While holding a Pikmin ready to throw, press B (the cancel button) to put it back in the squad." },
+    { SRC_MODS, 33, "Quick Grab", "The next Pikmin jumps straight into Olimar's hand, so throwing stays fast even with the squad behind him." },
+    { SRC_MODS, 39, "Pikmin 2 Selection", "D-pad as in Pikmin 2. Left/Right chooses the colour for every throw. Hold A and press Up/Down to pick leaf, bud, flower or a Yellow with a bomb rock. Off: Left/Right only picks the next throw." },
+    { SRC_MODS, 24, "Onion: Move 10 at a Time", "In the Onion menu, hold Y while pressing up or down to move 10 Pikmin at a time." },
+    { SRC_MODS, 35, "Bomb Control", "Bomb button (B on keyboard, set a controller button in Controls): a Yellow with a bomb rock throws it at the cursor, or drops it at its feet if the cursor is too close. Yellows already thrown go first." },
+    { SRC_MODS, 15, "Lock-On", "Automatic: locks onto the nearest enemy or object as you approach. Manual: press the Lock-On button (set it in Controls)." },
     { SRC_MODS, 16, "Charge", "With a target locked, send the whole squad at it." },
-    { SRC_ADV, 1, "Stick Dead Zone", "Ignores small stick movements. Raise it if a worn stick drifts." },
-    { SRC_ADV, 2, "Stick Invert (X/Y)", "Inverts the movement stick." },
-    { SRC_ADV, 3, "C-Stick Invert (X/Y)", "Inverts the right stick (C-Stick)." },
+    { SRC_ADV, 1, "Stick Dead Zone", "Ignores tiny stick movements. Raise it if the cursor or Olimar moves on its own (stick drift)." },
+    { SRC_ADV, 2, "Stick Invert", "Flips the movement stick: horizontal, vertical or both." },
+    { SRC_ADV, 3, "Camera Stick Invert", "Flips the right stick (the GameCube C-Stick): horizontal, vertical or both." },
 #ifndef __EMSCRIPTEN__
-    { SRC_ADV, 4, "Gyro Aiming", "Aim the cursor by turning a gyro pad or the phone. In first person it looks around." },
-    { SRC_ADV, 5, "Gyro Sensitivity", "How far the cursor moves when you turn the pad." },
-    { SRC_ADV, 6, "Gyro Invert (X/Y)", "Inverts gyro aiming: none, horizontal, vertical or both." },
-    { SRC_ADV, 7, "Gyro Calibrate", "Put the pad or phone down, keep it still and press A. Fixes a drifting cursor." },
-    { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of Olimar. A: assign it." },
+    { SRC_ADV, 4, "Gyro Aiming", "Aim the cursor by tilting a controller with motion sensors, or your phone. In first person it looks around." },
+    { SRC_ADV, 5, "Gyro Sensitivity", "How far the cursor moves when you tilt the controller." },
+    { SRC_ADV, 6, "Gyro Invert", "Flips gyro aiming: none, horizontal, vertical or both." },
+    { SRC_ADV, 7, "Gyro Calibrate", "Put the controller or phone down, keep it still and press A. Fixes a cursor that drifts on its own." },
+    { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of Olimar. A: choose the button." },
 #endif
-    { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key, Right: second key, Left: defaults. While waiting, Del clears the slot. Shift, Ctrl and Alt can be bound." },
-    { SRC_PADS, 0, "Gamepad Bindings", "Choose the pad button for each action." },
+    { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key. Right: second key. Left: back to default. While waiting, Delete clears it. Shift, Ctrl and Alt can be used." },
+    { SRC_PADS, 0, "Controller Bindings", "Choose the controller button for each action." },
 };
 
 const GroupRow kCameraRows[] = {
-    { SRC_MODS, 14, "Free Camera", "Turn the camera as in Pikmin 3: hold Left Shift and move the mouse, or use the right stick on a controller. Swarm gets its own button." },
-    { SRC_MODS, 38, "Free Camera Pad Sensitivity", "How fast the right stick turns the free camera on a controller. 100% is the default." },
-    { SRC_MODS, 18, "First Person", "Allows a view from Olimar's helmet. Switch in game with its button (V / L3)." },
+    { SRC_MODS, 14, "Free Camera", "Turn the camera freely, as in Pikmin 3. Mouse: push the cursor against the edge of its circle. Controller: right stick. L puts the camera back behind Olimar. Swarming moves to D-pad Down, or to its own Swarm button." },
+    { SRC_MODS, 38, "Free Camera Speed", "How fast the right stick turns the free camera. 100% is the default." },
+    { SRC_MODS, 18, "First Person", "Look at the world from inside Olimar's helmet. Switch in game with the First Person button (V on keyboard, L3 on a controller)." },
     { SRC_MODS, 6, "Co-op Split Screen", "How the screen divides in two-player co-op." },
     { SRC_MODS, 7, "Co-op Merged Camera", "Joins both halves into one view while the captains are close." },
 };
@@ -6355,21 +7674,22 @@ const GroupRow kCameraRows[] = {
 const GroupRow kGameplayRows[] = {
     { SRC_MODS, 25, "Instant Whistle Response", "Whistled Pikmin join the squad at once, without stopping to turn and look first." },
     { SRC_MODS, 1, "Chain Pikmin Actions", "Pikmin that finish a task go on to the next one nearby." },
-    { SRC_MODS, 8, "Better Pathfinding", "Gets Pikmin moving again when they stall on their route." },
+    { SRC_MODS, 8, "Better Pathfinding", "Smarter Pikmin: they get unstuck on their way, run back to the squad when thrown with nothing to do, and no longer stop to pull nectar grass they walk past (swarm them at it instead)." },
     { SRC_MODS, 9, "Blues Only In Water", "Only blue Pikmin walk into water on their own." },
     { SRC_MODS, 23, "No Tripping", "Pikmin running in the squad never trip and fall behind." },
     { SRC_MODS, 40, "Eternal Night", "Always night, whatever the day length: night lighting, and the moon crosses the day bar instead of the sun." },
-    { SRC_MODS, 10, "Idle Pikmin Counter", "Shows how many Pikmin are standing idle." },
-    { SRC_MODS, 36, "Hide Olimar's Texts", "Skip the text boxes Olimar shows while you play: first Pikmin, ship parts, tips. The ending texts stay." },
+    { SRC_MODS, 41, "Fireflies", "Fireflies drift around the field, by day or by night." },
+    { SRC_MODS, 10, "Idle Pikmin Counter", "Shows how many Pikmin are standing around with nothing to do." },
+    { SRC_MODS, 36, "Hide Olimar's Messages", "Skips the messages Olimar shows while you play (first Pikmin, ship parts, tips). The ending messages still appear." },
 };
 
 // Infinite Day (fila 13) vive dentro de Day Length como su última opción.
 const GroupRow kCheatsRows[] = {
-    { SRC_MODS, 5, "Day Length", "Minutes of daylight per day. 13.5 is the original; Infinite stops the sun." },
+    { SRC_MODS, 5, "Day Length", "Minutes of daylight per day. 13.5 is the original; Infinite stops the sun, except on the last day." },
     { SRC_MODS, 11, "Olimar Health", "Olimar's toughness, as a share of the original. Infinite takes no damage." },
     { SRC_MODS, 12, "Enemy Health", "Enemy toughness, as a share of the original. Insta Kill drops them in one hit." },
     { SRC_MODS, 4, "Pikmin Limit", "Most Pikmin on the field at once. 100 is the original; more costs performance." },
-    { SRC_MODS, 21, "Throw Speed", "Speed of Olimar's grab and throw, so how fast you can throw. 100% is the original." },
+    { SRC_MODS, 21, "Throw Speed", "How fast Olimar grabs and throws Pikmin. 100% is the original." },
     { SRC_MODS, 20, "Whistle Radius", "Size of the whistle circle at full charge. 100% is the original." },
     { SRC_MODS, 26, "Invincible Pikmin", "Pikmin never die: no attacks, fire, water, gas or crushing." },
     { SRC_MODS, 27, "All Flowers", "Every Pikmin grows a flower as soon as it is plucked or born." },
@@ -6382,7 +7702,7 @@ const GroupRow kCheatsRows[] = {
 #if PIKI_DEBUG_KEYS
     { SRC_MODS, 19, "Debug Keys (F5-F8)",
       "F5: add up to 20 red leaf Pikmin to the red Onion (requires an Onion and respects the Pikmin limit).\n"
-      "F6: advance the clock by one in-game hour, capped just before sunset (with Infinite Day it only moves the lighting).\n"
+      "F6: advance the clock by one in-game hour, capped just before sunset (with Infinite Day it only moves the lighting, except on the last day).\n"
       "F7: grant the Main Engine, top red Onion stock up to 20, and trigger the normal end-of-day sequence.\n"
       "F8 (VS only): append both captains' XYZ coordinates to vs_positions.txt." },
 #endif
@@ -6396,10 +7716,13 @@ const GroupRow kDataRows[] = {
     { SRC_DATA, 0, "Export save to ZIP", "Copies your memory card to a ZIP file you choose." },
     { SRC_DATA, 1, "Import save from ZIP", "Replaces your memory card with one from a ZIP file." },
 #else
-    { SRC_DATA, 0, "Export save to ZIP", "Desktop saves are plain files in the 'save' folder. Copy it to back up." },
-    { SRC_DATA, 1, "Import save from ZIP", "Desktop saves are plain files in the 'save' folder. Replace it to restore." },
+    { SRC_DATA, 0, "Open Save Folder", "Opens the folder with your saves (card0, card1). Copy it to back up your progress or move it to another computer." },
 #endif
     { SRC_DATA, 2, "Reset all settings to defaults", "Puts every setting back to its default. Saves are not touched." },
+#if PC_ONLINE_ENABLED // online features are off project-wide (pc_online_switch.h)
+    { SRC_DATA, 3, "Online co-op: leave / rejoin", "As an online guest: stop playing and watch the host's captain while keeping your place. Choose it again, or press Start, to ask to rejoin; the host lets you back in outside menus and cutscenes." },
+    { SRC_DATA, 4, "Online over the Internet", "On: when you create or join an online room, the game asks a free public server (Google or Cloudflare STUN) for this connection's Internet address, so a friend on another network can connect. Only that address is exchanged; the game itself goes directly between the two players. Some networks still block it (often mobile data on both sides). Off: no outside server is contacted, and only players on the same network or a VPN can connect." },
+#endif
 };
 
 template <size_t N> constexpr int countOf(const GroupRow (&)[N]) { return (int)N; }
@@ -6490,7 +7813,7 @@ const GroupSection kSections[] = {
     { PC_SET_GROUP_CAMERA, 3, "CO-OP" },
     { PC_SET_GROUP_GAMEPLAY, 0, "PIKMIN" },
     { PC_SET_GROUP_GAMEPLAY, 5, "WORLD" },
-    { PC_SET_GROUP_GAMEPLAY, 6, "HUD" },
+    { PC_SET_GROUP_GAMEPLAY, 7, "HUD" },
     { PC_SET_GROUP_CHEATS, 0, "DAY & HEALTH" },
     { PC_SET_GROUP_CHEATS, 3, "PIKMIN" },
     { PC_SET_GROUP_CHEATS, 9, "OLIMAR" },
@@ -6545,6 +7868,17 @@ bool hardLocked(const GroupRow& r) {
 }
 
 // Motivo por el que una fila no se puede cambiar ahora, o nullptr si se puede.
+// Online co-op lives in the netplay session (netplay builds only): weak
+// references, so builds without it link and simply never enable the row.
+}
+bool pc_netplay_online_is_guest(void);
+bool pc_netplay_online_spectating(void);
+void pc_netplay_online_request_leave(void);
+void pc_netplay_online_request_rejoin(void);
+namespace {
+bool online_guest() { return pc_netplay_online_is_guest != nullptr && pc_netplay_online_is_guest(); }
+bool online_spectating() { return pc_netplay_online_spectating != nullptr && pc_netplay_online_spectating(); }
+
 const char* disabledReason(const GroupRow& r) {
     if (hardLocked(r)) return "Locked by Hard mode for this save file.";
     switch (r.src) {
@@ -6562,10 +7896,13 @@ const char* disabledReason(const GroupRow& r) {
         if (!sPending.gyroEnabled) return "Turn on Gyro Aiming first.";
         break;
     case SRC_GFX:
-        if (r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading) return "Turn on Colour Grading first.";
+        if (r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading) return "Turn on Colour Adjustments first.";
         break;
     case SRC_MODS:
         if (r.idx == 16 && !sPending.lockOn) return "Turn on Lock-On first.";
+        break;
+    case SRC_DATA:
+        if (r.idx == 3 && !online_guest()) return "Only while you are the guest of an online co-op session.";
         break;
     default:
         break;
@@ -6648,7 +7985,7 @@ bool pc_settings_row_is_action(int group, int row) {
 #ifdef __EMSCRIPTEN__
     if (r && r->src == SRC_MAIN && r->idx == ROW_DISPLAY_MODE) return true;
 #endif
-    return r && (r->src == SRC_DATA || (r->src == SRC_ADV && r->idx == 7));
+    return r && ((r->src == SRC_DATA && r->idx != 4) || (r->src == SRC_ADV && r->idx == 7));
 }
 
 const char* pc_settings_row_help(int group, int row) {
@@ -6656,9 +7993,8 @@ const char* pc_settings_row_help(int group, int row) {
         static char help[320];
         const PcAchievementInfo& info = pc_achievement_info(r->idx);
         const char* blocked = pc_achievements_blocked_reason();
-        snprintf(help, sizeof(help), "%s\n\n%s  %d pts.  Total: %d / %d  (%d / %d pts)%s%s", info.description,
-                 pc_achievement_unlocked(r->idx) ? "Unlocked." : "Locked.", info.points, pc_achievements_unlocked_count(),
-                 (int)PC_ACH_COUNT, pc_achievements_points(), pc_achievements_total_points(), blocked ? "\n\n" : "",
+        snprintf(help, sizeof(help), "%s\n\n%s%s%s", info.description,
+                 pc_achievement_unlocked(r->idx) ? "Unlocked." : "Locked.", blocked ? "\n\n" : "",
                  blocked ? blocked : "");
         return help;
     }
@@ -6745,11 +8081,13 @@ void pc_settings_row_value(int group, int row, char* out, unsigned long n) {
 #elif defined(__ANDROID__)
             if (r->idx < 2) snprintf(out, n, "%s", sSaveTransferActive ? "Opening picker..." : "A: choose file");
 #else
-            if (r->idx < 2) snprintf(out, n, "save / card0, card1");
+            if (r->idx < 2) snprintf(out, n, "A: open");
 #endif
-            else snprintf(out, n, "A: reset");
+            else if (r->idx == 2) snprintf(out, n, "A: reset");
+            else if (r->idx == 4) snprintf(out, n, "%s", sPending.onlineStun ? "On" : "Off");
+            else snprintf(out, n, "%s", online_guest() ? (online_spectating() ? "A: rejoin" : "A: leave") : "-");
             break;
-        case SRC_ACH: snprintf(out, n, "%d pts", pc_achievement_info(r->idx).points); break;
+        case SRC_ACH: break;
         case SRC_KEYS:
         case SRC_PADS: snprintf(out, n, "Open  >"); break;
         case SRC_RECENTER: {
@@ -6786,7 +8124,7 @@ void pc_settings_row_value(int group, int row, char* out, unsigned long n) {
     }
     if (group == PC_SET_PICKER_HDMODELS) {
         if (sTexturePackPickerActive && sHdModelsSelection == row) snprintf(out, n, "Installing...");
-        else snprintf(out, n, "%s", hdModelInstalled(row) ? "Installed" : "Not installed");
+        else snprintf(out, n, "%s", !hdModelInstalled(row) ? "Not installed" : (pc_settings_get_hd_model_enabled(row) ? "On" : "Off"));
     }
     if (group == PC_SET_PICKER_RESOLUTION) {
         std::vector<int> c = pickerResolutionChoices();
@@ -6817,9 +8155,17 @@ void pc_settings_row_change(int group, int row, int dir, bool ok) {
             break;
         case SRC_MODS: modsRowChange(r->idx, left, right); break;
         case SRC_DATA:
+            if (r->idx == 4) {
+                if (ok || left || right) sPending.onlineStun = !sPending.onlineStun;
+                return;
+            }
             if (!ok) return;
             if (r->idx < 2) saveDataRowAction(r->idx);
-            else resetToDefaults();
+            else if (r->idx == 2) resetToDefaults();
+            else if (online_guest()) {
+                if (online_spectating()) pc_netplay_online_request_rejoin();
+                else pc_netplay_online_request_leave();
+            }
             break;
         default: break; // selectores
         }
@@ -6845,6 +8191,9 @@ void pc_settings_row_change(int group, int row, int dir, bool ok) {
         else if (dir) pendingPadBinds()[row] = -1;
     } else if (group == PC_SET_PICKER_TEXPACKS && ok) {
         texturePacksRowAction(row, pc_texpack_list_packs());
+    } else if (group == PC_SET_PICKER_HDMODELS && dir) {
+        sHdModelsSelection = row;
+        hdModelsToggle(row);
     } else if (group == PC_SET_PICKER_HDMODELS && ok) {
         sHdModelsSelection = row;
         hdModelsRowAction(row);
@@ -7087,6 +8436,7 @@ int pc_settings_cli(int argc, char** argv) {
     SDL_InitSubSystem(SDL_INIT_VIDEO);
     sHeadless = true;
     loadConfig();
+    applyLauncherPackActivation();
     sPending = sConfig;
     rebuildResolutionList();
     int idx = sHadConfigFile ? resolutionIndexFor(sPending.windowWidth, sPending.windowHeight) : -1;

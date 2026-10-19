@@ -7,6 +7,7 @@
 #ifdef __EMSCRIPTEN__
 #include "web/pc_web_runtime.h"
 #endif
+#include "pc_speedrun.h"
 #if PIKI_PC_TOUCH
 #include "gl/pc_gfx.h"
 #include "touch/pc_touch.h"
@@ -170,14 +171,22 @@ static int sLogicalRetraceInterval = 1;
 static Uint32 sMousePressedMask = 0; // buttons pressed since the last take
 static int sMouseWheelSteps = 0;
 static float sTouchZoomDelta = 0.0f;
-static float sTouchCameraDrag = 0.0f;
-static float sCameraPitchDrag = 0.0f;
+// Co-op: giro y cabeceo de la cámara de cada jugador (docs/PLAN_COOP.md §6.7).
+// sInputPlayer es el jugador de lo que se está leyendo: el teclado y el ratón
+// son de quien tenga el teclado, cada mando de su jugador, la pantalla táctil
+// del 1.
+static float sCameraDragP[2]  = { 0.0f, 0.0f };
+static float sCameraPitchP[2] = { 0.0f, 0.0f };
+static int sInputPlayer       = 0;
 static double sTargetRefreshRate = 60.0;
 static std::chrono::steady_clock::time_point sNextPresentDeadline;
 
 // Settings-menu video state (PC only).
 static int sDisplayMode = PC_WINDOW_FULLSCREEN_WINDOWED;
 static bool sVsyncEnabled = true;   // presentation pacing on/off
+static bool sMonitorVsyncMode = false;
+static bool sMonitorVsyncFallback = false;
+static int sDriverSwapInterval = 0;
 static char sLastVideoError[256] = { 0 };
 
 // Keyboard remapping state (PC only).
@@ -190,12 +199,13 @@ static bool sSwarmHeld = false; // PC_KEY_ACT_SWARM sampled by the last poll
 // Lock-On y Charge se consumen como flanco: el bucle sondea el mando muchas
 // veces entre ticks lógicos, así que la pulsación se guarda hasta que alguien
 // la lee, y el estado anterior evita que se repita mientras se mantiene.
-static bool sLockOnWasDown = false;
-static bool sFirstPersonWasDown = false;
+// Por jugador (co-op): cada uno con su teclado o su mando.
+static bool sLockOnWasDown[2]      = { false, false };
+static bool sFirstPersonWasDown[2] = { false, false };
 static bool sGyroRecenterWasDown = false;
-static bool sSwarmWasDown  = false;
-static bool sLockOnPending = false;
-static bool sSwarmPending  = false;
+static bool sSwarmWasDown[2]  = { false, false };
+static bool sLockOnPending[2] = { false, false };
+static bool sSwarmPending[2]  = { false, false };
 
 bool pc_window_swarm_held(void) { return sSwarmHeld; }
 static bool sKeyBindingsInitialized = false;
@@ -222,6 +232,7 @@ static bool sMouseWarped = false;
 
 // Control mode
 static int sControlMode = PC_CONTROL_CLASSIC;
+static int effectiveControlMode() { return pc_speedrun_active() ? PC_CONTROL_CLASSIC : sControlMode; }
 static float sMouseSensitivity = 2.0f;
 static bool sSettingsMenuOpen = false;
 
@@ -259,6 +270,7 @@ const SDL_Scancode kDefaultKeyBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_LOCKON      */ SDL_SCANCODE_R, // F chocaba con C-Stick Left
     /* PC_KEY_ACT_FIRSTPERSON */ SDL_SCANCODE_V,
     /* PC_KEY_ACT_GYRO_RECENTER */ SDL_SCANCODE_UNKNOWN, // el giroscopio va en el mando
+    /* PC_KEY_ACT_SPEEDRUN_RESET */ SDL_SCANCODE_F5,
 };
 
 SDL_Scancode pc_window_default_key_binding2(int action) {
@@ -296,6 +308,7 @@ const int kDefaultGamepadBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_LOCKON      */ SDL_CONTROLLER_BUTTON_RIGHTSTICK,
     /* PC_KEY_ACT_FIRSTPERSON */ SDL_CONTROLLER_BUTTON_LEFTSTICK,
     /* PC_KEY_ACT_GYRO_RECENTER */ -1, // sin botón libre por defecto; se asigna en Controls
+    /* PC_KEY_ACT_SPEEDRUN_RESET */ -1, // sin botón libre por defecto; se asigna en Controls
 };
 
 // Action names for UI display.
@@ -305,7 +318,7 @@ static const char* kKeyActionNames[PC_KEY_ACT_COUNT] = {
     "Stick Up", "Stick Down", "Stick Left", "Stick Right",
     "C-Stick Up", "C-Stick Down", "C-Stick Left", "C-Stick Right",
     "Swarm to cursor",
-    "Lock-On", "First Person", "Gyro Recenter",
+    "Lock-On", "First Person", "Gyro Recenter", "Speedrun Reset",
 };
 
 static void initKeyBindings() {
@@ -439,6 +452,93 @@ static const char* mouseButtonAliasForTag(char tag)
 	}
 }
 
+int pc_window_prompt_uses_gamepad(void) { return promptUsesGamepad() ? 1 : 0; }
+
+// Nombre corto de lo que hay que pulsar para el botón de GameCube `tag`, en
+// el dispositivo en uso: la tecla (o botón del ratón) asignada en F1, o el
+// botón del mando asignado. Para los iconos de botón de los mensajes.
+void pc_window_key_prompt_label(char tag, char* buf, unsigned bufSize)
+{
+	if (!buf || bufSize == 0)
+		return;
+	buf[0] = '\0';
+	if (promptUsesGamepad()) {
+		int action = -1;
+		switch (tag) {
+		case 's': snprintf(buf, bufSize, "L Stick"); return;
+		case 'c': snprintf(buf, bufSize, "R Stick"); return;
+		case 't': snprintf(buf, bufSize, "D-Pad"); return;
+		case 'p': action = PC_KEY_ACT_START; break;
+		default: action = messageTagToAction(tag); break;
+		}
+		if (action < 0)
+			return;
+		const int button = pc_window_get_gamepad_binding(action);
+		snprintf(buf, bufSize, "%s", button < 0 ? pc_window_get_key_action_name(action) : pc_window_get_gamepad_button_name(button));
+		static const struct {
+			const char* from;
+			const char* to;
+		} kPadShort[] = {
+			{ "L Shoulder", "LB" }, { "R Shoulder", "RB" }, { "L Trigger", "LT" }, { "R Trigger", "RT" },
+			{ "L Stick", "L3" },    { "R Stick", "R3" },    { "Back", "Select" },
+		};
+		for (const auto& e : kPadShort) {
+			if (strcmp(buf, e.from) == 0) {
+				snprintf(buf, bufSize, "%s", e.to);
+				break;
+			}
+		}
+		return;
+	}
+	auto compact4 = [&](int up, int left, int down, int right, const char* fallback) {
+		const int acts[4] = { up, left, down, right };
+		char out[8]       = { 0 };
+		for (int i = 0; i < 4; i++) {
+			const SDL_Scancode k = pc_window_get_key_binding(acts[i]);
+			const char* name     = pc_bind_is_mouse(k) ? nullptr : SDL_GetScancodeName(k);
+			if (!name || !name[0] || name[1] != '\0') {
+				snprintf(buf, bufSize, "%s", fallback);
+				return;
+			}
+			out[i] = name[0];
+		}
+		snprintf(buf, bufSize, "%s", out);
+	};
+	switch (tag) {
+	case 's':
+		compact4(PC_KEY_ACT_STICK_UP, PC_KEY_ACT_STICK_LEFT, PC_KEY_ACT_STICK_DOWN, PC_KEY_ACT_STICK_RIGHT, "Move");
+		return;
+	case 'c':
+		compact4(PC_KEY_ACT_CSTICK_UP, PC_KEY_ACT_CSTICK_LEFT, PC_KEY_ACT_CSTICK_DOWN, PC_KEY_ACT_CSTICK_RIGHT, "C-Stick");
+		return;
+	case 't':
+		compact4(PC_KEY_ACT_DPAD_UP, PC_KEY_ACT_DPAD_LEFT, PC_KEY_ACT_DPAD_DOWN, PC_KEY_ACT_DPAD_RIGHT, "D-Pad");
+		return;
+	case 'p':
+		snprintf(buf, bufSize, "%s", pc_window_binding_name(pc_window_get_key_binding(PC_KEY_ACT_START)));
+		return;
+	default: break;
+	}
+	const int action = messageTagToAction(tag);
+	if (action < 0)
+		return;
+	snprintf(buf, bufSize, "%s", pc_window_binding_name(pc_window_get_key_binding(action)));
+	static const struct {
+		const char* from;
+		const char* to;
+	} kShort[] = {
+		{ "Left Shift", "LShift" }, { "Right Shift", "RShift" }, { "Left Ctrl", "LCtrl" }, { "Right Ctrl", "RCtrl" },
+		{ "Left Alt", "LAlt" },     { "Right Alt", "RAlt" },     { "Return", "Enter" },    { "Escape", "Esc" },
+		{ "Backspace", "Bksp" },    { "CapsLock", "Caps" },      { "Left GUI", "LWin" },   { "Right GUI", "RWin" },
+	};
+	for (const auto& e : kShort) {
+		if (strcmp(buf, e.from) == 0) {
+			snprintf(buf, bufSize, "%s", e.to);
+			break;
+		}
+	}
+}
+
 void pc_window_message_control_label(char tag, char* buf, unsigned bufSize)
 {
 	if (!buf || bufSize == 0)
@@ -494,7 +594,7 @@ void pc_window_message_control_label(char tag, char* buf, unsigned bufSize)
 	snprintf(buf, bufSize, "%s", pc_window_binding_name(pc_window_get_key_binding(action)));
 
 	// Mouse buttons are fixed conveniences (not F1 remaps): L=A, R=B, M=Z.
-	if (sControlMode != PC_CONTROL_CLASSIC) {
+	if (effectiveControlMode() != PC_CONTROL_CLASSIC) {
 		const char* mouse = mouseButtonAliasForTag(tag);
 		if (mouse) {
 			const size_t used = strlen(buf);
@@ -687,6 +787,12 @@ bool pc_window_init(const char* title, int width, int height) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#elif defined(__APPLE__)
+        // macOS no ofrece perfil de compatibilidad 3.x: o GL 2.1 o core 3.2+.
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
 #else
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
@@ -742,12 +848,15 @@ bool pc_window_init(const char* title, int width, int height) {
     pc_icon_apply(sWindow);
     sGLContext = SDL_GL_CreateContext(sWindow);
     if (!sGLContext) {
-#if !PIKI_USE_GLES
+#if !PIKI_USE_GLES && !defined(__APPLE__)
         printf("[PC Port Warning] SDL_GL_CreateContext Compatibility Profile failed: %s. Retrying with default profile...\n", SDL_GetError());
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, 0);
         sGLContext = SDL_GL_CreateContext(sWindow);
+#elif defined(__APPLE__) && !PIKI_USE_GLES
+        // GL 2.1 no puede con el render, así que en macOS no se reintenta.
+        printf("[PC Port Error] SDL_GL_CreateContext GL 4.1 core failed: %s\n", SDL_GetError());
 #else
         printf("[PC Port Error] SDL_GL_CreateContext ES 3.0 failed: %s\n", SDL_GetError());
 #endif
@@ -813,6 +922,12 @@ bool pc_window_init(const char* title, int width, int height) {
 
 // Vuelca el estado de un mando SDL sobre un pad GC. Devuelve true si el mando
 // se está usando (para decidir entre iconos de teclado y de mando).
+// Free Camera se queda el stick derecho, pero el mapa lo necesita para el
+// zoom (issue #76): se guarda aquí el eje vertical aunque no llegue al pad.
+static float sFreeCamSubY[2] = { 0.0f, 0.0f };
+extern "C" float pc_window_free_camera_sub_y_for(int player) { return sFreeCamSubY[player == 1 ? 1 : 0]; }
+extern "C" float pc_window_free_camera_sub_y(void) { return sFreeCamSubY[0]; }
+
 static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& stickX, s8& stickY,
                                    s8& substickX, s8& substickY, u8& triggerL, u8& triggerR, bool& swarmHeld)
 {
@@ -867,12 +982,15 @@ static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& sti
     if (sCStickInvert & 2) ry = -ry;
     // Mod "Free Camera": the right stick orbits instead of pushing the squad,
     // the way Pikmin 3 rearranged it. The squad moves to the Swarm button,
-    // which defaults to D-pad Down here because the mod frees it up.
+    // which has no default on the pad: every D-pad direction is already a
+    // Pikmin 2 action (sprays, maturity and colour of the held Pikmin), so it
+    // is left for the player to bind.
+    sFreeCamSubY[sInputPlayer] = 0.0f;
     if (pc_settings_get_free_camera()) {
+        if (abs(ry) > axisDeadZone) sFreeCamSubY[sInputPlayer] = pc_pad_axis_from_sdl(-ry) / 72.0f;
         if (abs(rx) > axisDeadZone) {
             pc_window_add_camera_drag(-(float)rx / 32767.0f * 0.02f * pc_settings_get_free_camera_pad_scale());
         }
-        if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) swarmHeld = true;
     } else {
         if (abs(rx) > axisDeadZone) substickX = pc_pad_axis_from_sdl(rx);
         if (abs(ry) > axisDeadZone) substickY = pc_pad_axis_from_sdl(-ry);
@@ -966,7 +1084,7 @@ void pc_window_poll_events(PADStatus* pad) {
                 // Issue #52: Escape (or the OS) can drop the mouse out of
                 // relative mode, which froze the cursor until the option was
                 // toggled. A click in the window takes it back.
-                if (!sSettingsMenuOpen && sControlMode == PC_CONTROL_MOUSE_CURSOR && !sMouseRelativeMode
+                if (!sSettingsMenuOpen && effectiveControlMode() == PC_CONTROL_MOUSE_CURSOR && !sMouseRelativeMode
                     && event.button.which != SDL_TOUCH_MOUSEID) {
                     sMouseRelativeMode = true;
                     SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -1024,7 +1142,7 @@ void pc_window_poll_events(PADStatus* pad) {
                 }
                 // Toggle relative mouse mode with Tab key
                 if (event.key.keysym.scancode == SDL_SCANCODE_TAB
-                    && sControlMode == PC_CONTROL_MOUSE_CURSOR && !sSettingsMenuOpen) {
+                    && effectiveControlMode() == PC_CONTROL_MOUSE_CURSOR && !sSettingsMenuOpen) {
                     sMouseRelativeMode = !sMouseRelativeMode;
                     SDL_SetRelativeMouseMode(sMouseRelativeMode ? SDL_TRUE : SDL_FALSE);
                     // Clear mouse deltas on relative mode toggle
@@ -1098,7 +1216,7 @@ void pc_window_poll_events(PADStatus* pad) {
     const Uint32 boundMouse = SDL_GetMouseState(NULL, NULL);
     // La segunda tecla con un clic solo cuenta fuera de Classic, como los clics
     // fijos que sustituye (en Classic el ratón no juega).
-    const bool mouseSecondOk = sControlMode != PC_CONTROL_CLASSIC;
+    const bool mouseSecondOk = effectiveControlMode() != PC_CONTROL_CLASSIC;
     auto held = [&](int action) {
         if (pc_window_binding_held(sKeyBindings[action], state, boundMouse)) return true;
         const int second = sKeyBindings2[action];
@@ -1117,22 +1235,16 @@ void pc_window_poll_events(PADStatus* pad) {
     initKeyBindings();
 
     // ── Keyboard Mapping (configurable) ──
-    // Mod "Free Camera": while the B key is held the mouse orbits instead of
-    // aiming, so that key stops sending B for as long as it is down. The
-    // whistle is unaffected in practice -- right click is wired to B on its
-    // own, below -- and with the mod off nothing changes.
-    // Solo mientras se juega, y solo las teclas: en menús, pausa y pantallas B
-    // vuelve a ser B, y un clic asignado a B siempre manda B (antes del #68 el
-    // clic derecho iba aparte y no se anulaba).
+    // Mod "Free Camera": con ratón la cámara gira empujando el cursor más
+    // allá de su límite (Navi), así que B ya no se reserva para girar.
     const int bindB1 = sKeyBindings[PC_KEY_ACT_B], bindB2 = sKeyBindings2[PC_KEY_ACT_B];
     const bool bKeyHeld = (!pc_bind_is_mouse(bindB1) && pc_window_binding_held(bindB1, state, boundMouse))
                        || (!pc_bind_is_mouse(bindB2) && pc_window_binding_held(bindB2, state, boundMouse));
-    const bool freeCamHeld = pc_settings_get_free_camera() && pc_settings_in_gameplay() && bKeyHeld;
 
     if (held(PC_KEY_ACT_A))        button |= PAD_BUTTON_A;
     const bool bMouseHeld = (pc_bind_is_mouse(bindB1) && pc_window_binding_held(bindB1, state, boundMouse))
                          || (pc_bind_is_mouse(bindB2) && mouseSecondOk && pc_window_binding_held(bindB2, state, boundMouse));
-    if (bMouseHeld || (bKeyHeld && !freeCamHeld)) button |= PAD_BUTTON_B;
+    if (bMouseHeld || bKeyHeld) button |= PAD_BUTTON_B;
     if (held(PC_KEY_ACT_X))        button |= PAD_BUTTON_X;
     if (held(PC_KEY_ACT_Y))        button |= PAD_BUTTON_Y;
     if (held(PC_KEY_ACT_Z))        button |= PAD_TRIGGER_Z;
@@ -1181,15 +1293,26 @@ void pc_window_poll_events(PADStatus* pad) {
     sSwarmHeld = held(PC_KEY_ACT_SWARM);
 
     {
-        const bool lockDown = held(PC_KEY_ACT_LOCKON);
-        if (lockDown && !sLockOnWasDown) sLockOnPending = true;
-        sLockOnWasDown = lockDown;
-        if (sSwarmHeld && !sSwarmWasDown) sSwarmPending = true;
-        sSwarmWasDown = sSwarmHeld;
-        // Este no se encola: entra y sale de la vista en el acto.
-        const bool fpDown = held(PC_KEY_ACT_FIRSTPERSON);
-        if (fpDown && !sFirstPersonWasDown) pc_first_person_toggle();
-        sFirstPersonWasDown = fpDown;
+        // Por jugador: el teclado de quien lo tenga y el mando de cada uno.
+        bool lockDown[2] = { false, false }, swarmDown[2] = { false, false }, fpDown[2] = { false, false };
+        const int kb = sKeyboardOwner == 1 ? 1 : 0;
+        lockDown[kb]  = held(PC_KEY_ACT_LOCKON);
+        swarmDown[kb] = sSwarmHeld;
+        fpDown[kb]    = held(PC_KEY_ACT_FIRSTPERSON);
+        for (int p = 0; p < 2; p++) {
+            if (SDL_GameController* ctl = sControllers[p]) {
+                lockDown[p] |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_LOCKON));
+                swarmDown[p] |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_SWARM));
+                fpDown[p] |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_FIRSTPERSON));
+            }
+            if (lockDown[p] && !sLockOnWasDown[p]) sLockOnPending[p] = true;
+            sLockOnWasDown[p] = lockDown[p];
+            if (swarmDown[p] && !sSwarmWasDown[p]) sSwarmPending[p] = true;
+            sSwarmWasDown[p] = swarmDown[p];
+            // Este no se encola: entra y sale de la vista en el acto.
+            if (fpDown[p] && !sFirstPersonWasDown[p]) pc_first_person_toggle_for(p);
+            sFirstPersonWasDown[p] = fpDown[p];
+        }
     }
 
     // Si el teclado está asignado a P2, lo que se ha leído arriba es suyo:
@@ -1203,6 +1326,7 @@ void pc_window_poll_events(PADStatus* pad) {
     }
 
     // ── Gamepad Mapping (overrides / merges if controller connected) ──
+    sInputPlayer = 0;
     if (sController) {
         usedGamepad = pc_window_read_gamepad(sController, button, stickX, stickY, substickX, substickY,
                                              triggerL, triggerR, sSwarmHeld);
@@ -1217,6 +1341,8 @@ void pc_window_poll_events(PADStatus* pad) {
             || (sController && pc_window_gamepad_bind_held(sController, pc_window_get_gamepad_binding(PC_KEY_ACT_GYRO_RECENTER)));
         if (recenterDown && !sGyroRecenterWasDown && !sSettingsMenuOpen) pc_gyro_request_recenter();
         sGyroRecenterWasDown = recenterDown;
+        // Lo que sigue (ratón) es de quien tenga el teclado.
+        sInputPlayer = sKeyboardOwner == 1 ? 1 : 0;
     }
 #if PIKI_PC_TOUCH
     // La capa táctil se suma al mando: cualquier toque la enseña, y cualquier
@@ -1232,7 +1358,7 @@ void pc_window_poll_events(PADStatus* pad) {
     // ── Mouse Input (Virtual Cursor) ──
     // In mouse modes: mouse controls virtual cursor (separate from movement stick)
     // Movement stick (stickX/stickY) comes from WASD or gamepad left stick
-    if (sControlMode != PC_CONTROL_CLASSIC) {
+    if (effectiveControlMode() != PC_CONTROL_CLASSIC) {
         int mouseX, mouseY;
         Uint32 mouseState = 0;
         bool isRelative = sMouseRelativeMode;
@@ -1251,12 +1377,10 @@ void pc_window_poll_events(PADStatus* pad) {
 
             const float sensitivity = sMouseSensitivity;
 
-            // Mod "Free Camera": while held, the motion orbits and the cursor
-            // stays where it was, so aiming resumes from the same spot.
             // Mod "First Person": the mouse always looks around (yaw and
             // pitch); the cursor is pinned in front of the view by Navi.
-            const bool firstPerson = pc_first_person_active() != 0;
-            if (freeCamHeld || firstPerson) {
+            const bool firstPerson = pc_first_person_active_for(sInputPlayer) != 0;
+            if (firstPerson) {
                 int winW = sWindowWidth;
                 int winH = sWindowHeight;
                 SDL_GetWindowSize(sWindow, &winW, &winH);
@@ -1335,8 +1459,10 @@ void pc_window_poll_events(PADStatus* pad) {
     sSwarmHeldP2 = kbSwarm2;
     if (sControllers[1] || sKeyboardOwner == 1) {
         u16 b2 = kbButton2; s8 sx2 = kbStickX2, sy2 = kbStickY2, cx2 = kbSubX2, cy2 = kbSubY2; u8 tl2 = kbTrigL2, tr2 = kbTrigR2;
-        if (sControllers[1])
+        if (sControllers[1]) {
+            sInputPlayer = 1;
             pc_window_read_gamepad(sControllers[1], b2, sx2, sy2, cx2, cy2, tl2, tr2, sSwarmHeldP2);
+        }
         pad[1].err          = PAD_ERR_NONE;
         pad[1].button       = b2;
         pad[1].stickX       = sx2;
@@ -1346,6 +1472,7 @@ void pc_window_poll_events(PADStatus* pad) {
         pad[1].triggerLeft  = tl2;
         pad[1].triggerRight = tr2;
     }
+    sInputPlayer = 0; // fuera del sondeo (táctil), jugador 1
 #if defined(PIKI_PC_PORT) && defined(PIKI_PC_SETTINGS_MENU)
     // While the settings menu is open, consume the pad so the game underneath
     // does not react to the same input.
@@ -1363,9 +1490,19 @@ void pc_window_poll_events(PADStatus* pad) {
 #endif
 }
 
+unsigned int pc_gfx_begin_swap_framebuffer(void);
+void pc_gfx_end_swap_framebuffer(unsigned int bound);
+
 void pc_window_swap_buffers(void) {
     if (sWindow) {
+#if defined(__APPLE__)
+        // macOS solo muestra el frame si aquí está enlazado el framebuffer por defecto.
+        const unsigned int renderTarget = pc_gfx_begin_swap_framebuffer();
+#endif
         SDL_GL_SwapWindow(sWindow);
+#if defined(__APPLE__)
+        pc_gfx_end_swap_framebuffer(renderTarget);
+#endif
         // VSync Off must not retain the software presentation limiter. Game
         // simulation uses the fixed-step scheduler independently.
 #ifndef __EMSCRIPTEN__
@@ -1414,6 +1551,42 @@ void pc_window_set_swap_interval(int interval) {
     SDL_GL_SetSwapInterval(0);
     sLogicalRetraceInterval = interval;
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
+}
+
+static void pc_window_apply_monitor_vsync(void) {
+    const int wanted = sMonitorVsyncMode && sVsyncEnabled && !sMonitorVsyncFallback ? 1 : 0;
+    if (wanted == sDriverSwapInterval) return;
+    if (SDL_GL_SetSwapInterval(wanted) == 0) {
+        sDriverSwapInterval = wanted;
+        return;
+    }
+    sDriverSwapInterval = 0;
+    if (wanted != 0) {
+        sMonitorVsyncFallback = true;
+        SDL_GL_SetSwapInterval(0);
+        printf("[PC Port] Driver VSync unavailable: %s; using software monitor pacing\n", SDL_GetError());
+    }
+}
+
+void pc_window_set_monitor_vsync_mode(bool enabled) {
+    if (enabled != sMonitorVsyncMode) {
+        sMonitorVsyncMode = enabled;
+        // A genuine mode change is allowed to retry a driver which may now be
+        // attached to another display. Repeated setFrameRate calls do not keep
+        // defeating the watchdog fallback.
+        sMonitorVsyncFallback = false;
+    }
+    pc_window_apply_monitor_vsync();
+}
+
+bool pc_window_monitor_vsync_locked(void) {
+    return sMonitorVsyncMode && sVsyncEnabled && !sMonitorVsyncFallback && sDriverSwapInterval == 1;
+}
+
+void pc_window_monitor_vsync_fallback(void) {
+    if (!sMonitorVsyncMode || sMonitorVsyncFallback) return;
+    sMonitorVsyncFallback = true;
+    pc_window_apply_monitor_vsync();
 }
 
 void pc_window_shutdown(void) {
@@ -1540,6 +1713,7 @@ double pc_window_get_refresh_rate(void) {
 
 void pc_window_set_vsync_enabled(bool enabled) {
     sVsyncEnabled = enabled;
+    pc_window_apply_monitor_vsync();
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
 }
 
@@ -1608,12 +1782,26 @@ void pc_window_discard_button_presses(void) { sLastPressTaken = sLastPressSerial
 
 bool pc_window_swarm_held_p2(void) { return sSwarmHeldP2; }
 
-bool pc_window_take_lockon_press(void) { const bool v = sLockOnPending; sLockOnPending = false; return v; }
-bool pc_window_take_swarm_press(void) { const bool v = sSwarmPending; sSwarmPending = false; return v; }
+bool pc_window_take_lockon_press_for(int player)
+{
+    bool& pending  = sLockOnPending[player == 1 ? 1 : 0];
+    const bool v   = pending;
+    pending        = false;
+    return v;
+}
+bool pc_window_take_swarm_press_for(int player)
+{
+    bool& pending  = sSwarmPending[player == 1 ? 1 : 0];
+    const bool v   = pending;
+    pending        = false;
+    return v;
+}
+bool pc_window_take_lockon_press(void) { return pc_window_take_lockon_press_for(0); }
+bool pc_window_take_swarm_press(void) { return pc_window_take_swarm_press_for(0); }
 
-void pc_window_request_lockon_press(void) { sLockOnPending = true; }
+void pc_window_request_lockon_press(void) { sLockOnPending[0] = true; }
 void pc_window_request_firstperson_press(void) { pc_first_person_toggle(); }
-void pc_window_request_charge_press(void) { sSwarmPending = true; }
+void pc_window_request_charge_press(void) { sSwarmPending[0] = true; }
 
 // Control mode functions
 void pc_window_set_control_mode(int mode) {
@@ -1665,7 +1853,7 @@ void pc_window_set_settings_menu_open(bool open) {
     }
 
     SDL_ShowCursor(SDL_DISABLE);
-    sMouseRelativeMode = sControlMode == PC_CONTROL_MOUSE_CURSOR;
+    sMouseRelativeMode = effectiveControlMode() == PC_CONTROL_MOUSE_CURSOR;
     SDL_SetRelativeMouseMode(sMouseRelativeMode ? SDL_TRUE : SDL_FALSE);
     
     // Consume any pending relative mouse motion after menu closes
@@ -1724,21 +1912,34 @@ extern "C" float pc_window_take_touch_zoom(void) {
 }
 
 extern "C" void pc_window_add_camera_drag(float normalizedDx) {
-    sTouchCameraDrag = std::clamp(sTouchCameraDrag + normalizedDx, -1.0f, 1.0f);
+    float& drag = sCameraDragP[sInputPlayer];
+    drag        = std::clamp(drag + normalizedDx, -1.0f, 1.0f);
+}
+
+extern "C" void pc_window_add_camera_drag_for(int player, float normalizedDx) {
+    float& drag = sCameraDragP[player == 1 ? 1 : 0];
+    drag        = std::clamp(drag + normalizedDx, -1.0f, 1.0f);
 }
 
 extern "C" void pc_window_add_camera_pitch(float normalizedDy) {
-    sCameraPitchDrag = std::clamp(sCameraPitchDrag + normalizedDy, -1.0f, 1.0f);
+    float& pitch = sCameraPitchP[sInputPlayer];
+    pitch        = std::clamp(pitch + normalizedDy, -1.0f, 1.0f);
 }
 
-extern "C" float pc_window_take_camera_pitch(void) {
-    const float delta = sCameraPitchDrag;
-    sCameraPitchDrag = 0.0f;
+extern "C" float pc_window_take_camera_pitch_for(int player) {
+    float& pitch      = sCameraPitchP[player == 1 ? 1 : 0];
+    const float delta = pitch;
+    pitch             = 0.0f;
     return delta;
 }
 
-extern "C" float pc_window_take_camera_drag(void) {
-    const float delta = sTouchCameraDrag;
-    sTouchCameraDrag = 0.0f;
+extern "C" float pc_window_take_camera_drag_for(int player) {
+    float& drag       = sCameraDragP[player == 1 ? 1 : 0];
+    const float delta = drag;
+    drag              = 0.0f;
     return delta;
 }
+
+extern "C" float pc_window_take_camera_pitch(void) { return pc_window_take_camera_pitch_for(0); }
+
+extern "C" float pc_window_take_camera_drag(void) { return pc_window_take_camera_drag_for(0); }

@@ -85,4 +85,46 @@ enum { PC_VS_EXIT_NONE = 0, PC_VS_EXIT_REMATCH = 1, PC_VS_EXIT_TITLE = 2 };
 void pc_vs_request_exit(int kind);
 int pc_vs_take_exit_request(void);
 
+/// Opción --vs-map del editor de mapas: el juego va directo a una partida VS
+/// con ese map.json, sin título ni menús (J1 teclado + mando 1, J2 mando 2).
+void pc_vs_direct_request(void);
+bool pc_vs_direct_requested(void); ///< pedida y aún sin llegar al título
+bool pc_vs_direct_take_title(void); ///< en el título: true una vez, para salir hacia el VS
+bool pc_vs_direct_take_setup(void); ///< en CardSelect: true una vez, para saltar los menús
+
+#if defined(PIKI_PC_PORT)
+/*
+ * Netplay (deterministic mode): the VS pause and the end screen are sim
+ * state, decided on sim ticks, and the HUD only reads them. Outside
+ * deterministic mode the HUD keeps deciding them as before.
+ */
+/// pc_settings_note_gameplay_frame: a world tick ran this tick.
+void pc_vs_note_gameplay_tick(void);
+/// End of a deterministic tick (PlugPikiApp::idle, before waitRetrace): the
+/// pause during the countdown and after the match.
+void pc_vs_det_tick_end(void);
+/// The HUD's liveness in deterministic mode: a world tick this tick, or the VS pause.
+bool pc_vs_det_live(void);
+/// Deterministic mode: the end screen, 2.5 s of ticks after the match ended.
+bool pc_vs_det_end_screen_shown(void);
+/// End screen cursor: 0 rematch, 1 title.
+int pc_vs_end_choice(void);
+/// Deterministic mode, RunningModeState: both players' synced presses
+/// (Controller::mInputPressed). On the end screen either player moves the
+/// choice or confirms it, so every peer decides on the same tick.
+void pc_vs_end_screen_sim_input(u32 pressedP1, u32 pressedP2);
+/// Every VS global the sim reads (the state hash's mode column).
+u64 pc_vs_state_hash(void);
+/// Netplay: --vs-map boots an online session; each PC keeps its own device
+/// assignment and the session's captains.
+void pc_vs_direct_set_online(bool online);
+bool pc_vs_direct_online(void);
+/// A VS match left for the title (end screen or pause menu). Counts up; an
+/// online VS session ends there.
+void pc_vs_note_left_to_title(void);
+int pc_vs_left_to_title(void);
+/// Netplay test knob: the match length in seconds (0 = the rules').
+void pc_vs_set_test_match_seconds(f32 seconds);
+#endif
+
 #endif

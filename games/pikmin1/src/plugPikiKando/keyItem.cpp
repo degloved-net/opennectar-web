@@ -4,6 +4,8 @@
 #include "Font.h"
 #include "Graphics.h"
 #include "MapMgr.h"
+#include "SoundMgr.h"
+#include "EffectMgr.h"
 
 /**
  * @todo: Documentation
@@ -30,6 +32,9 @@ KeyItem::KeyItem(CreatureProp* props, Shape* model)
 	setCreatureFlag(CF_Unk1);
 	mObjType = OBJTYPE_Key;
 	mState   = KeyState::Inactive;
+#if defined(PIKI_PC_PORT)
+	mGlow = nullptr;
+#endif
 }
 
 /**
@@ -58,6 +63,15 @@ void KeyItem::init(immut Vector3f& pos)
 void KeyItem::startAI(int)
 {
 	mState = KeyState::Active;
+#if defined(PIKI_PC_PORT)
+	mGlowPos = mSRT.t;
+	mGlowPos.y += 2.0f;
+	mGlow = effectMgr->create(EffectMgr::EFF_Piki_IdleYellow, mGlowPos, nullptr, nullptr);
+	if (mGlow) {
+		mGlow->setEmitPosPtr(&mGlowPos);
+		mGlow->setScaleSize(mGlow->getScaleSize() * 2.5f);
+	}
+#endif
 }
 
 /**
@@ -81,6 +95,12 @@ void KeyItem::doKill()
 {
 	PRINT("key is killed ?\n");
 	mState = KeyState::Collected;
+#if defined(PIKI_PC_PORT)
+	if (mGlow) {
+		effectMgr->kill(mGlow, false);
+		mGlow = nullptr;
+	}
+#endif
 	itemMgr->kill(this);
 }
 
@@ -89,6 +109,10 @@ void KeyItem::doKill()
  */
 void KeyItem::update()
 {
+#if defined(PIKI_PC_PORT)
+	// Fase de la animación de flotar (ver refresh).
+	mFaceDirection = roundAng(mFaceDirection + gsys->getFrameTime() * 1.2f);
+#else
 	f32 rotationSpeed = mVelocity.length() / 150.0f * 0.01f + 0.025f;
 	if (rotationSpeed > 2.0f) {
 		rotationSpeed = 2.0f;
@@ -96,6 +120,7 @@ void KeyItem::update()
 
 	mFaceDirection += rotationSpeed * TAU;
 	mFaceDirection = roundAng(mFaceDirection);
+#endif
 	mGrid.updateGrid(mSRT.t);
 	updateAI();
 
@@ -124,7 +149,14 @@ void KeyItem::refresh(Graphics& gfx)
 {
 	Matrix4f transform, viewTransform;
 
+#if defined(PIKI_PC_PORT)
+	// Flota arriba y abajo y se balancea un poco.
+	const f32 phase = mFaceDirection;
+	Vector3f rot(0.0f, mSRT.r.y + sinf(phase) * 0.35f, sinf(phase * 2.0f) * 0.12f);
+	mWorldMtx.makeSRT(mSRT.s, rot, Vector3f(mSRT.t.x, mSRT.t.y + 12.0f + sinf(phase * 2.0f) * 5.0f, mSRT.t.z));
+#else
 	mWorldMtx.makeSRT(mSRT.s, mSRT.r, Vector3f(mSRT.t.x, mSRT.t.y + 20.0f, mSRT.t.z));
+#endif
 	gfx.calcViewMatrix(mWorldMtx, viewTransform);
 	gfx.useMatrix(viewTransform, 0);
 
@@ -156,6 +188,9 @@ void DoorItem::disappear()
 	if (mStateId != DoorState::Vanishing) {
 		mStateId   = DoorState::Vanishing;
 		mFadeTimer = 2.5f;
+#if defined(PIKI_PC_PORT)
+		seSystem->playSoundDirect(JACEVENT_Build, SEB_WALL_DOWN, mSRT.t);
+#endif
 	}
 }
 
@@ -208,9 +243,14 @@ void DoorItem::startAI(int)
 void DoorItem::update()
 {
 	if (mStateId == DoorState::Vanishing) {
-		mFadeTimer -= gsys->getFrameTime();
+#if defined(PIKI_PC_PORT)
+		const f32 dt = gsys->getFrameTime() * 3.0f; // ~0,8 s en vez de 2,5
+#else
+		const f32 dt = gsys->getFrameTime();
+#endif
+		mFadeTimer -= dt;
 		f32 yscale = (mFadeTimer / 2.5f) * 2.0f;
-		mSRT.t.y -= gsys->getFrameTime() * 3.0f;
+		mSRT.t.y -= dt * 3.0f;
 
 		mSRT.s.set(2.0f, yscale, 2.0f);
 

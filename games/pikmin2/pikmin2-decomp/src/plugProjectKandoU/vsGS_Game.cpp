@@ -1,3 +1,4 @@
+#include "pc_p2_captains.h"
 #include "Game/VsGame.h"
 #include "Game/DeathMgr.h"
 #include "Game/MoviePlayer.h"
@@ -21,6 +22,9 @@
 #include "Controller.h"
 #include "PikiAI.h"
 #include "Radar.h"
+#ifdef PIKI_PC_PORT
+#include "pc_speedrun.h"
+#endif
 #include "nans.h"
 
 namespace Game {
@@ -657,6 +661,10 @@ void GameState::onMovieStart(VsGameSection* section, MovieConfig* movie, u32 p1,
 				section->setPlayerMode(NAVIID_Louie);
 			}
 		}
+#ifdef PIKI_PC_PORT
+		// Selector de capitanes: el título sigue al personaje, no al índice.
+		gameOverTitle = (Screen::Game2DMgr::GameOverTitle)pc_p2_captain_down_title(p2);
+#endif
 		Screen::gGame2DMgr->open_GameOver(gameOverTitle);
 	}
 
@@ -800,6 +808,11 @@ void GameState::onMovieDone(VsGameSection* section, MovieConfig* config, u32 unu
 
 	} else if (config->is("s09_holein")) {
 		PSMCancelToPauseOffMainBgm();
+#ifdef PIKI_PC_PORT
+		if (gameSystem->isChallengeMode()) {
+			pc_speedrun_on_challenge_floor_end(Radar::Mgr::getNumOtakaraItems());
+		}
+#endif
 		section->mCurrentFloor++;
 		LoadArg arg;
 		arg.mGameLoadType  = 0;
@@ -837,6 +850,11 @@ void GameState::onMovieDone(VsGameSection* section, MovieConfig* config, u32 unu
 
 	} else if (config->is("s0C_cv_escape")) {
 		PSMCancelToPauseOffMainBgm();
+#ifdef PIKI_PC_PORT
+		if (gameSystem->isChallengeMode()) {
+			pc_speedrun_on_challenge_floor_end(Radar::Mgr::getNumOtakaraItems());
+		}
+#endif
 		ResultArg arg;
 		arg.mEndFlag.clear();
 		arg.mEndFlag.typeView |= 0x1;

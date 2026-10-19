@@ -118,6 +118,7 @@ void pc_gfx_set_pipeline_state(const PcGfxPipelineState& state);
 void pc_gfx_set_color_update(GXBool updateEnable);
 void pc_gfx_set_alpha_update(GXBool updateEnable);
 void pc_gfx_set_alpha_compare(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, u8 ref1);
+void pc_gfx_get_alpha_compare(GXCompare* comp0, u8* ref0, GXAlphaOp* op, GXCompare* comp1, u8* ref1);
 void pc_gfx_set_chan_ctrl(GXChannelID chan, GXBool enable, GXColorSrc ambSrc, GXColorSrc matSrc, u32 lightMask, GXDiffuseFn diffFn, GXAttnFn attnFn);
 void pc_gfx_set_chan_mat_color(GXChannelID chan, GXColor color);
 // Multiplicador global del colour de material (PLAN_COOP: tinte de P2).
@@ -304,6 +305,8 @@ void pc_gfx_get_pool_peaks(int* matrixPeak, int* matrixMax, int* shapePeak, int*
 // Hand this frame's submission cost to the tick profiler and reset it. Called
 // once per frame, right after renderall. No-op unless PIKMIN_TICK_STATS is set.
 void pc_gfx_flush_batch(void);
+// Netplay two-pass frame: clear the 2D mapping flags between the passes.
+void pc_gfx_reset_ui_state(void);
 void pc_gfx_flush_submit_stats(void);
 
 // File-select stain probe. Off unless PIKMIN_FILESEL_DEBUG=1. Reads the same

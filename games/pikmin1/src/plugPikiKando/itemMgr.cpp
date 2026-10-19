@@ -1,6 +1,8 @@
 #include "ItemMgr.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "netplay/pc_netplay_policy.h"
+#include "netplay/pc_netplay_present.h"
 #endif
 #if defined(PIKI_PC_PORT)
 #include "settings/pc_settings.h"
@@ -775,12 +777,23 @@ void ItemCreature::refresh(Graphics& gfx)
 {
 	bool isOffCamera = false;
 
+#if defined(PIKI_PC_PORT)
+	if (!pc_netplay_sim_visible(gfx.mCamera->isPointVisible(mSRT.t, getBoundingSphereRadius()))) {
+#else
 	if (!gfx.mCamera->isPointVisible(mSRT.t, getBoundingSphereRadius())) {
+#endif
 		enableAICulling();
 		isOffCamera = true;
 	} else {
 		disableAICulling();
 	}
+#if defined(PIKI_PC_PORT)
+	// Netplay presentation pass: the draw follows the local frustum (the AI
+	// flags above only change on the sim side).
+	if (!pc_netplay_present_sim_side()) {
+		isOffCamera = !gfx.mCamera->isPointVisible(mSRT.t, getBoundingSphereRadius());
+	}
+#endif
 
 	if (mItemShapeObject) {
 		_3C4 = false;
@@ -1154,12 +1167,23 @@ void BuildingItem::refresh(Graphics& gfx)
 	mAnimatedMaterials.animate(&val);
 
 	bool isOffCamera = false;
+#if defined(PIKI_PC_PORT)
+	if (!pc_netplay_sim_visible(gfx.mCamera->isPointVisible(mSRT.t, getBoundingSphereRadius()))) {
+#else
 	if (!gfx.mCamera->isPointVisible(mSRT.t, getBoundingSphereRadius())) {
+#endif
 		enableAICulling();
 		isOffCamera = true;
 	} else {
 		disableAICulling();
 	}
+#if defined(PIKI_PC_PORT)
+	// Netplay presentation pass: the draw follows the local frustum (the AI
+	// flags above only change on the sim side).
+	if (!pc_netplay_present_sim_side()) {
+		isOffCamera = !gfx.mCamera->isPointVisible(mSRT.t, getBoundingSphereRadius());
+	}
+#endif
 
 	if (mItemShapeObject) {
 		_3C4 = false;

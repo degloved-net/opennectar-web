@@ -6,6 +6,8 @@
 #include "sysNew.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_gfx.h"
+#include "netplay/pc_netplay_policy.h"
+#include "netplay/pc_netplay_present.h"
 #endif
 
 /**
@@ -35,6 +37,12 @@ void CullFrustum::vectorToWorldPlane(immut Vector3f& vec, CullingPlane& worldPla
  */
 bool CullFrustum::isPointVisible(immut Vector3f& point, f32 cutoff)
 {
+#if defined(PIKI_PC_PORT)
+	// Netplay sim pass: the policy value, never the local frustum.
+	if (pc_netplay_present_sim_pass()) {
+		return pc_netplay_sim_visible(true);
+	}
+#endif
 	for (int i = 0; i < mActivePlaneCount; i++) {
 		Plane* plane = &mPlanePointers[i]->mPlane;
 		if (point.x * plane->mNormal.x + point.y * plane->mNormal.y + point.z * plane->mNormal.z - plane->mOffset < -cutoff) {

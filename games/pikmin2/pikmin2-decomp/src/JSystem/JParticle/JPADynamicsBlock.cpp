@@ -44,7 +44,11 @@ void JPAVolumeCircle(JPAEmitterWorkData* workData)
 	f32 circleSizeInXZ;
 
 	if (workData->mEmitter->checkDynFlag(JPADYN_FixedInterval)) {
+#ifdef PIKI_PC_PORT
+		angleInFloat = workData->mCreateNumber ? (s16)((workData->mVolumeEmitIdx << 16) / workData->mCreateNumber) : 0;
+#else
 		angleInFloat = (s16)((workData->mVolumeEmitIdx << 16) / workData->mCreateNumber);
+#endif
 		angleInShort = angleInFloat * workData->mVolumeSweep;
 		workData->mVolumeEmitIdx++;
 	} else {
@@ -86,8 +90,17 @@ void JPAVolumeSphere(JPAEmitterWorkData* workData)
 	s16 theta;
 	if (workData->mEmitter->checkDynFlag(JPADYN_FixedInterval)) {
 
+#ifdef PIKI_PC_PORT
+		// En PPC divw por cero no trapea; en x86 es SIGFPE. Con 1 división
+		// (emisores puestos fuera de su sitio por el Randomizer) el divisor es 0.
+		const int angleDiv = workData->mVolumeAngleMax - 1;
+		const int phiDiv   = workData->mDivNumber - 1;
+		u16 preTheta = angleDiv ? (workData->mVolumeAngleNum << 16) / angleDiv : 0;
+		phi          = u16((phiDiv ? (workData->mVolumeX << 15) / phiDiv : 0) + 0x4000);
+#else
 		u16 preTheta = (workData->mVolumeAngleNum << 16) / (workData->mVolumeAngleMax - 1);
 		phi          = u16((workData->mVolumeX << 15) / (workData->mDivNumber - 1) + 0x4000);
+#endif
 		theta        = f32(preTheta) * workData->mVolumeSweep + SHORT_FLOAT_MAX;
 		workData->mVolumeAngleNum++;
 		if (workData->mVolumeAngleNum == workData->mVolumeAngleMax) {

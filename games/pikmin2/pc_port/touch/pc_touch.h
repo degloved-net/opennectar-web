@@ -38,16 +38,36 @@ bool pc_touch_merge_pad(u16* button, s8* stickX, s8* stickY, s8* substickX, s8* 
 /** La capa se dibuja solo cuando la última entrada fue táctil. */
 void pc_touch_set_visible(bool visible);
 bool pc_touch_visible(void);
+/** Estado de mando que vio el juego en el último frame (táctil incluido),
+ *  en el formato de GameCube: botones PAD_* y sticks -127..127 (Y arriba). */
+void pc_touch_last_pad(u16* buttons, s8* stickX, s8* stickY, s8* substickX, s8* substickY);
 
 /**
  * Los menús nativos reclaman temporalmente la pantalla: la capa de juego se
  * oculta y pueden consumir el último toque como coordenadas normalizadas.
  */
 void pc_touch_claim_game_menu(void);
+/** El menú usa el stick táctil (radar): sus arrastres no pasan de página. */
+void pc_touch_menu_uses_stick(void);
 /** Menú F1: muestra B/atrás y una burbuja A/confirmar vacía. */
 void pc_touch_claim_port_menu(void);
 bool pc_touch_take_game_menu_tap(float* x, float* y);
 void pc_touch_queue_game_button(u16 button);
+
+/**
+ * Menús de Pikmin 2 (J2D): tocar lo que dibuja el menú. El menú pregunta por
+ * un panel con pc_touch_pane_hit; desde entonces J2DPane::draw anota cada
+ * frame dónde cae en la ventana lo que dibujan ese panel y sus hijos.
+ * nx/ny: toque normalizado de pc_touch_take_game_menu_tap. margin: holgura en
+ * fracción del alto de la ventana.
+ */
+bool pc_touch_pane_hit(const void* pane, float nx, float ny, float margin);
+/** Rectángulo en píxeles de ventana de lo que dibujó el panel (y lo sigue). */
+bool pc_touch_pane_rect(const void* pane, float* x0, float* y0, float* x1, float* y1);
+bool pc_touch_panes_active(void);
+bool pc_touch_pane_tracked(const void* pane);
+/** Une al panel seguido lo que dibuja él o un hijo suyo este frame. */
+void pc_touch_pane_drawn(const void* pane, float x0, float y0, float x1, float y1);
 
 /**
  * Iconos en línea dentro del texto del juego (tutoriales). El texto usa la
@@ -91,6 +111,16 @@ void pc_touch_mark_color_icon(float x0, float y0, float x1, float y1);
 int pc_touch_take_color_taps(void);
 
 /** Dibuja la capa sobre la ventana. Llamar tras pc_gfx_present(). */
+/* Lo que el juego cuenta del frame para mostrar u ocultar botones de contexto
+   (cruceta ↑/↓, cambiar de capitán). Lo pone el juego cada frame de partida. */
+#define PC_TOUCH_CTX_HOLDING      (1u << 0) /* Pikmin en la mano */
+#define PC_TOUCH_CTX_SPRAY_BITTER (1u << 1) /* P2: hay spray amargo */
+#define PC_TOUCH_CTX_SPRAY_SPICY  (1u << 2) /* P2: hay spray picante */
+#define PC_TOUCH_CTX_SWAP         (1u << 3) /* P2: se puede cambiar de capitán */
+#define PC_TOUCH_CTX_SWAP_TO_2P   (1u << 4) /* P2: el otro capitán es Louie/Presidente */
+#define PC_TOUCH_CTX_PRESIDENT    (1u << 5) /* P2: deuda pagada, Louie → Presidente */
+void pc_touch_set_context(unsigned flags);
+
 void pc_touch_draw(void);
 
 /** Carga el arte (una vez, con contexto GL activo). */

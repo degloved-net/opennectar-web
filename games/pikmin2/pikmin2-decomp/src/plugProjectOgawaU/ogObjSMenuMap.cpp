@@ -1,4 +1,7 @@
+#include <cstring>
+#include <cstdlib>
 #include "og/newScreen/SMenu.h"
+#include "Game/pcCoop.h"
 #include "og/newScreen/ogUtil.h"
 #include "og/Screen/MapCounter.h"
 #include "og/Screen/anime.h"
@@ -9,6 +12,14 @@
 #include "Game/Cave/RandMapMgr.h"
 #include "Radar.h"
 #include "nans.h"
+
+#ifdef PIKI_PC_PORT
+extern "C" float pc_window_free_camera_sub_y(void);
+extern "C" float pc_window_free_camera_sub_y_for(int player);
+#endif
+#if PIKI_PC_TOUCH
+extern "C" void pc_touch_menu_uses_stick(void);
+#endif
 
 static const u32 padding[] = { 0, 0, 0 };
 
@@ -188,7 +199,7 @@ void ObjSMenuMap::setMapPos()
 	mMapPosition.y = -mMapTextureDimensions.y / 2;
 
 	if (mDisp->mActiveNavi) {
-		Vector3f aNaviPos = Game::naviMgr->getActiveNavi()->getPosition();
+		Vector3f aNaviPos = PC_MENU_NAVI()->getPosition();
 		if (mDisp->mInCave) {
 			if (Game::Cave::randMapMgr) {
 				f32 x, y;
@@ -232,7 +243,7 @@ void ObjSMenuMap::setCompass()
 void ObjSMenuMap::tuningIcon()
 {
 	if (mDisp->mActiveNavi) {
-		Game::Navi* navi = Game::naviMgr->getActiveNavi();
+		Game::Navi* navi = PC_MENU_NAVI();
 		if ((int)navi->mNaviIndex == NAVIID_Olimar) {
 			if (mLouieArrow)
 				mMapTexPane->appendChild(mLouieArrow);
@@ -527,6 +538,11 @@ void ObjSMenuMap::scaleMap()
 	bool isUp   = false;
 	bool isDown = false;
 	f32 cstick  = mController->getSubStickY();
+#ifdef PIKI_PC_PORT
+	if (cstick == 0.0f) {
+		cstick = pc_window_free_camera_sub_y_for(pc_p2_coop_active() ? pc_p2_coop_menu_player() : 0); // co-op: quien abrió la pausa
+	}
+#endif
 	if (cstick > 0.4f) {
 		isUp = true;
 	}
@@ -590,6 +606,12 @@ void ObjSMenuMap::doCreate(JKRArchive* arc)
 	// set up MapCounter object
 	mMapCounter = new og::Screen::MapCounter(&mDisp->mDataMap);
 	mMapCounter->set("s_menu_map_l.blo", 0x1040000, arc);
+#ifdef PIKI_PC_PORT
+	if (FILE* f = fopen("/tmp/mapdbg.txt", "a")) {
+		fprintf(f, "doCreate env=%s\n", getenv("PIKMIN_MAPDBG") ? getenv("PIKMIN_MAPDBG") : "(none)");
+		fclose(f);
+	}
+#endif
 	// load in animations
 	mAnimGroup = new og::Screen::AnimGroup(3);
 	og::Screen::registAnimGroupScreen(mAnimGroup, arc, mMapCounter, "s_menu_map_l.btk", msBaseVal.mAnimSpeed);
@@ -612,7 +634,7 @@ void ObjSMenuMap::doCreate(JKRArchive* arc)
 	// set starting map orientation/rotation
 	if (mDisp->mActiveNavi) {
 		// Game::Navi* navi = Game::naviMgr->getActiveNavi();
-		Vector3f naviViewVec = Game::cameraMgr->mCameraObjList[Game::naviMgr->getActiveNavi()->mNaviIndex]->getViewVector();
+		Vector3f naviViewVec = Game::cameraMgr->mCameraObjList[PC_MENU_NAVI()->mNaviIndex]->getViewVector();
 		mMapAngle            = 180.0f * (JMAAtan2Radian(naviViewVec.x, -naviViewVec.z) / PI); // in degrees
 	}
 
@@ -859,6 +881,10 @@ void ObjSMenuMap::updateMap()
 void ObjSMenuMap::commonUpdate()
 {
 	commonUpdateBase();
+#if PIKI_PC_TOUCH
+	// El stick táctil mueve el mapa; deslizar fuera de él pasa de página.
+	pc_touch_menu_uses_stick();
+#endif
 	setSMenuScale(msVal.mMapScreenScale.x, msVal.mMapScreenScale.y);
 	mAnimGroup->update();
 	updateMap();
@@ -920,10 +946,75 @@ bool ObjSMenuMap::doUpdate()
 void ObjSMenuMap::doDraw(Graphics& gfx)
 {
 	J2DPerspGraph* graf = &gfx.mPerspGraph;
+#ifdef PIKI_PC_PORT
+	// Diagnóstico del mapa de pausa (PIKMIN_MAPDBG): datos de la textura del
+	// mapa una vez y variantes de dibujo para comparar con la consola.
+	//   info       solo los datos
+	//   nozmask    sin el recorte por profundidad de drawMap
+	//   nocounter  sin el marco (mMapCounter): solo mapa e iconos
+	//   mapafter   el marco después del mapa
+	static const char* sPcMapDbg = getenv("PIKMIN_MAPDBG");
+	{
+		static int sPcDrawCount = 0;
+		if (sPcDrawCount < 3) {
+			sPcDrawCount++;
+			if (FILE* f = fopen("/tmp/mapdbg.txt", "a")) {
+				const ResTIMG* timg = mMapTexPane && mMapTexPane->getTexture(0) ? mMapTexPane->getTexture(0)->mTexInfo : nullptr;
+				fprintf(f, "doDraw #%d env=%s tex=%p fmt=%d transp=%d %dx%d mapAlpha=%d colorAlpha=%d infl=%d rootAlpha=%d\n", sPcDrawCount,
+				        sPcMapDbg ? sPcMapDbg : "(none)", (const void*)timg, timg ? timg->mTextureFormat : -1,
+				        timg ? (int)timg->mTransparency : -1, timg ? timg->mSizeX : 0, timg ? timg->mSizeY : 0,
+				        mMapTexPane ? mMapTexPane->getAlpha() : -1, mMapTexPane ? mMapTexPane->getColorAlpha() : -1,
+				        mMapTexPane ? (int)mMapTexPane->mIsInfluencedAlpha : -1, mIconRootPane ? mIconRootPane->getAlpha() : -1);
+				fclose(f);
+			}
+		}
+	}
+	if (sPcMapDbg) {
+		static bool sLogged = false;
+		if (!sLogged) {
+			sLogged = true;
+			if (!mMapTexPane || !mMapTexPane->getTexture(0) || !mMapTexPane->getTexture(0)->mTexInfo) {
+				printf("[MAPDBG] mode=%s sin textura de mapa (pane=%p)\n", sPcMapDbg, (void*)mMapTexPane);
+				fflush(stdout);
+			}
+		}
+		if (sLogged == true && mMapTexPane && mMapTexPane->getTexture(0) && mMapTexPane->getTexture(0)->mTexInfo) {
+			static bool sLoggedTex = false;
+			if (sLoggedTex) {
+				goto pcMapDbgDone;
+			}
+			sLoggedTex           = true;
+			const ResTIMG* timg  = mMapTexPane->getTexture(0)->mTexInfo;
+			printf("[MAPDBG] mode=%s tex fmt=%d transp=%d %dx%d wrap=%d,%d | mapPane alpha=%d colorAlpha=%d infl=%d | root alpha=%d\n",
+			       sPcMapDbg, timg->mTextureFormat, (int)timg->mTransparency, timg->mSizeX, timg->mSizeY, timg->mWrapS, timg->mWrapT,
+			       mMapTexPane->getAlpha(), mMapTexPane->getColorAlpha(), (int)mMapTexPane->mIsInfluencedAlpha,
+			       mIconRootPane ? mIconRootPane->getAlpha() : -1);
+			fflush(stdout);
+		}
+	pcMapDbgDone:;
+	}
+	const bool pcNoCounter = sPcMapDbg && (!strcmp(sPcMapDbg, "nocounter") || !strcmp(sPcMapDbg, "mapafter"));
+	og::Screen::MapCounter* pcCounter = mMapCounter;
+	if (pcNoCounter) {
+		mMapCounter = nullptr; // drawMap no lo dibuja
+	}
+#endif
 	drawMap(gfx);
+#ifdef PIKI_PC_PORT
+	mMapCounter = pcCounter;
+	if (sPcMapDbg && !strcmp(sPcMapDbg, "nozmask")) {
+		GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+	}
+#endif
 
 	Graphics gfx2;
 	mIconScreen->draw(gfx2, *graf);
+#ifdef PIKI_PC_PORT
+	if (sPcMapDbg && !strcmp(sPcMapDbg, "mapafter") && mMapCounter) {
+		graf->setPort();
+		mMapCounter->draw(gfx, *graf);
+	}
+#endif
 
 	if (mCompassPic && mCompassPane) {
 		PSMTXCopy(mCompassPane->mGlobalMtx, mCompassPic->mPositionMtx);
@@ -934,6 +1025,7 @@ void ObjSMenuMap::doDraw(Graphics& gfx)
 	graf->setPort();
 	drawYaji(gfx);
 }
+
 
 /**
  * @note Address: 0x803121EC

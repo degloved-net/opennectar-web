@@ -1,4 +1,5 @@
 #include "float.h"
+#include "Game/pcCoop.h"
 #include "Game/GameSystem.h"
 #include "Game/Navi.h"
 #include "System.h"
@@ -57,7 +58,12 @@ void FarmMgr::doAnimation()
 			FOREACH_NODE(Obstacle, farmNode->mObstacleRootNode.mChild, obstacleNode)
 			{
 				PSM::CreatureObj* soundObj = static_cast<PSM::CreatureObj*>(obstacleNode->mCreature->getJAIObject());
+#ifdef PIKI_PC_PORT
+				Vector3f obstaclePos = obstacleNode->mCreature->getPosition();
+				Navi* navi           = naviMgr->getNearestNavi(obstaclePos); // co-op: el más cercano
+#else
 				Navi* navi                 = naviMgr->getActiveNavi();
+#endif
 				if (obstacleNode->mVtxColorControl->mPower <= 0.0f && navi && soundObj->isNear(navi, PSMGetNoukouDist())) {
 					if (mDirectorUpdator) {
 						mDirectorUpdator->directOn(count);

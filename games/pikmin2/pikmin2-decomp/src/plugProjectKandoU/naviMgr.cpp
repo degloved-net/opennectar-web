@@ -6,6 +6,11 @@
 #include "utilityU.h"
 #include "JSystem/J3D/J3DModelLoader.h"
 #include "Game/PikiMgr.h"
+#include "pc_p2_captains.h"
+#include "Game/pcCoop.h"
+
+extern "C" void pc_gfx_set_out_tint(float r, float g, float b);
+extern "C" void pc_gfx_clear_out_tint(void);
 
 namespace Game {
 
@@ -34,6 +39,7 @@ NaviMgr::~NaviMgr()
 {
 	animMgr = nullptr;
 	naviMgr = nullptr;
+	pc_p2_captain_clear_models();
 
 	if (mBackupPSMMgr) {
 		delete mBackupPSMMgr;
@@ -115,6 +121,9 @@ void NaviMgr::setupNavi(Navi* navi)
 	navi->mCursorModel->mJ3dModel->calcMaterial();
 	navi->mCursorModel->mJ3dModel->makeDL();
 	navi->mCursorModel->mJ3dModel->lock();
+
+	pc_p2_captain_set_models(navi->mNaviIndex, navi->mModel->mJ3dModel, navi->mCursorModel->mJ3dModel,
+	                         navi->mMarkerModel->mJ3dModel);
 }
 
 /**
@@ -130,9 +139,18 @@ Navi* NaviMgr::birth()
 		P2ASSERTLINE(349, navi->mSoundObj);
 		navi->mSoundObj->init(navi->mNaviIndex);
 
-		// Use president sounds for navi ID 1
-		if (playData->isStoryFlag(STORY_DebtPaid) && navi->mNaviIndex == NAVIID_Louie) {
+		// Selector de capitanes: la voz es la del personaje, no la del índice. Los
+		// Pikmin usan la de Olimar, y PSM::Navi::startSound la cambia por voz de Pikmin.
+		switch (pc_p2_captain_loaded_character(navi->mNaviIndex)) {
+		case PC_P2_CHAR_LOUIE:
+			navi->mSoundObj->mRappa.setId(14);
+			break;
+		case PC_P2_CHAR_PRESIDENT:
 			navi->mSoundObj->setShacho();
+			break;
+		default:
+			navi->mSoundObj->mRappa.setId(13);
+			break;
 		}
 	}
 
@@ -165,6 +183,53 @@ Navi* NaviMgr::getActiveNavi()
 	return nullptr;
 }
 
+#ifdef PIKI_PC_PORT
+Navi* NaviMgr::getNearestNavi(Vector3f& pos)
+{
+	if (!pc_p2_coop_active()) {
+		return getActiveNavi();
+	}
+	Navi* nearest = nullptr;
+	f32 minDist   = 0.0f;
+	for (int i = 0; i < 2; i++) {
+		Navi* navi = getAt(i);
+		if (!navi || !navi->isAlive() || !navi->mController1) {
+			continue;
+		}
+		Vector3f naviPos = navi->getPosition();
+		const f32 dist   = pos.sqrDistance(naviPos);
+		if (!nearest || dist < minDist) {
+			nearest = navi;
+			minDist = dist;
+		}
+	}
+	return nearest ? nearest : getActiveNavi();
+}
+
+Navi* NaviMgr::getMenuNavi()
+{
+	if (!pc_p2_coop_active()) {
+		return getActiveNavi();
+	}
+	Navi* navi = getAt(pc_p2_coop_menu_player());
+	return navi && navi->mController1 ? navi : getActiveNavi();
+}
+
+Navi* NaviMgr::getMovieNavi()
+{
+	if (!pc_p2_coop_active()) {
+		return getActiveNavi();
+	}
+	for (int i = 0; i < 2; i++) {
+		Navi* navi = getAt(i);
+		if (navi && navi->isAlive() && navi->mController1) {
+			return navi;
+		}
+	}
+	return getActiveNavi();
+}
+#endif
+
 /**
  * @note Address: 0x8015ACBC
  * @note Size: 0xBC
@@ -181,6 +246,32 @@ void NaviMgr::loadResources()
 	}
 
 	load();
+}
+
+// Modelo del capitán 1 cargado en NaviMgr::load (heap de sistema) y su personaje.
+static J3DModelData* sPcCaptain1Model = nullptr;
+static int sPcCaptain1Character       = PC_P2_CHAR_OLIMAR;
+
+// Selector de capitanes: modelo del personaje elegido para el capitán naviIndex.
+// Cada capitán carga su propia copia (los Pikmin con materiales únicos, para
+// teñirlos sin teñir a los Pikmin de su color). loaded es el modelo ya cargado
+// si coincide con el personaje (orima1 en el capitán 1).
+static J3DModelData* loadCaptainModel(JKRArchive* arc, int naviIndex, int character, J3DModelData* loaded)
+{
+	pc_p2_captain_set_loaded_character(naviIndex, character);
+	if (loaded && character == PC_P2_CHAR_OLIMAR) {
+		return loaded;
+	}
+
+	u32 flags = J3DMLF_Material_PE_FogOff | J3DMLF_UsePostTexMtx | J3DMLF_UseImmediateMtx;
+	if (pc_p2_character_is_pikmin(character)) {
+		flags |= J3DMLF_UseUniqueMaterials;
+	}
+	J3DModelData* model = J3DModelLoaderDataBase::load(arc->getResource(pc_p2_character_model_path(character)), flags);
+	for (u16 i = 0; i < model->getShapeNum(); i++) {
+		model->getShapeNodePointer(i)->setTexMtxLoadType(0x2000);
+	}
+	return model;
 }
 
 /**
@@ -208,6 +299,11 @@ void NaviMgr::load()
 	if (!animMgr) {
 		animMgr = SysShape::AnimMgr::load(texts, "animMgr.txt", model, arc, "motion");
 	}
+
+	mOlimarModel        = loadCaptainModel(arc, 0, pc_p2_captain_character(0, false), model);
+	sPcCaptain1Model     = mOlimarModel;
+	sPcCaptain1Character = pc_p2_captain_loaded_character(0);
+
 	mCollData = CollPartFactory::load(texts, "naviColl.txt");
 
 	mCursorModelData
@@ -236,6 +332,59 @@ SysShape::Model* NaviMgr::createModel(int naviID)
 	return new SysShape::Model((&mOlimarModel)[naviID], 0, 2);
 }
 
+// Selector de capitanes: el modelo de Pikmin no trae hoja (la dibuja PikiMgr
+// aparte), así que los capitanes Pikmin se la ponen igual que los Pikmin, sobre
+// happajnt3, con el modelo de hoja de PikiMgr. Model::hide() (primera persona,
+// cinemáticas) marca las formas con J3DShape_Hide: Model::isVisible() es el
+// recorte por cámara, no eso.
+void NaviMgr::doSimpleDraw(Viewport* vp)
+{
+	if (!pikiMgr || (!pc_p2_character_is_pikmin(pc_p2_captain_loaded_character(0))
+	                 && !pc_p2_character_is_pikmin(pc_p2_captain_loaded_character(1)))) {
+		return;
+	}
+
+	int vpId                = vp->mVpId;
+	J3DModelData* modelData = pikiMgr->mHappaModel[Leaf];
+	J3DMaterial* mat        = modelData->getJointNodePointer(0)->getMesh();
+
+	j3dSys.setVtxPos(modelData->getVtxPosArray());
+	j3dSys.setVtxNrm(modelData->getVtxNrmArray());
+	j3dSys.setVtxCol(modelData->getVtxColorArray(0));
+	J3DShape::resetVcdVatCache();
+
+	for (; mat != nullptr; mat = mat->mNext) {
+		mat->loadSharedDL();
+		mat->mShape->loadPreDrawSetting();
+
+		for (int i = 0; i < mMax; i++) {
+			if (mOpenIds[i]) {
+				continue;
+			}
+			Navi* navi = &mArray[i];
+			if (!pc_p2_character_is_pikmin(pc_p2_captain_loaded_character(navi->mNaviIndex)) || !navi->mModel
+			    || navi->mModel->mJ3dModel->getModelData()->getShapeNodePointer(0)->checkFlag(J3DShape_Hide) || !navi->mBeaconJoint || !navi->mLod.isFlag(AILOD_IsVisible)
+			    || !navi->mLod.isVPVisible(vpId)) {
+				continue;
+			}
+
+			Mtx mtx;
+			PSMTXConcat(vp->getMatrix(true)->mMatrix.mtxView, navi->mBeaconJoint->getWorldMatrix()->mMatrix.mtxView, mtx);
+			GXLoadPosMtxImm(mtx, 0);
+			GXLoadNrmMtxImm(mtx, 0);
+			float tint[3];
+			const bool tinted = pc_p2_captain_tint(navi->mNaviIndex, tint);
+			if (tinted) {
+				pc_gfx_set_out_tint(tint[0], tint[1], tint[2]);
+			}
+			mat->mShape->simpleDrawCache();
+			if (tinted) {
+				pc_gfx_clear_out_tint();
+			}
+		}
+	}
+}
+
 /**
  * @note Address: 0x8015B090
  * @note Size: 0xD4
@@ -244,15 +393,18 @@ void NaviMgr::loadResources_float()
 {
 	JKRArchive* arc = JKRMountArchive("/user/Kando/piki/pikis.szs", JKRArchive::EMM_Mem, sys->mSysHeap, JKRArchive::EMD_Head);
 
-	void* file
-	    = playData->isStoryFlag(STORY_DebtPaid) ? arc->getResource("orima_model/syatyou.bmd") : arc->getResource("orima_model/orima3.bmd");
+	mLouieModel = loadCaptainModel(arc, 1, pc_p2_captain_character(1, playData->isStoryFlag(STORY_DebtPaid)), nullptr);
 
-	J3DModelData* model = J3DModelLoaderDataBase::load(file, J3DMLF_Material_PE_FogOff | J3DMLF_UsePostTexMtx | J3DMLF_UseImmediateMtx);
-	for (u16 i = 0; i < model->getShapeNum(); i++) {
-		model->getShapeNodePointer(i)->setTexMtxLoadType(0x2000);
+	// Desafío y VS: el selector se abre después de NaviMgr::load, que ya cargó
+	// el modelo del capitán 1. Si la elección cambió, se carga aquí (heap del
+	// nivel); si no, se vuelve al de NaviMgr::load, que no caduca con el nivel.
+	const int captain1 = pc_p2_captain_character(0, false);
+	if (captain1 == sPcCaptain1Character) {
+		mOlimarModel = sPcCaptain1Model;
+		pc_p2_captain_set_loaded_character(0, captain1);
+	} else {
+		mOlimarModel = loadCaptainModel(arc, 0, captain1, nullptr);
 	}
-
-	mLouieModel = model;
 }
 
 /**
@@ -461,6 +613,17 @@ void NaviMgr::doSimulation(f32 rate)
 	PSM::ActorDirector_TempoChange* psm = PSMGetLifeD();
 	if (psm) {
 		Navi* navi = naviMgr->getActiveNavi();
+#ifdef PIKI_PC_PORT
+		// Co-op: suena por el capitán vivo con menos vida.
+		if (pc_p2_coop_active()) {
+			for (int i = 0; i < 2; i++) {
+				Navi* other = getAt(i);
+				if (other && other->isAlive() && (!navi || other->getLifeRatio() < navi->getLifeRatio())) {
+					navi = other;
+				}
+			}
+		}
+#endif
 		if (navi) {
 			if (navi->getLifeRatio() <= 0.5f) {
 				psm->directOn();

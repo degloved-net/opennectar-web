@@ -52,9 +52,27 @@
 #  ifndef APIENTRYP
 #    define APIENTRYP GL_APIENTRYP
 #  endif
+#elif defined(__APPLE__)
+// macOS ships only the Apple headers. <GL/gl.h> resolves to this project's
+// pc_port/gl/gl.h on the case-insensitive filesystem, so it is not used here.
+// gl3.h is the core-profile header that the renderer targets on macOS.
+#  ifndef GL_SILENCE_DEPRECATION
+#    define GL_SILENCE_DEPRECATION
+#  endif
+#  include <OpenGL/gl3.h>
+#  include <OpenGL/glext.h>
+// GL_KHR_debug (GL 4.3) error tokens. Apple's core header stops at 3.2, and the
+// renderer names these in its glGetError report. Values as in the Khronos registry.
+#  ifndef GL_STACK_OVERFLOW
+#    define GL_STACK_OVERFLOW 0x0503
+#  endif
+#  ifndef GL_STACK_UNDERFLOW
+#    define GL_STACK_UNDERFLOW 0x0504
+#  endif
 #else
-#  include <GL/gl.h>
-#  include <GL/glext.h>
+// SDL's headers avoid the legacy gl/gl.h stubs shadowing system GL on
+// case-insensitive Windows filesystems.
+#  include <SDL_opengl.h>
 #endif
 
 // Red de seguridad: si alguna cabecera del sistema acabara arrastrando

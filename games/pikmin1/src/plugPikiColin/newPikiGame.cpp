@@ -24,6 +24,8 @@
 #include "SoundMgr.h"
 #include "gameflow.h"
 #include "timing/pc_tick_profiler.h"
+#include "timing/pc_frame_scheduler.h"
+#include "pc_window.h"
 #include <chrono>
 
 #include "settings/pc_settings.h"
@@ -53,8 +55,13 @@
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
 #include "timing/pc_render_phase.h"
+#include "netplay/pc_netplay_camlead.h"
+#include "netplay/pc_netplay_det.h"
+#include "netplay/pc_netplay_present.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_permadeath.h"
+#include "randomizer/pc_randomizer.h"
+#include "randomizer/pc_randomizer_catalog.h"
 #include "pc_discord.h"
 
 // Discord Rich Presence: zona, día y piezas de la partida en curso.
@@ -520,6 +527,7 @@ struct DayOverModeState : public ModeState {
 		STATE_PhaseTwo   = 2, ///< 2, either quick transit to quitter, or next ending cutscene (happy:onyons, neutral:space, bad:olimin).
 		STATE_PhaseThree = 3, ///< 3, only endings - neutral/bad: quick transit to quitter; happy: space cutscene/final results.
 		STATE_PhaseFour  = 4, ///< 4, done in every situation! finish processing any logic and quit out of gameplay mode state.
+		STATE_PcTutorialSkip = 5, ///< PC: tutorial state committed; leave directly for the world map.
 	};
 
 	/**
@@ -537,6 +545,20 @@ struct DayOverModeState : public ModeState {
 		// Speedrun: un split por día, con la zona que se acaba de jugar.
 		if (flowCont.mCurrentStage) {
 			pc_speedrun_on_day_end(flowCont.mCurrentStage->mStageID, gameflow.mWorldClock.mCurrentDay);
+		}
+
+		// The tutorial skip has already granted its canonical inventory and
+		// progression. Commit the same bookkeeping as a real Day 1 ending, but
+		// do not construct any march, take-off, night or results presentation.
+		if (pc_tutorial_skip_pending()) {
+			gamecore->cleanupDayEnd();
+			gamecore->exitDayEnd();
+			if (gameflow.mWorldClock.mCurrentDay < 2) {
+				gameflow.mWorldClock.mCurrentDay = 2;
+			}
+			pc_tutorial_skip_clear_pending();
+			mState = STATE_PcTutorialSkip;
+			return;
 		}
 #endif
 
@@ -1003,10 +1025,16 @@ ModeState* IntroGameModeState::update(u32& result)
 ModeState* RunningModeState::update(u32& result)
 {
 #if defined(PIKI_PC_PORT)
+	// Netplay: the end screen's choice comes from both players' synced pads,
+	// so every peer leaves on the same tick.
+	if (pc_vs_active() && pc_netplay_deterministic() && sP1Controller && sP2Controller) {
+		pc_vs_end_screen_sim_input(sP1Controller->mInputPressed, sP2Controller->mInputPressed);
+	}
 	// VS: revancha o título, pedidos desde la pantalla final.
 	if (const int vsExit = pc_vs_take_exit_request()) {
 		gameflow.mPauseAll                         = FALSE;
 		mParentSection->mPendingOnePlayerSectionID = vsExit == PC_VS_EXIT_REMATCH ? ONEPLAYER_NewPikiGame : ONEPLAYER_GameExit;
+		if (vsExit != PC_VS_EXIT_REMATCH) pc_vs_note_left_to_title();
 		gsys->setFade(0.0f);
 		return new QuittingGameModeState(mParentSection);
 	}
@@ -1208,6 +1236,7 @@ ModeState* RunningModeState::update(u32& result)
 		// y "salir", volver al título.
 		gameflow.mIsUIOverlayActive                = mIsOverlayCached;
 		mParentSection->mPendingOnePlayerSectionID = state == zen::ogScrPauseMgr::PAUSE_ExitToSunset ? ONEPLAYER_NewPikiGame : ONEPLAYER_GameExit;
+		if (state == zen::ogScrPauseMgr::PAUSE_ExitToTitle) pc_vs_note_left_to_title();
 		gsys->setFade(0.0f);
 		return new QuittingGameModeState(mParentSection);
 #endif
@@ -1241,6 +1270,22 @@ ModeState* RunningModeState::update(u32& result)
 		gameflow.mIsUIOverlayActive = mIsOverlayCached;
 		seSystem->playSysSe(SYSSE_UNPAUSE);
 	}
+#if defined(PIKI_PC_PORT)
+	else if (pc_speedrun_take_reset()) {
+		// Speedrun: reset rápido. CardSelect empieza otra run sin menús.
+		mParentSection->mPendingOnePlayerSectionID = ONEPLAYER_CardSelect;
+		gsys->setFade(0.0f);
+		return new QuittingGameModeState(mParentSection);
+	} else if (pc_speedrun_debug_take_day_end()) {
+		fprintf(stderr, "[SR debug] tutorial skip / day end: forceDayEnd\n"); // TEMP
+		// Speedrun, atajo de prueba (PIKMIN_SR_DEBUG): lo mismo que "Ir al atardecer".
+		gamecore->forceDayEnd();
+#if !defined(VERSION_PIKIDEMO) && !defined(VERSION_GPIJ01_01)
+		gameflow.mIsPauseAllowed = FALSE;
+#endif
+		gameflow.mIsDayEndTriggered = TRUE;
+	}
+#endif
 
 	return this;
 }
@@ -1499,6 +1544,27 @@ ModeState* DayOverModeState::update(u32& result)
 	STACK_PAD_VAR(1);
 
 	result = UPDATE_AI; // we need animations to play, but we don't need in-game time to pass
+
+#if defined(PIKI_PC_PORT)
+	if (mState == STATE_PcTutorialSkip) {
+		if (pc_randomizer_active()) {
+			// The bootstrap and the seed exist only in memory until the file is
+			// written: leaving from the map before another day ends would lose
+			// both. Save to the slot the file was created in, through the same
+			// path as an ordinary day-end save.
+			CardQuickInfo infos[4];
+			gameflow.mMemoryCard.getQuickInfos(infos); // picks the spare card file
+			gameflow.mPlayState.mSaveSlot = gameflow.mGamePrefs.mMostRecentFileSlot;
+			gameflow.mMemoryCard.saveCurrentGame();
+			fprintf(stderr, "[PC] randomizer: initial save to slot %d %s\n", int(gameflow.mPlayState.mSaveSlot),
+			        gameflow.mMemoryCard.mDidSaveFail ? "FAILED" : "ok");
+			pc_randomizer_write_spoiler_log();
+		}
+		mParentSection->mPendingOnePlayerSectionID = ONEPLAYER_MapSelect;
+		gsys->setFade(0.0f);
+		return new QuittingGameModeState(mParentSection);
+	}
+#endif
 
 	// handle any text windows we might have open, such as during endings
 	handleTutorialWindow(result, mParentSection->mController);
@@ -1924,6 +1990,7 @@ ModeState* DayOverModeState::initialisePhaseTwo()
 			info.mScore   = GameStat::allPikis;
 #if defined(PIKI_PC_PORT)
 			pc_achievements_on_challenge_score(info.mStageID, info.mScore);
+			pc_speedrun_on_challenge_result(flowCont.mCurrentStage->mStageID, info.mScore);
 #endif
 			// check if we got a new hiscore for this course, and update the info if so
 			gameflow.mGamePrefs.checkIsHiscore(info);
@@ -2264,7 +2331,16 @@ public:
 
 		if (playerState->isTutorial()) {
 			// start our wake-up post-crash-landing cutscene for Day 1
+		#if defined(PIKI_PC_PORT)
+			// A requested tutorial skip must not create a movie only to tear it
+			// down from inside the gameplay update; that is re-entrant and leaves
+			// the movie renderer holding objects which the skip just released.
+			if (!pc_tutorial_skip_pending()) {
+				gameflow.mMoviePlayer->startMovie(DEMOID_OlimarWakeUp, 0, nullptr, nullptr, nullptr, CAF_AllVisibleMask, true);
+			}
+		#else
 			gameflow.mMoviePlayer->startMovie(DEMOID_OlimarWakeUp, 0, nullptr, nullptr, nullptr, CAF_AllVisibleMask, true);
+		#endif
 		} else if (flowCont.mCurrentStage->mStageID < STAGE_COUNT
 #if defined(PIKI_PC_PORT)
 		           && !pc_vs_active() // VS: directo al mapa, todo ya colocado
@@ -2352,11 +2428,21 @@ public:
 	{
 		Matrix4f orthoMtx;
 
+#if defined(PIKI_PC_PORT)
+		// Netplay two-pass frame: the movie update is sim.
+		if (pc_netplay_present_sim_side()) {
+#endif
 		if (!gameflow.mIsUIOverlayActive || gameflow.mIsTutorialTextActive) {
 			// update any cutscenes or text demos
 			gameflow.mMoviePlayer->update();
 		}
+#if defined(PIKI_PC_PORT)
+		}
 
+		// Netplay: the sim pass keeps the SimCamera installed; only the
+		// presentation pass drives the real camera.
+		if (!pc_netplay_present_sim_pass()) {
+#endif
 		if (!gameflow.mMoviePlayer->setCamera(gfx)) {
 			// false = no scene currently active, so no preset camera information to go off
 			if (gameflow.mMoviePlayer->mCamTransitionFactor > 0.0f) {
@@ -2420,18 +2506,46 @@ public:
 			gfx.setCamera(&mGameCamera);
 			mGameCamera.update(f32(gfx.mScreenWidth) / f32(gfx.mScreenHeight), mGameCamera.mFov, pc_first_person_active() ? 3.0f : 100.0f, mCameraFarClip);
 		}
+#if defined(PIKI_PC_PORT)
+		}
+#endif
 
 #if defined(PIKI_PC_PORT)
 		// Pantalla partida (PLAN_COOP fase 3): fuera de cinemáticas se dibuja
 		// el mundo dos veces, una por Olimar, cada una en su mitad y con su
 		// cámara. El estado (sonido, efectos) solo avanza en la primera pasada.
-		const bool splitScreen = sGamecoreLive && gamecore && gamecore->isSplitScreen() && !gameflow.mMoviePlayer->mIsActive
+		// Netplay: each peer draws only its local captain, full screen, with
+		// the same movie and memory-card exclusions; both captains are still
+		// simulated.
+		const bool detSingleView = pc_netplay_present_two_pass_active() && sGamecoreLive && gamecore
+		                        && gamecore->isSplitScreen() && !gameflow.mMoviePlayer->mIsActive
+		                        && !(gameflow.mDemoFlags & CinePlayerFlags::NonGameMovie) && !memcardWindow;
+		const bool splitScreen = !detSingleView && sGamecoreLive && gamecore && gamecore->isSplitScreen()
+		                      && !gameflow.mMoviePlayer->mIsActive
 		                      && !(gameflow.mDemoFlags & CinePlayerFlags::NonGameMovie) && !memcardWindow;
 		mSplitViews = splitScreen ? 2 : 1;
 		for (int view = 0; view < mSplitViews; view++) {
 			if (sGamecoreLive && gamecore) gamecore->mRenderPass = view;
 			if (splitScreen) {
 				beginSplitView(gfx, view);
+			}
+			// The presentation pass shows the local captain's camera, updated
+			// for the full-screen aspect and clip as beginView does per view.
+			if (detSingleView && !pc_netplay_present_sim_side()) {
+				const int localPlayer = pc_netplay_present_local_player();
+				Camera* localCam      = gamecore->getViewCamera(localPlayer);
+				if (localCam) {
+					localCam->update(f32(gfx.mScreenWidth) / f32(gfx.mScreenHeight), localCam->mFov,
+					                 pc_first_person_active() ? 3.0f : 100.0f, mCameraFarClip);
+					// In a lockstep session the view leads with the local camera
+					// controls (a separate camera; the sim camera is unchanged).
+					Camera* viewCam = pc_netplay_camlead_view(localPlayer, localCam);
+					if (viewCam != localCam) {
+						viewCam->update(f32(gfx.mScreenWidth) / f32(gfx.mScreenHeight), viewCam->mFov,
+						                pc_first_person_active() ? 3.0f : 100.0f, mCameraFarClip);
+					}
+					gfx.setCamera(viewCam);
+				}
 			}
 #endif
 
@@ -2459,7 +2573,7 @@ public:
 				}
 
 #if defined(PIKI_PC_PORT)
-				if (isDVDNormal && gamecore->mRenderPass == 0) {
+				if (isDVDNormal && gamecore->mRenderPass == 0 && pc_netplay_present_sim_side()) {
 #else
 				if (isDVDNormal) {
 #endif
@@ -2536,6 +2650,11 @@ public:
 		if (!mIsInitialSetup) {
 			// check if we should advance the time of day
 			if (!gsys->resetPending() && (!mActiveMenu || gameflow.mMoviePlayer->mIsActive)) {
+#if defined(PIKI_PC_PORT)
+				// Netplay two-pass frame: the world sim (clock, Node::update,
+				// HUD update, updateAI) runs on the sim side only.
+				if (pc_netplay_present_sim_side()) {
+#endif
 				// PIKMIN_TICK_STATS: the world simulation lives here, inside
 				// the draw, so time it apart from the GX translation.
 				const bool profiling = pc_tick_profiler_enabled();
@@ -2550,9 +2669,11 @@ public:
 					// Mod "Infinite Day": only the playable clock is held. The
 					// title screen keeps its own clock running, so its sky
 					// still moves. Day 1 is left alone: the tutorial only ends
-					// when its clock reaches sunset after the engine.
+					// when its clock reaches sunset after the engine. The last day is left
+					// alone too, so its sunset ends the game and plays the ending.
 					const bool pcClockHeld
-					    = pc_settings_get_infinite_day() != 0 && gameflow.mWorldClock.mCurrentDay != 1;
+					    = pc_settings_get_infinite_day() != 0 && gameflow.mWorldClock.mCurrentDay != 1
+					   && gameflow.mWorldClock.mCurrentDay != MAX_DAYS;
 					if (!pcClockHeld && !gameflow.mMoviePlayer->mIsActive && (mUpdateFlags & UPDATE_WORLD_CLOCK)
 					    && !playerState->isTutorial()) {
 						f32 tod = gameflow.mWorldClock.mTimeOfDay;
@@ -2581,6 +2702,9 @@ public:
 					    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count()
 					        - simStart);
 				}
+#if defined(PIKI_PC_PORT)
+				}
+#endif
 			}
 		} else {
 			// we're still in initial set up - finalise things so we can start properly
@@ -2728,6 +2852,12 @@ public:
 			if (playerState->isTutorial() && !gameflow.mIsDayEndActive) {
 				isTimeMoving = false;
 			}
+#if defined(PIKI_PC_PORT)
+			// Eternal Night también en el día del tutorial, que fija su propia hora.
+			if (pc_settings_get_eternal_night()) {
+				isTimeMoving = true;
+			}
+#endif
 			mapMgr->mDayMgr->refresh(gfx, isTimeMoving ? PC_VISUAL_TOD() : TUTORIAL_TIME_OF_DAY, 8); // use 8 lights
 			mCameraFarClip = 10000.0f; // anything further than 10000 units isn't rendered
 
@@ -3303,9 +3433,12 @@ NewPikiGameSection::NewPikiGameSection()
 	int frameClampValue = 2;  // Default to 30 fps (clamp=2)
 	if (fpsModeValue == 1) {
 		frameClampValue = 1;  // 60 fps
-	} else if (fpsModeValue == 2) {
-		frameClampValue = 0;  // 120 Hz ticks; 0 is a port-only value, the game never sets it
+	} else if (fpsModeValue == 2 || fpsModeValue == 3) {
+		frameClampValue = 0;  // high-rate ticks; 0 is a port-only value, the game never sets it
 	}
+	// fpsMode=3 ticks at the display's refresh rate instead of a fixed 120 Hz.
+	pc_frame_set_high_rate(fpsModeValue == 3 ? pc_window_get_refresh_rate() : 120.0);
+	pc_frame_set_vsync_lock(fpsModeValue == 3);
 	gsys->setFrameClamp(frameClampValue);
 
 #if defined(WIN32) || defined(DEVELOP)

@@ -1,3 +1,13 @@
+#ifdef PIKI_PC_PORT
+extern "C" {
+int pc_p2_permadeath_active(void);
+void pc_p2_rules_erase_current_save(void);
+}
+#include "pc_p2_captains.h"
+#include "Game/pcCoop.h"
+#include "pc_speedrun.h"
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "Game/DeathMgr.h"
 #include "Game/GameConfig.h"
 #include "Game/Entities/ItemOnyon.h"
@@ -341,7 +351,11 @@ void GameState::on_demo_timer(SingleGameSection* game, u32 id)
 		gameSystem->mSection->disableTimer(DEMOTIMER_YouAppearLost);
 	}
 	if (id == DEMOTIMER_Reds_Purples_Tutorial) {
+#ifdef PIKI_PC_PORT
+		Navi* navi = naviMgr->getMovieNavi(); // co-op: Olimar o, si no, Louie
+#else
 		Navi* navi = naviMgr->getActiveNavi();
+#endif
 		if (!navi) {
 			int id = 1;
 			if (!gameSystem->mSection->mPrevNaviIdx)
@@ -357,7 +371,11 @@ void GameState::on_demo_timer(SingleGameSection* game, u32 id)
 		gameSystem->mSection->disableTimer(DEMOTIMER_Reds_Purples_Tutorial);
 	}
 	if (id == DEMOTIMER_Meet_Red_Pikmin) {
+#ifdef PIKI_PC_PORT
+		Navi* navi = naviMgr->getMovieNavi(); // co-op: Olimar o, si no, Louie
+#else
 		Navi* navi = naviMgr->getActiveNavi();
+#endif
 		if (!navi) {
 			int id = 1;
 			if (!gameSystem->mSection->mPrevNaviIdx)
@@ -379,7 +397,11 @@ void GameState::on_demo_timer(SingleGameSection* game, u32 id)
 		gameSystem->mSection->disableTimer(DEMOTIMER_Meet_Red_Pikmin);
 	}
 	if (id == DEMOTIMER_Unlock_Switch_To_Louie) {
+#ifdef PIKI_PC_PORT
+		Navi* navi = naviMgr->getMovieNavi(); // co-op: Olimar o, si no, Louie
+#else
 		Navi* navi = naviMgr->getActiveNavi();
+#endif
 		if (!navi) {
 			int id = 1;
 			if (!gameSystem->mSection->mPrevNaviIdx)
@@ -464,6 +486,52 @@ void GameState::exec(SingleGameSection* game)
 		return;
 	}
 
+#ifdef PIKI_PC_PORT
+	// Atajos de prueba del modo Speedrun (PIKMIN_SR_DEBUG=1): F6 va al
+	// atardecer por el camino de "Ir al atardecer" y F8 cierra la categoría
+	// (F7, salida de cueva, en CaveState::exec).
+	if (pc_speedrun_debug_take_finish()) {
+		pc_speedrun_on_finish(-1, gameSystem->mTimeMgr->mDayCount);
+	}
+	if (pc_speedrun_debug_take_cave_warp() && ItemCave::mgr) {
+		// Junto a Emergence Cave ('t_01') o, si no está en este mapa, la primera
+		// cueva abierta. A 40 de su centro: Navi::checkCave la ofrece a menos de 80.
+		ItemCave::Item* target = nullptr;
+		Iterator<BaseItem> iterator(ItemCave::mgr);
+		CI_LOOP(iterator)
+		{
+			ItemCave::Item* hole = static_cast<ItemCave::Item*>(*iterator);
+			if (!hole->isAlive() || hole->mBarrel) {
+				continue;
+			}
+			if (!target || hole->mCaveID.getID() == 't_01') {
+				target = hole;
+			}
+		}
+#ifdef PIKI_PC_PORT
+		Navi* navi = naviMgr->getMovieNavi(); // co-op: Olimar o, si no, Louie
+#else
+		Navi* navi = naviMgr->getActiveNavi();
+#endif
+		if (target && navi) {
+			Vector3f pos = target->getPosition();
+			pos.x += 40.0f;
+			if (mapMgr) {
+				pos.y = mapMgr->getMinY(pos);
+			}
+			navi->setPosition(pos, false);
+			pikiMgr->moveAllPikmins(pos, 50.0f, nullptr);
+		}
+	}
+	pc_p2_rnd_debug_exec(0); // atajos de prueba del Randomizer (PIKI_RND_DEBUG)
+	if (pc_speedrun_debug_take_day_end()) {
+		gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
+		DayEndArg arg(DayEndState::DETYPE_Normal);
+		transit(game, SGS_DayEnd, &arg);
+		return;
+	}
+#endif
+
 	game->updateMainMapScreen();
 
 	// Check starting the "you appear lost" cutscene timer
@@ -486,6 +554,9 @@ void GameState::exec(SingleGameSection* game)
 		pikiMgr->forceEnterPikmins(false);
 		game->saveToGeneratorCache(game->mCurrentCourseInfo);
 		game->advanceDayCount();
+#ifdef PIKI_PC_PORT
+		pc_speedrun_on_finish(PC_SR_FINISH_DEBT, gameSystem->mTimeMgr->mDayCount);
+#endif
 		gameSystem->setPause(false, "repay-done", 3);
 		EndingArg arg(0);
 		transit(game, SGS_Ending, &arg);
@@ -495,6 +566,9 @@ void GameState::exec(SingleGameSection* game)
 		pikiMgr->forceEnterPikmins(false);
 		game->saveToGeneratorCache(game->mCurrentCourseInfo);
 		game->advanceDayCount();
+#ifdef PIKI_PC_PORT
+		pc_speedrun_on_finish(PC_SR_FINISH_COMPLETE, gameSystem->mTimeMgr->mDayCount);
+#endif
 		gameSystem->setPause(false, "repay-done", 3);
 		EndingArg arg(EndingState::Ending_IsComplete);
 		transit(game, SGS_Ending, &arg);
@@ -513,7 +587,11 @@ void GameState::exec(SingleGameSection* game)
 		return;
 	}
 
+#ifdef PIKI_PC_PORT
+	Screen::gGame2DMgr->setGamePad(game->pcMenuController());
+#else
 	Screen::gGame2DMgr->setGamePad(game->mControllerP1);
+#endif
 
 	// Check status of opened pause menu
 	int menustate = Screen::gGame2DMgr->check_SMenu();
@@ -554,8 +632,13 @@ void GameState::exec(SingleGameSection* game)
 		break;
 			}	default: {
 		// Check open pause menu
+#ifdef PIKI_PC_PORT
+		if (!gameSystem->isFlag(GAMESYS_DisablePause) && moviePlayer->mDemoState == DEMOSTATE_Inactive && !gameSystem->paused()
+		    && game->pcPausePressed()) {
+#else
 		if (!gameSystem->isFlag(GAMESYS_DisablePause) && moviePlayer->mDemoState == DEMOSTATE_Inactive && !gameSystem->paused()
 		    && game->mControllerP1->getButtonDown() & Controller::PRESS_START) {
+#endif
 			og::Screen::DispMemberSMenuAll disp;
 			game->setDispMemberSMenu(disp);
 			if (Screen::gGame2DMgr->open_SMenu(disp)) {
@@ -579,7 +662,11 @@ void GameState::exec(SingleGameSection* game)
 		if (GameStat::getAllPikmins(AllPikminCalcs) - GameStat::getZikatuPikmins(AllPikminCalcs) == 0 && playData->hasBootContainer(Red)) {
 			gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
 			MoviePlayArg moviePlayArg("s05_pikminzero", nullptr, game->mMovieFinishCallback, 0);
+#ifdef PIKI_PC_PORT
+			Navi* navi = naviMgr->getMovieNavi(); // co-op: Olimar o, si no, Louie
+#else
 			Navi* navi = naviMgr->getActiveNavi();
+#endif
 			if (!navi) {
 				int id = 1;
 				if (!gameSystem->mSection->mPrevNaviIdx)
@@ -675,6 +762,10 @@ void GameState::onMovieStart(SingleGameSection* game, MovieConfig* config, u32, 
 			    = playData->isStoryFlag(STORY_DebtPaid) ? Screen::Game2DMgr::GOTITLE_PresidentDown : Screen::Game2DMgr::GOTITLE_LouieDown;
 			game->setPlayerMode(NAVIID_Louie);
 		}
+#ifdef PIKI_PC_PORT
+		// Selector de capitanes: el título sigue al personaje, no al índice.
+		naviType = (Screen::Game2DMgr::GameOverTitle)pc_p2_captain_down_title(naviID);
+#endif
 		Screen::gGame2DMgr->open_GameOver(naviType);
 	}
 
@@ -922,6 +1013,16 @@ void GameState::onMovieDone(SingleGameSection* game, MovieConfig* config, u32, u
 				gameSystem->mSection->setPlayerMode(NAVIID_Olimar);
 			}
 		} else {
+#ifdef PIKI_PC_PORT
+			// Permadeath: caen los dos capitanes, se borra la partida y se
+			// vuelve al título sin pasar por el guardado del final del día.
+			if (pc_p2_permadeath_active()) {
+				pc_p2_rules_erase_current_save();
+				gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
+				game->flow_goto_title();
+				return;
+			}
+#endif
 			gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
 			DayEndArg arg(DayEndState::DETYPE_CaptainsDown);
 			transit(game, SGS_DayEnd, &arg);

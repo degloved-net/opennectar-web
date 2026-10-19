@@ -42,9 +42,9 @@ struct ObjectActor : public JStage::TActor, public ObjectBase {
 
 	virtual ~ObjectActor();                                // _08
 #ifdef PIKI_PC_PORT
-	// Ticks intermedios de un cinematico a 60 FPS: reaplica la pose fijada en
-	// el ultimo tick sin avanzar comandos ni animaciones.
-	virtual void pcHoldPose() { }
+	// Ticks intermedios de un cinematico a 60 FPS: reconstruye la pose con las
+	// relaciones padre-hijo ya reevaluadas, sin avanzar comandos ni animaciones.
+	virtual void pcHoldPose();
 	// PIKMIN_MOVIE_MARKERS=1: marcadores de depuracion en los cinematicos.
 	virtual void pcDrawMarker(Graphics&) { }
 #endif
@@ -103,6 +103,7 @@ struct ObjectGameActor : public ObjectActor {
 	virtual void pcHoldPose();
 	virtual void pcDrawMarker(Graphics&);
 	mutable int mPcLastNodeId = -1; // articulacion pedida por un actor emparentado
+	bool mPcX03OnyonBirthSeen;
 #endif
 	virtual int JSGFindNodeID(const char*) const;          // _34
 	virtual bool JSGGetNodeTransformation(u32, Mtx) const; // _38

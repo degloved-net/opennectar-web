@@ -14,6 +14,17 @@
 #include <vector>
 #include <string>
 
+#include "netplay/pc_netplay_loadguard.h"
+
+// Netplay keep-alive (pc_netplay_loadguard.h): a slow stage load reads many
+// files inside one netplay tick. Strong-defined by pc_netplay_session.cpp in
+// netplay builds only, null otherwise.
+void pc_netplay_load_keepalive(int site);
+static inline void dvd_netplay_keepalive()
+{
+    if (pc_netplay_load_keepalive != nullptr) pc_netplay_load_keepalive(pc_netplay_loadguard::kSiteDvd);
+}
+
 static std::unordered_map<DVDFileInfo*, FILE*> sOpenFiles;
 static std::vector<std::string> sFastOpenPaths;
 
@@ -24,6 +35,7 @@ void DVDInit() {
 }
 
 BOOL DVDOpen(const char* filename, DVDFileInfo* fileInfo) {
+    dvd_netplay_keepalive();
     std::string path = filename;
     if (path.length() > 0 && (path[0] == '/' || path[0] == '\\')) {
         path = path.substr(1);
@@ -55,6 +67,7 @@ BOOL DVDFastOpen(s32 entryNum, DVDFileInfo* fileInfo) {
 
 s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 prio) {
     (void)prio;
+    dvd_netplay_keepalive();
     auto it = sOpenFiles.find(fileInfo);
     if (it == sOpenFiles.end()) return -1;
     

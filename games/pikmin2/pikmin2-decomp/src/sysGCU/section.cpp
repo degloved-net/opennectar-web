@@ -10,6 +10,14 @@ extern "C" u32 gPcSectionTicks;
 // pulsaciones que la actualizacion saltada no llega a ver.
 bool gPcMovieHoldFrame = false;
 extern "C" void pc_hold_frame_entry(void);
+extern "C" bool pc_gfx_held_frame_capture(void);
+extern "C" bool pc_gfx_held_frame_restore(void);
+extern "C" float pc_orig_tick_fraction(void);
+extern "C" bool pc_movie_interp_begin_frame(float alpha);
+extern "C" void pc_movie_interp_end_frame(void);
+extern "C" void pc_movie_interp_begin_tick(void);
+extern "C" void pc_movie_interp_end_tick(void);
+extern "C" void pc_movie_interp_reset(void);
 static bool pcMoviePlaying()
 {
 	return Game::moviePlayer && Game::moviePlayer->mDemoState != Game::DEMOSTATE_Inactive;
@@ -205,13 +213,14 @@ void Section::main()
 #ifdef PIKI_PC_PORT
 		gPcSectionTicks++;
 		pc_orig_tick_begin();
-		// Con el cinematico reproduciendose la partida se actualiza en cada tick
-		// (como en gameplay y como el cinePlayer de Pikmin 1): MoviePlayer solo
-		// avanza el guion en los ticks originales e interpola las curvas en los
-		// intermedios. El hold frame queda para la carga y los fundidos.
-		// PIKMIN_MOVIE_HOLD=1 vuelve al comportamiento anterior (30 Hz).
-		static const bool sPcMovieHold = getenv("PIKMIN_MOVIE_HOLD") != nullptr;
-		const bool pcHoldMovie         = pcMoviePlaying() && (sPcMovieHold || !pc_movie_active());
+		// Cinematicos: toda la partida (guion JStudio, actores, personajes,
+		// fisica, particulas) avanza solo en los ticks originales de 30 Hz, como
+		// en consola; los frames intermedios solo vuelven a presentar. Si la
+		// escena se actualiza en cada frame, los personajes del juego (60 Hz) y
+		// el guion (30 Hz) se desfasan: capitanes fuera de la cabina, vibracion.
+		// PIKMIN_MOVIE_LIVE=1: diagnostico, actualizacion en cada frame.
+		static const bool sPcMovieLive = getenv("PIKMIN_MOVIE_LIVE") != nullptr;
+		const bool pcHoldMovie         = pcMoviePlaying() && (!sPcMovieLive || !pc_movie_active());
 		gPcMovieHoldFrame              = pcHoldMovie && !PC_ORIG_TICK();
 		if (pcHoldMovie && PC_ORIG_TICK()) {
 			// Un paso cubre un periodo original entero.
@@ -222,18 +231,56 @@ void Section::main()
 		beginFrame();
 		beginRender();
 
-		sys->mTimers->_start("draw", true);
-		draw(*mGraphics);
-		sys->mTimers->_stop("draw");
+#ifdef PIKI_PC_PORT
+		// Frame intermedio de un cinematico: se dibuja la escena del ultimo tick
+		// con modelos y camara interpolados entre los dos ultimos ticks y luego
+		// se restaura todo. Si no se puede, se presenta otra vez la imagen exacta
+		// del ultimo tick (copiada al terminar ese frame).
+		static bool sPcHeldFrameReady = false;
+		const bool pcRepeatFrame      = gPcMovieHoldFrame && sPcHeldFrameReady;
+		const bool pcInterpFrame      = pcRepeatFrame && pc_movie_interp_begin_frame(pc_orig_tick_fraction());
+		if (!pcRepeatFrame || pcInterpFrame)
+#endif
+		{
+			sys->mTimers->_start("draw", true);
+			draw(*mGraphics);
+			sys->mTimers->_stop("draw");
+		}
+#ifdef PIKI_PC_PORT
+		if (pcInterpFrame) {
+			pc_movie_interp_end_frame();
+		}
+#endif
 		endRender();
+#ifdef PIKI_PC_PORT
+		if (pcRepeatFrame) {
+			if (!pcInterpFrame) {
+				pc_gfx_held_frame_restore();
+			}
+		} else {
+			sPcHeldFrameReady = pcHoldMovie && pc_gfx_held_frame_capture();
+		}
+#endif
 
 		sys->mTimers->_start("update", true);
 #ifdef PIKI_PC_PORT
 		if (gPcMovieHoldFrame) {
-			pc_hold_frame_entry();
-		} else
-#endif
+			// Las listas del tick siguen intactas (sin dibujo, o repuestas tras el
+			// frame interpolado): no hace falta reinscribir.
+			if (!pcRepeatFrame) {
+				pc_hold_frame_entry();
+			}
+		} else if (pcHoldMovie) {
+			pc_movie_interp_begin_tick(); // anota los modelos inscritos en el tick
+			update();
+			pc_movie_interp_end_tick();
+		} else {
+			pc_movie_interp_reset();
+			update();
+		}
+#else
 		update();
+#endif
 		sys->mTimers->_stop("update");
 		endFrame();
 #if defined(VERSION_US_DEMO)

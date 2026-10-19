@@ -277,6 +277,13 @@ void JKRHeap::callAllDisposer()
  * @note Size: 0x2C
  */
 
+#ifdef PIKI_PC_PORT
+// Cuenta los freeAll: pcMovieInterp no interpola un frame si en el último
+// tick se vació un montón (los viewports pueden apuntar a memoria liberada).
+extern "C" unsigned pc_heap_freeall_serial;
+unsigned pc_heap_freeall_serial = 0;
+#endif
+
 void JKRHeap::freeAll()
 {
 #ifdef PIKI_PC_PORT
@@ -291,6 +298,12 @@ void JKRHeap::freeAll()
 		        (void*)mEndAddress, (unsigned)mHeapSize);
 		pcHeapLogCaller();
 	}
+	// Los OSMutex/OSCond que vivían en este montón dejan de existir: sin esto
+	// sus entradas del registro del host (tamaño fijo) se quedaban ocupadas
+	// para siempre y, tras muchos subniveles, se agotaba ("host mutex registry
+	// exhausted"). dispose() y ~JKRHeap ya lo hacían; freeAll no.
+	pc_os_release_mutex_range((const void*)mStartAddress, (const void*)mEndAddress);
+	pc_heap_freeall_serial++;
 #endif
 	do_freeAll();
 }

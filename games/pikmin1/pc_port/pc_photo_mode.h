@@ -41,6 +41,13 @@ void pc_photo_mode_enter(float posX, float posY, float posZ,
 
 void pc_photo_mode_exit(void);
 
+/// Pose actual de la cámara libre, para guardar y recuperar un encuadre
+/// (atajos de grabación, pc_record). set solo tiene efecto con el modo activo.
+void pc_photo_mode_get_pose(float* posX, float* posY, float* posZ,
+                            float* pitch, float* yaw, float* roll);
+void pc_photo_mode_set_pose(float posX, float posY, float posZ,
+                            float pitch, float yaw, float roll);
+
 /**
  * @brief Advances the free camera and returns the pose to write to the camera.
  *

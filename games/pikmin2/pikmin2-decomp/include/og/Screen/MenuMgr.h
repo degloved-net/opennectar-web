@@ -44,6 +44,11 @@ struct MenuMgr {
 	void selectSub(u16);
 	void update();
 	void MenuOnOff();
+#if PIKI_PC_TOUCH
+	/// Táctil: opción tocada en este frame (-1 si ninguna). Llamar cada frame
+	/// mientras el menú se ve, para que la capa táctil sepa dónde está cada una.
+	int pcTouchTappedOption(bool tapped, f32 x, f32 y) const;
+#endif
 
 	int mCursorState;              // _00, Ill enum this eventually
 	f32 mCursorDelayTimer;         // _04

@@ -1,4 +1,7 @@
 #include "ebi/Screen/TMainScreen.h"
+#ifdef PIKI_PC_PORT
+extern bool gPcBgStretch;
+#endif
 #include "ebi/Screen/TScreenDataWindow.h"
 #include "ebi/Screen/TFileData.h"
 #include "ebi/E2DGraph.h"
@@ -9,6 +12,82 @@
 #include "PSSystem/PSSystemIF.h"
 #include "og/Screen/ogScreen.h"
 #include "JSystem/JKernel/JKRDvdRipper.h"
+#ifdef PIKI_PC_PORT
+#include "JSystem/J2D/J2DTextBox.h"
+#include "P2JME/P2JME.h"
+extern "C" int pc_p2_rules_slot_bits(int slot);
+bool pc_randomizer_menu_pending(void);
+
+namespace {
+// Etiqueta HARD / PERMADEATH de una partida, como la de Pikmin 1. Es hija de
+// la pelota del fichero: posición, animación de selección y visibilidad son
+// las de la ranura. Placa w08_160.bti teñida de rojo y la fuente de los
+// mensajes de esta misma pantalla, ambas de Pikmin 2.
+class PcRulesBadge : public J2DPicture {
+public:
+	PcRulesBadge(int slot, J2DPane* parent, JUTFont* font)
+	    : J2DPicture("w08_160.bti")
+	    , mSlot(slot)
+	    , mText(nullptr)
+	{
+		const f32 w  = 150.0f;
+		const f32 h  = 40.0f;
+		const f32 cx = parent->getWidth() * 0.5f;
+		const f32 y  = parent->getHeight() * 0.92f;
+		place(JGeometry::TBox2f(cx - w * 0.5f, y, cx + w * 0.5f, y + h));
+		// Tinte por color de vértice: setBlackWhite escribe GX_TEVREG0/1, que
+		// son globales, y el brillo y las partículas de las burbujas los
+		// heredaban (cuadrados rojos).
+		setCornerColor(JUtility::TColor(255, 110, 100, 255));
+
+		// El texto, como los del juego: un J2DTextBox hijo con la fuente del
+		// gestor de mensajes (los textos del BLO no traen fuente: FNT1 vacío).
+		const ResFONT* res = font ? font->getResFont() : nullptr;
+		if (res) {
+			mText = new J2DTextBox('PcRB', JGeometry::TBox2f(0.0f, 0.0f, w, h), res, "PERMADEATH", 32, J2DHBIND_Center,
+			                       J2DVBIND_Center);
+			mText->setFontSize(15.0f, 20.0f);
+			mText->setCharColor(JUtility::TColor(255, 255, 255, 255));
+			mText->setGradColor(JUtility::TColor(255, 230, 180, 255));
+			appendChild(mText);
+		}
+	}
+
+	virtual void drawSelf(f32 x, f32 y, Mtx* mtx)
+	{
+		const int bits = pc_p2_rules_slot_bits(mSlot);
+		// En la tarjeta del Randomizer todas las partidas lo son.
+		const bool rnd  = pc_randomizer_menu_pending() && (bits & 0x100);
+		const bool show = (bits & 0x30) || rnd;
+		if (mText) {
+			if (show) {
+				const char* label = "HARD";
+				if ((bits & 0x10) && (bits & 0x20))
+					label = rnd ? "RND HARD+PERMA" : "HARD + PERMA";
+				else if (bits & 0x10)
+					label = rnd ? "RND PERMADEATH" : "PERMADEATH";
+				else if (bits & 0x20)
+					label = rnd ? "RND HARD" : "HARD";
+				else
+					label = "RANDOMIZER";
+				mText->setString(label);
+				mText->show();
+			} else {
+				mText->hide();
+			}
+		}
+		if (!show) {
+			return;
+		}
+		J2DPicture::drawSelf(x, y, mtx);
+	}
+
+private:
+	int mSlot;
+	J2DTextBox* mText;
+};
+} // namespace
+#endif
 
 namespace ebi {
 namespace Screen {
@@ -238,6 +317,14 @@ void TMainScreen::doSetArchive(JKRArchive* archive)
 	mPaneND[0]      = static_cast<J2DPictureEx*>(E2DScreen_searchAssert(mMainScreen, 'ND1'));
 	mPaneND[1]      = static_cast<J2DPictureEx*>(E2DScreen_searchAssert(mMainScreen, 'ND2'));
 	mPaneND[2]      = static_cast<J2DPictureEx*>(E2DScreen_searchAssert(mMainScreen, 'ND3'));
+#ifdef PIKI_PC_PORT
+	// PIKMIN_NO_RULE_BADGE=1: sin etiquetas (para aislar fallos de dibujo).
+	if (!getenv("PIKMIN_NO_RULE_BADGE")) {
+		for (int i = 0; i < 3; i++) {
+			mPaneND[i]->appendChild(new PcRulesBadge(i, mPaneND[i], gP2JMEMgr ? gP2JMEMgr->mFont : nullptr));
+		}
+	}
+#endif
 	mPaneDataWindow = E2DScreen_searchAssert(mMainScreen, MC8("Ndataw"));
 
 	mPaneSelE0[0] = static_cast<J2DPicture*>(E2DScreen_searchAssert(mMainScreen, MC8("Pd1selE0")));
@@ -644,6 +731,13 @@ void TMainScreen::doDraw()
 		J2DPerspGraph* graf = &gfx->mPerspGraph;
 
 		graf->setPort();
+#ifdef PIKI_PC_PORT
+		// Pantallas anchas: el fondo (rejilla, banda, reflejo, destello) se
+		// estira a lo ancho; sus texturas no se repiten y prolongadas dejaban
+		// los lados negros o con el borde alargado. Tambien en las pantallas
+		// de partida nueva / datos que se dibujan encima.
+		gPcBgStretch = true;
+#endif
 		mMainScreen->draw(*gfx, *graf);
 
 		if (mNewScreen.mIsActive) {
@@ -657,6 +751,9 @@ void TMainScreen::doDraw()
 			Graphics gfx2;
 			mDataScreen.mScreenObj->draw(gfx2, *graf2);
 		}
+#ifdef PIKI_PC_PORT
+		gPcBgStretch = false;
+#endif
 	}
 
 	// If no state is set, return
@@ -760,6 +857,13 @@ void TMainScreen::decideDataBall(s32 fileID)
 void TMainScreen::createFiledecide(s32 id)
 {
 	Vector2f pos = E2DPane_getGlbCenter(mPaneSel[0][id]);
+#ifdef PIKI_PC_PORT
+	{
+		const Mtx& m = mPaneSel[0][id]->mGlobalMtx;
+		printf("[PC Port] Filedecide id=%d pos=(%.1f, %.1f) m=(%.3f %.3f %.1f / %.3f %.3f %.1f)\n", (int)id, pos.x, pos.y, m[0][0], m[0][1],
+		       m[0][3], m[1][0], m[1][1], m[1][3]);
+	}
+#endif
 	efx2d::Arg arg(pos);
 	efx2d::FileSelect::T2DFiledecide efx;
 	efx.create(&arg);

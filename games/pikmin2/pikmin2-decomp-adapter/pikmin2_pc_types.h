@@ -72,6 +72,77 @@ typedef unsigned int p2uint;
 #include <math.h>
 #endif
 
+/* ── Windows (MinGW): las guardas de glibc ──
+ * Las cabeceras del mini-STL del decomp (include/stl/stdio.h, string.h...) usan
+ * las MISMAS guardas que glibc (_STDIO_H, _STRING_H...). En Linux, como la
+ * cabecera real ya esta incluida, la del decomp se salta entera; con MinGW, que
+ * usa otras guardas (_INC_STDIO...), se procesaba y sus prototipos de GameCube
+ * chocaban con los del sistema. Se incluyen las reales y se definen las guardas
+ * que en Linux pone glibc: el decomp ve exactamente lo mismo que alli. */
+/* Android (bionic) pasa lo mismo: sus guardas son _STDIO_H_, _STRING_H_... */
+#if defined(_WIN32) || defined(__ANDROID__)
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <locale.h>
+#include <signal.h>
+#include <wchar.h>
+#ifndef _STDIO_H
+#define _STDIO_H 1
+#endif
+#ifndef _STRING_H
+#define _STRING_H 1
+#endif
+#ifndef _STDLIB_H
+#define _STDLIB_H 1
+#endif
+#ifndef _MATH_H
+#define _MATH_H 1
+#endif
+#ifndef _CTYPE_H
+#define _CTYPE_H 1
+#endif
+#ifndef _LIMITS_H
+#define _LIMITS_H 1
+#endif
+#ifndef _ERRNO_H
+#define _ERRNO_H 1
+#endif
+#ifndef _WCHAR_H
+#define _WCHAR_H 1
+#endif
+#ifndef _LOCALE_H
+#define _LOCALE_H 1
+#endif
+#ifndef _SIGNAL_H
+#define _SIGNAL_H 1
+#endif
+#endif
+
+/* ── Android: backtrace() solo existe desde API 33 (minSdk 29) ── */
+#if defined(__ANDROID__) && __ANDROID_API__ < 33
+#ifdef __cplusplus
+extern "C" {
+#endif
+static inline int backtrace(void** buf, int size) { (void)buf; (void)size; return 0; }
+static inline void backtrace_symbols_fd(void* const* buf, int size, int fd) { (void)buf; (void)size; (void)fd; }
+static inline char** backtrace_symbols(void* const* buf, int size)
+{
+	(void)buf;
+	char** r = (char**)malloc(sizeof(char*) * (size > 0 ? size : 1));
+	for (int i = 0; r && i < size; i++) r[i] = (char*)"?";
+	return r;
+}
+#ifdef __cplusplus
+}
+#endif
+#endif
+
+/* ── __dcbz: pone a cero el bloque de caché (32 bytes) en addr + off ── */
+#ifndef __dcbz
+#define __dcbz(addr, off) memset((char*)(addr) + (off), 0, 32)
+#endif
+
 /* ── Square: macro habitual del decomp (no esta en types.h) ── */
 #ifndef SQUARE
 #define SQUARE(x) ((x) * (x))
@@ -183,7 +254,7 @@ void*    pc_host_from_gc_phys(uint32_t phys);
  * La decompilacion trata nullptr como 0 (definicion original de MWCC).
  * Se define DESPUES de los headers del sistema (que no lo usan internamente)
  * para que en el juego completo se resuelva a 0 al preprocesador. */
-#ifdef __cplusplus
+#if defined(__cplusplus) && !defined(__ANDROID__)
 #undef nullptr
 #define nullptr 0
 #endif

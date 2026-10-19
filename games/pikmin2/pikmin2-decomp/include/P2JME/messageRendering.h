@@ -79,6 +79,11 @@ struct TRenderingProcessor : public TRenderingProcessorBase {
 	virtual f32 doDrawRuby(f32, f32, f32, f32, int, bool);     // _78
 	virtual f32 doDrawLetter(f32, f32, f32, f32, int, bool);   // _7C
 	virtual bool doTagControlAbtnWait();                       // _80 (weak)
+#ifdef PIKI_PC_PORT
+	// Origen del icono táctil en línea: deja cargada la matriz con la que se
+	// dibuja el texto en (x, y) y devuelve false si esa línea no se ve.
+	virtual bool pcInlineIconOrigin(f32& x, f32& y) { return true; }
+#endif
 
 	void initRuby();
 	void drawRuby();

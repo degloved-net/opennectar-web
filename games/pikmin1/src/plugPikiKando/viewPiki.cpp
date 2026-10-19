@@ -11,6 +11,9 @@
 #include "PikiMgr.h"
 #if defined(PIKI_PC_PORT)
 #include "mods/pc_hd_models.h"
+#include "netplay/pc_netplay_policy.h"
+#include "netplay/pc_netplay_present.h"
+#include "timing/pc_anim_timing.h"
 #endif
 #include "PikiState.h"
 #include "Shape.h"
@@ -466,7 +469,14 @@ PcHdModelId ViewPiki::hdHappaModel() const
 void ViewPiki::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 {
 	Vector3f pos;
+#if defined(PIKI_PC_PORT)
+	// Netplay: the joint anchors are sim; the presentation pass draws from
+	// the stored values.
+	const bool simSide = pc_netplay_present_sim_side();
+	if (simSide && (AIPerf::optLevel <= 2 || mOptUpdateContext.updatable())) {
+#else
 	if (AIPerf::optLevel <= 2 || mOptUpdateContext.updatable()) {
+#endif
 		pos.set(0.0f, 0.0f, 0.0f);
 		mPikiShape->mShape->calcJointWorldPos(gfx, 0, pos);
 		mShadowPos = pos;
@@ -483,10 +493,22 @@ void ViewPiki::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 	} else {
 		pos.set(6.0f, 0.0f, 0.0f);
 	}
+#if defined(PIKI_PC_PORT)
+	if (simSide) {
+		mPikiShape->mShape->calcJointWorldPos(gfx, 6, pos);
+		mEffectPos = pos;
+	}
+#else
 	mPikiShape->mShape->calcJointWorldPos(gfx, 6, pos);
 	mEffectPos = pos;
+#endif
 
+#if defined(PIKI_PC_PORT)
+	// Netplay: the damage flash is draw-only, so the cosmetic stream.
+	const Colour drawColour = (isDamaged() && pc_cosmetic_randf(1.0f) > 0.5f) ? COLOUR_WHITE : mCurrentColour;
+#else
 	const Colour drawColour = (isDamaged() && gsys->getRand(1.0f) > 0.5f) ? COLOUR_WHITE : mCurrentColour;
+#endif
 	mPikiShape->mShape->mMaterialList->setColour(drawColour);
 #if defined(PIKI_PC_PORT)
 	// The original piki texture is grey and mCurrentColour paints it; the HD
@@ -503,9 +525,15 @@ void ViewPiki::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 		if (amount > hdWhiten) hdWhiten = amount;
 	}
 	const GXColor hdHappaTint = { 255, 255, 255, 255 };
+	// The presentation pass submits only what the local frustum sees.
+	const bool submit = simSide || gfx.mCamera->isPointVisible(mSRT.t, getSize() * 4.0f);
 #endif
 
+#if defined(PIKI_PC_PORT)
+	if (aiCullable() && submit) {
+#else
 	if (aiCullable()) {
+#endif
 #if defined(PIKI_PC_PORT)
 		if (!pc_hd_model_draw_skinned(gfx, mPikiShape->mShape, hdPikiModel(), hdTint, static_cast<u8>(hdWhiten)))
 #endif
@@ -516,7 +544,11 @@ void ViewPiki::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 		mPanickedEffect->updatePos(mShadowPos);
 	}
 
+#if defined(PIKI_PC_PORT)
+	if (aiCullable() && submit && AIPerf::optLevel < 3 && mHappaModel) {
+#else
 	if (aiCullable() && AIPerf::optLevel < 3 && mHappaModel) {
+#endif
 		gfx.useMatrix(mPikiShape->mShape->getAnimMatrix(6), 0);
 #if defined(PIKI_PC_PORT)
 		// VS: la hoja/flor de los Pikmin de J2 va teñida de violeta; el cuerpo
@@ -618,13 +650,23 @@ void ViewPiki::refresh(Graphics& gfx)
 	}
 	Matrix4f mtx;
 	f32 size = getSize();
+#if defined(PIKI_PC_PORT)
+	// Netplay: the sim sees always-visible and the full LOD, never the local
+	// camera's frustum or distance.
+	if (!pc_netplay_sim_visible(gfx.mCamera->isPointVisible(mSRT.t, size * 4.0f))) {
+#else
 	if (!gfx.mCamera->isPointVisible(mSRT.t, size * 4.0f)) {
+#endif
 		enableAICulling();
 	} else {
 		disableAICulling();
 		if (AIPerf::useLOD) {
 			Vector3f diff = gfx.mCamera->mPosition - mSRT.t;
+#if defined(PIKI_PC_PORT)
+			_528          = pc_netplay_sim_lod_distance(diff.length());
+#else
 			_528          = diff.length();
+#endif
 		} else {
 			_528 = 12800.0f;
 		}
@@ -662,6 +704,19 @@ void ViewPiki::refresh(Graphics& gfx)
 	}
 
 	gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, mtx);
+#if defined(PIKI_PC_PORT)
+	// Secondary motion (pc_anim_timing.h): the Pikmin leans into starts, stops
+	// and turns, and its leaf lags behind. Drawn pose only; free on the ground.
+	PcSecondaryState* pcSec = nullptr;
+	if (!mStickTarget && !mRope && getState() != PIKISTATE_Swallowed) {
+		pcSec = pc_anim_secondary(this, mSRT.t.x, mSRT.t.z, pc_anim_dt(gsys->getFrameTime()), gsys->mTotalFrames);
+		if (pcSec) {
+			Matrix4f leaned = mWorldMtx;
+			pc_tilt_world(leaned.mMtx, pcSec->lean.tx, pcSec->lean.tz);
+			gfx.mCamera->mLookAtMtx.multiplyTo(leaned, mtx);
+		}
+	}
+#endif
 
 	if (getState() == PIKISTATE_Swallowed && mSwallowMouthPart) {
 		Matrix4f mouthMtx = mSwallowMouthPart->getJointMatrix();
@@ -679,6 +734,12 @@ void ViewPiki::refresh(Graphics& gfx)
 
 	mPikiAnimMgr.updateContext();
 	mPikiShape->mShape->updateAnim(gfx, mtx, nullptr, this);
+#if defined(PIKI_PC_PORT)
+	// Joint 6 carries the leaf, bud or flower (see Navi's Pikmin drawing).
+	if (pcSec && mPikiShape->mShape->mJointCount > 6) {
+		pc_tilt_view(mPikiShape->mShape->getAnimMatrix(6).mMtx, gfx.mCamera->mLookAtMtx.mMtx, pcSec->leaf.tx, pcSec->leaf.tz);
+	}
+#endif
 
 	if ((AIPerf::useLOD && _528 < 1200.0f && aiCullable()) || !AIPerf::useLOD) {
 		bool updateHeadPose = (mLookatPosPtr || mLookTimer) && getState() != PIKISTATE_Swallowed;

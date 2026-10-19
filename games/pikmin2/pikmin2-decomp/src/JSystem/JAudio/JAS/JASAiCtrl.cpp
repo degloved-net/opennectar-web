@@ -150,10 +150,16 @@ void updateDSP()
 	int subframes              = getSubFrames();
 	u32 count                  = JASAudioThread::snIntCount;
 	history[subframes - count] = delta;
+#ifndef PIKI_PC_PORT
+	// This compares hardware DSP completion interrupts with their frame gap.
+	// The software DSP advances all seven subframes synchronously, including
+	// consecutive queued DMA frames: host scheduling gaps are not DSP overload.
+	// Applying the console heuristic here drops healthy sustained voices.
 	if (subframes != count && ((history[0] / (f32)delta) < 1.1f)) {
 		JASReport("kill DSP channel");
 		JASDSPChannel::killActiveChannel();
 	}
+#endif
 	JASDSPChannel::updateAll();
 	subframeCallback();
 	JASKernel::probeFinish(3);
@@ -210,18 +216,24 @@ void finishDSPFrame()
 	JASDsp::syncFrame(getSubFrames(), (u32)sDspDacBuffer[sDspDacWriteBuffer], (u32)(sDspDacBuffer[sDspDacWriteBuffer] + frameSamples));
 #endif
 	sDspStatus = 1;
-	updateDSP();
 #ifdef PIKI_PC_PORT
-	// The GameCube DSP sends one completion interrupt per subframe. There is no
-	// hardware DSP on the host, so advance the remaining subframes here. This
-	// drives sequence callbacks, envelopes and channel allocation at the same
-	// seven-ticks-per-DMA cadence expected by JAS.
-	for (int i = 1; i < getSubFrames(); ++i) {
-		JASAudioThread::snIntCount--;
+	// The GameCube DSP sends one completion interrupt per subframe and reads
+	// the channel blocks again at the start of each one, so what the CPU
+	// changes after subframe n (starts, stops, volumes, envelopes, pitch) is
+	// heard from subframe n + 1. Mixing the whole frame first and running the
+	// seven updates afterwards delayed every change by a frame and collapsed
+	// the seven steps into one: short notes lost their attack or vanished.
+	for (int i = 0; i < getSubFrames(); ++i) {
+		pc_p2_audio_render_subframe(i);
+		if (i != 0) {
+			JASAudioThread::snIntCount--;
+		}
 		updateDSP();
 	}
 	JASAudioThread::snIntCount = 0;
 	sDspStatus                 = 0;
+#else
+	updateDSP();
 #endif
 	if (sDspDacCallback != nullptr) {
 		sDspDacCallback(sDspDacBuffer[sDspDacWriteBuffer], frameSamples);

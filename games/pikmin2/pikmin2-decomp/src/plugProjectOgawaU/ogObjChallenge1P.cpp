@@ -1,3 +1,4 @@
+#include "pc_p2_captains.h"
 #include "og/newScreen/Challenge.h"
 #include "og/Screen/NaviLifeGauge.h"
 #include "og/Screen/PikminCounter.h"
@@ -146,6 +147,10 @@ void ObjChallenge1P::commonUpdate()
 			mPikiCounter->setParam(disp->mDataGame, disp->mLouieData);
 		}
 	}
+
+	// Selector de capitanes: retrato del personaje de cada capitán.
+	mLifeGauge1->pcSetCharacter(pc_p2_captain_loaded_character(0), 0);
+	mLifeGauge2->pcSetCharacter(pc_p2_captain_loaded_character(1), 1);
 
 	P2DScreen::Mgr_tuning* screen = mPokoScreen;
 	mPokoScreen->setXY((cosf(mScale * PI) + 1.0f) / 2 * 300.0f, 0.0f);

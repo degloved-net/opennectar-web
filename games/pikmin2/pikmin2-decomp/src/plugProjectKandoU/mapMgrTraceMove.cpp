@@ -3,6 +3,11 @@
 #include "Sys/Cylinder.h"
 #include "Game/TDispTriangle.h"
 #include "nans.h"
+#ifdef PIKI_PC_PORT
+#include <cstdio>
+#include <cmath>
+#include "Game/Creature.h"
+#endif
 
 namespace Game {
 
@@ -156,6 +161,29 @@ Sys::TriIndexList* MapMgr::traceMove_test1203_cylinder(MapCollision& coll, Game:
 					info.mWallNormal   = sweep.mNormal;
 				}
 
+#ifdef PIKI_PC_PORT
+				// Una respuesta degenerada (normal o penetración absurdas) dispara la
+				// velocidad/posición a ~1e17 y el enemigo desaparece del mapa.
+				{
+					const Vector3f& n = sweep.mNormal;
+					f32 nLen2         = n.x * n.x + n.y * n.y + n.z * n.z;
+					f32 d             = sweep.mDistanceFromRadius;
+					if (!(nLen2 > 0.81f && nLen2 < 1.21f) || !(d == d)) {
+						static int sBadReports = 0;
+						if (sBadReports < 20) {
+							sBadReports++;
+							fprintf(stderr,
+							        "[TRACE] bad response %s tri=%d type=%d n=(%g,%g,%g) dist=%g rest=%g r=%g pos=(%g,%g,%g) vel=(%g,%g,%g)\n",
+							        info.mMovingCreature ? info.mMovingCreature->getCreatureName() : "?", idx, (int)sweep.mSweepType, n.x, n.y,
+							        n.z, d, info.mRestitution, moveSphere->mRadius, moveSphere->mPosition.x, moveSphere->mPosition.y,
+							        moveSphere->mPosition.z, velocity->x, velocity->y, velocity->z);
+							fflush(stderr);
+						}
+						Sys::Triangle::debug = false;
+						continue;
+					}
+				}
+#endif
 				// update position and velocity based on rigid body collision
 				f32 impactAmt     = sweep.mNormal.dot(*velocity);
 				f32 elasticFactor = (1.0f + info.mRestitution); // res of 0 = perfectly inelastic; res of 1 = perfectly elastic

@@ -109,6 +109,11 @@ public:
 	void parameterUpdated();
 	void control(Controller&);
 	void control(PcamControlInfo&);
+#if defined(PIKI_PC_PORT)
+	// Pad-derived half of control(Controller&), shared with the netplay lead
+	// camera: Controller keys held/pressed and raw analog bytes.
+	void controlPad(u32 keysDown, u32 keysClicked, u8 triggerL, s8 mainStickX, s8 subStickY);
+#endif
 	void startAttention();
 	void makePosture();
 	void makePolarRadius();

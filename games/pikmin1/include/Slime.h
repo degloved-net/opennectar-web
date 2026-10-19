@@ -191,6 +191,9 @@ private:
 	u16* mVertexNormalIndices;            // _14, normal index mapped by vertex index
 	int* mNearestVertexToJoint;           // _18
 	Vector3f* mNormalisedVertexPositions; // _1C
+#if defined(PIKI_PC_PORT)
+	BossPresentJoints mPresentJoints; // world-space joints for the netplay presentation pass
+#endif
 };
 
 /**

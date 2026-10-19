@@ -1,8 +1,10 @@
 #include "zen/DrawWorldMap.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_gfx.h"
+#include "netplay/pc_sim_rng.h"
 // Estrellas fugaces por todo el ancho (los efectos del mapa centran en 320).
-#define PC_WM_STAR_X (zen::Rand(640.0f + 2.0f * f32(pc_gfx_menu_shift_center())) - f32(pc_gfx_menu_shift_center()))
+// Netplay: the world map is UI only, so it draws from the cosmetic stream.
+#define PC_WM_STAR_X (pc_cosmetic_randf(640.0f + 2.0f * f32(pc_gfx_menu_shift_center())) - f32(pc_gfx_menu_shift_center()))
 #if PIKI_PC_TOUCH
 #include "touch/pc_touch.h"
 #endif
@@ -282,7 +284,11 @@ public:
 		mOnyonIcon = nullptr;
 		mCurrentPos.set(0.0f, 0.0f, 0.0f);
 		mVelocity.set(0.0f, 0.0f, 0.0f);
+#if defined(PIKI_PC_PORT)
+		mScaleTimer = pc_cosmetic_randf(scaleFrameMax);
+#else
 		mScaleTimer = zen::Rand(scaleFrameMax);
+#endif
 		mBottomPos.set(0.0f, bottomLengthDefault, 0.0f);
 	}
 
@@ -296,7 +302,11 @@ public:
 			ERROR("Illegal initialize.");
 		}
 
+#if defined(PIKI_PC_PORT)
+		mScaleTimer = pc_cosmetic_randf(scaleFrameMax);
+#else
 		mScaleTimer = zen::Rand(scaleFrameMax);
+#endif
 
 		mCurrentPos.set(0.0f, 0.0f, 0.0f);
 		mVelocity.set(0.0f, 0.0f, 0.0f);
@@ -2265,10 +2275,17 @@ public:
 
 	void update()
 	{
+#if defined(PIKI_PC_PORT)
+		if (pc_cosmetic_randf(100.0f) < mStarFallChance) {
+			WMeffMgr->create(EFF2D_MapShootingStar, Vector3f(PC_WM_STAR_X, 500.0f - pc_cosmetic_randf(50.0f), -pc_cosmetic_randf(150.0f)),
+			                 nullptr, nullptr);
+		}
+#else
 		if (zen::Rand(100.0f) < mStarFallChance) {
 			WMeffMgr->create(EFF2D_MapShootingStar, Vector3f(PC_WM_STAR_X, 500.0f - zen::Rand(50.0f), -zen::Rand(150.0f)), nullptr,
 			                 nullptr);
 		}
+#endif
 		if (mIsRapidFireMode) {
 			if (mStarFallChance < 0.0f) {
 				mIsRapidFireMode = false;

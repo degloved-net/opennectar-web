@@ -66,7 +66,6 @@ enum PcAchievement {
 struct PcAchievementInfo {
 	const char* title;
 	const char* description;
-	int points;
 	u32 partId; ///< pieza de la nave (UFOID_*) o 0
 };
 
@@ -78,8 +77,6 @@ const char* pc_achievement_icon(int id);
 void pc_achievements_load(void);
 bool pc_achievement_unlocked(int id);
 int pc_achievements_unlocked_count(void);
-int pc_achievements_points(void);
-int pc_achievements_total_points(void);
 
 /// Desbloquea si se puede (no en VS, no con trucos) y avisa en pantalla.
 void pc_achievement_unlock(int id);

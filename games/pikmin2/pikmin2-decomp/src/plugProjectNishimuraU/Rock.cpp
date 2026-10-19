@@ -1,4 +1,5 @@
 #include "Game/Entities/Rock.h"
+#include "Game/pcCoop.h"
 #include "Game/Navi.h"
 #include "Game/EnemyFunc.h"
 #include "Dolphin/rand.h"
@@ -369,7 +370,7 @@ void Obj::updateMoveVelocity()
 {
 	if (mIsHoming) {
 		Creature* target = nullptr;
-		if (gameSystem && !gameSystem->isMultiplayerMode()) {
+		if (gameSystem && !PC_TWO_CAPTAIN_PLAY()) {
 			target = naviMgr->getActiveNavi();
 		}
 		if (!target) {

@@ -15,6 +15,13 @@
 #include "timing/pc_render_phase.h"
 #include "timing/pc_tick_profiler.h"
 #include "pc_gfx.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_camlead.h"
+#include "netplay/pc_netplay_navilead.h"
+#include "netplay/pc_netplay_det.h"
+#include "netplay/pc_netplay_present.h"
+#include "pc_vs.h"
+#endif
 
 #define TIMER_STATE_X           (32) ///< Horizontal position to start printing timer debug text from.
 #define TIMER_STATE_Y           (32) ///< Vertical position to start printing timer debug text from.
@@ -191,6 +198,11 @@ void PlugPikiApp::draw(Graphics& gfx)
 	// print load text after we finish a section transition (only if it's meant to be visible, or is fading out)
 	// NB: the code in retail and the DLL do all the preparation to print, but never actually print the text.
 	if (gameflow.mCurrLoadTextAlpha > 0.0f || gameflow.mTargetLoadTextAlpha > 0.0f) {
+#if defined(PIKI_PC_PORT)
+		// Netplay two-pass frame: the timer is sim timing, so only the sim
+		// side advances it.
+		if (pc_netplay_present_sim_side()) {
+#endif
 		gameflow.mLoadTextDisplayTimer -= gsys->getFrameTime();
 		if (gameflow.mLoadTextDisplayTimer < 0.0f) {
 			gameflow.mTargetLoadTextAlpha = 0.0f;
@@ -201,6 +213,9 @@ void PlugPikiApp::draw(Graphics& gfx)
 		if (quickABS(gameflow.mCurrLoadTextAlpha - gameflow.mTargetLoadTextAlpha) < 0.1f) {
 			gameflow.mCurrLoadTextAlpha = gameflow.mTargetLoadTextAlpha;
 		}
+#if defined(PIKI_PC_PORT)
+		}
+#endif
 
 		gfx.setColour(Colour(192, 255, 255, gameflow.mCurrLoadTextAlpha), true);
 		gfx.setAuxColour(Colour(192, 192, 255, gameflow.mCurrLoadTextAlpha));
@@ -215,6 +230,11 @@ void PlugPikiApp::draw(Graphics& gfx)
 	gfx.useTexture(nullptr, GX_TEXMAP0);
 
 	// this is actually for allowing buffer time before transiting between sections, rather than fading anything
+#if defined(PIKI_PC_PORT)
+	// The fade gates section exits, so in the two-pass frame only the sim side
+	// advances it (otherwise transitions would run at double speed).
+	if (pc_netplay_present_sim_side()) {
+#endif
 	if (gsys->mCurrentFade < gsys->mTargetFade) {
 		// "fading in"
 		gsys->mCurrentFade += gsys->getFrameTime() * gsys->mFadeRate;
@@ -230,6 +250,9 @@ void PlugPikiApp::draw(Graphics& gfx)
 			gsys->mCurrentFade = gsys->mTargetFade;
 		}
 	}
+#if defined(PIKI_PC_PORT)
+	}
+#endif
 
 	// draw timers, if enabled
 	if (gsys->mTimerState != TS_Off) {
@@ -258,6 +281,11 @@ int PlugPikiApp::idle()
 		gsys->mTimer->reset();
 		gsys->mSoftResetPending = false;
 
+#if defined(PIKI_PC_PORT)
+		// This idle returns before pc_render_begin_authoritative_tick, so make
+		// sure section construction never runs as a stale presentation pass.
+		pc_render_end_presentation();
+#endif
 		softReset();
 
 		// re-attach everything
@@ -290,17 +318,78 @@ int PlugPikiApp::idle()
 
 	gsys->beginRender();
 
+#if defined(PIKI_PC_PORT)
+	// Netplay two-pass frame, deterministic mode only: an authoritative pass
+	// (SimCamera, null GX, sim blocks run), then the local presentation pass
+	// (real camera and GL, sim blocks skipped). Otherwise one pass as before.
+	if (pc_netplay_present_two_pass_active()) {
+		pc_netplay_present_begin_authoritative(*gsys->mDGXGfx);
+		const double authStart = profiling ? clockNow() : 0.0;
+		renderall();
+		if (profiling) {
+			pc_tick_profiler_record(kPcTickRenderAll, clockNow() - authStart);
+		}
+		// Drop the batched geometry while null is still on.
+		pc_gfx_flush_batch();
+		pc_netplay_present_end_authoritative(*gsys->mDGXGfx);
+
+		// A section exit in the sim pass (QuittingGameModeState::postUpdate:
+		// exitStage, then softReset) leaves nothing to present: the stage
+		// managers are gone until the next idle builds the new section.
+		if (!pc_netplay_present_skip_presentation() && !gsys->mSoftResetPending) {
+			pc_render_begin_presentation(1.0);
+			gsys->mDGXGfx->resetPresentBuffer();
+			pc_netplay_present_begin_presentation(*gsys->mDGXGfx);
+			pc_gfx_reset_ui_state();
+			// initRender ran once before the authoritative pass; reset what it
+			// accumulated (lights, cached shapes, lens flares) as beginView does
+			// for a second view. The sim matrix pool stays untouched.
+			gsys->mDGXGfx->mActiveLightMask = 0;
+			gsys->mDGXGfx->mLight.initCore("");
+			gsys->mDGXGfx->resetCacheBuffer();
+			gsys->resetLFlares();
+			pc_gfx_begin_capture(pc_render_tick_serial());
+			pc_netplay_navilead_begin_presentation();
+			renderall();
+			pc_netplay_navilead_end_presentation();
+			if (profiling) {
+				pc_gfx_flush_submit_stats();
+			}
+			pc_gfx_end_capture();
+			pc_netplay_present_restore_all_shapes();
+			pc_netplay_present_end_presentation(*gsys->mDGXGfx);
+			pc_netplay_camlead_end_presentation(*gsys->mDGXGfx);
+			// Back to authoritative for doneRender, messages and the hash.
+			pc_render_end_presentation();
+		}
+		const unsigned tick = pc_netplay_tick();
+		if (tick % 600 == 0) {
+			printf("[netplay] two-pass tick=%u null_attempted=%llu null_gl=%llu saved_shapes=%llu\n", tick,
+			       pc_netplay_present_null_attempted(), pc_netplay_present_null_gl_calls(),
+			       pc_netplay_present_saved_shapes());
+			fflush(stdout);
+		}
+	} else {
+#endif
 	// Begin capture for immutable render packets
 	pc_gfx_begin_capture(pc_render_tick_serial());
 
 	const double renderStart = profiling ? clockNow() : 0.0;
 	renderall();
+#if defined(PIKI_PC_PORT)
+	// Character animation may have redirected shared shapes to render-only
+	// matrices. Return them to the authoritative pose before the next update.
+	pc_netplay_present_restore_all_shapes();
+#endif
 	if (profiling) {
 		pc_tick_profiler_record(kPcTickRenderAll, clockNow() - renderStart);
 		pc_gfx_flush_submit_stats();
 	}
 
 	pc_gfx_end_capture();
+#if defined(PIKI_PC_PORT)
+	}
+#endif
 
 	if (gsys->mDvdErrorCallback) {
 		gsys->mDvdErrorCallback->invoke(*gsys->mDGXGfx);
@@ -321,6 +410,13 @@ int PlugPikiApp::idle()
 
 	gsys->mTimer->_stop("all");
 
+#if defined(PIKI_PC_PORT)
+	// Netplay: the VS pause is sim state, decided at the end of the tick
+	// (otherwise the VS HUD in waitRetrace decides it).
+	if (pc_netplay_deterministic()) {
+		pc_vs_det_tick_end();
+	}
+#endif
 	gsys->waitRetrace();
 	gsys->setHeap(SYSHEAP_NULL);
 

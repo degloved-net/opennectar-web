@@ -21,6 +21,12 @@ void pc_render_begin_presentation(double interpolationAlpha)
 	sInterpolationAlpha = std::clamp(interpolationAlpha, 0.0, 1.0);
 }
 
+void pc_render_end_presentation(void)
+{
+	sPhase = PcRenderPhase::Authoritative;
+	sInterpolationAlpha = 1.0;
+}
+
 PcRenderPhase pc_render_phase()
 {
 	return sPhase;

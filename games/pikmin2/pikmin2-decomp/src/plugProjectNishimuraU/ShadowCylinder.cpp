@@ -1,4 +1,5 @@
 #include "Game/shadowMgr.h"
+#include "Game/pcCoop.h"
 #include "Game/GameSystem.h"
 #include "System.h"
 #include "trig.h"
@@ -384,7 +385,7 @@ ShadowCylinder2::ShadowCylinder2(Game::ShadowParms* parm, Color4* color)
 	u16 y    = sys->getRenderModeObj()->efbHeight;
 	u16 x    = sys->getRenderModeObj()->fbWidth;
 	int size = GXGetTexBufferSize(x / 2, y / 2, GX_CTF_R8, GX_FALSE, 0);
-	if (gameSystem && !gameSystem->isMultiplayerMode()) {
+	if (gameSystem && !PC_TWO_CAPTAIN_SESSION()) {
 		mTexImg    = new (0x20) ResTIMG*[1];
 		mTexImg[0] = (ResTIMG*)(new (0x20) u8[size]);
 		mTexObj    = new GXTexObj[1];
@@ -406,7 +407,7 @@ ShadowCylinder2::ShadowCylinder2(Game::ShadowParms* parm, Color4* color)
  */
 void ShadowCylinder2::setFilterTextureID(int vpID)
 {
-	if (gameSystem && !gameSystem->isMultiplayerMode()) {
+	if (gameSystem && !PC_TWO_CAPTAIN_SESSION()) {
 		mTexIdx = 0;
 		return;
 	}

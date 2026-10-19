@@ -2,6 +2,9 @@
 
 #include "DebugLog.h"
 #include "Dolphin/pad.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_pad.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -17,6 +20,12 @@ DEFINE_PRINT("ControllerMgr");
 
 static PADStatus sControllerPad[PAD_MAX_CONTROLLERS];
 static u32 padChannels[PAD_CHANMAX] = { PAD_CHAN0_BIT, PAD_CHAN1_BIT, PAD_CHAN2_BIT, PAD_CHAN3_BIT };
+
+#if defined(PIKI_PC_PORT)
+// Netplay input record/replay reads and overwrites the polled pads here,
+// after PADRead and before the tick consumes them.
+PADStatus* pc_netplay_pad_status(void) { return sControllerPad; }
+#endif
 
 /**
  * @todo: Documentation

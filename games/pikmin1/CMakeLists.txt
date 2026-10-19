@@ -53,9 +53,9 @@ set(PC_PORT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/pc_port")
 # pasar con -fpermissive: el especificador `register` y tomar la dirección de
 # un temporal (stack_new). Ambas se relajan sólo en Clang.
 set(CLANG_LEGACY_RELAXATIONS
-    $<$<CXX_COMPILER_ID:Clang>:-Wno-register>
-    $<$<CXX_COMPILER_ID:Clang>:-Wno-address-of-temporary>
-    $<$<CXX_COMPILER_ID:Clang>:-Wno-unknown-warning-option>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-register>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-address-of-temporary>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-warning-option>
 )
 set(LEGACY_COMPILE_OPTIONS
     -include "${PC_PORT_DIR}/pc_types.h"
@@ -138,6 +138,8 @@ else()
 endif()
 option(PIKMIN_BUILD_LAUNCHER "Build the standalone first-run launcher" ${PIKMIN_DESKTOP_DEFAULT})
 option(PIKMIN_BUILD_TESTS "Build the host-run test executables" ${PIKMIN_DESKTOP_DEFAULT})
+option(NECTAR_BUILD_MAPMAKER "Build the VS map editor (tools/mapmaker)" ${PIKMIN_DESKTOP_DEFAULT})
+option(NECTAR_ONLINE "Build the experimental direct online co-op layer" OFF)
 
 if(PIKMIN_BUILD_TESTS)
     enable_testing()
@@ -176,6 +178,9 @@ add_compile_definitions(
     # In-game settings menu (F1). Remove this to disable the overlay entirely.
     PIKI_PC_SETTINGS_MENU=1
 )
+
+# Librerías compartidas con el editor de mapas (raíz del repo).
+set(NECTAR_LIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../libs")
 
 # ─── Include paths ───
 include_directories(
@@ -237,7 +242,7 @@ if (PIKMIN_STATIC_RUNTIME AND NOT ANDROID)
     endif()
     if (WIN32)
         add_link_options(-static)
-    else()
+    elseif (NOT APPLE) # macOS: libc++ viene con el sistema; basta SDL2 estática
         # --exclude-libs: el libstdc++/SDL2 estáticos no se exportan. Si no,
         # pisan al libstdc++ del sistema en los drivers que lo usan (NVIDIA
         # egl-wayland2) y el contexto cae a llvmpipe.
@@ -266,11 +271,20 @@ set(PC_PORT_SOURCES
     pc_port/pc_pad_axis.cpp
     pc_port/pc_menu_repeat.cpp
     pc_port/pc_photo_mode.cpp
+    pc_port/pc_record.cpp
     pc_port/pc_permadeath.cpp
+    pc_port/randomizer/pc_randomizer.cpp
+    pc_port/randomizer/pc_randomizer_catalog.cpp
+    pc_port/randomizer/pc_randomizer_audit.cpp
+    pc_port/randomizer/pc_randomizer_logic.cpp
+    pc_port/randomizer/pc_randomizer_apply.cpp
     pc_port/pc_coop.cpp
+    pc_port/pc_captain_preview.cpp
     pc_port/pc_whistle_pluck.cpp
     pc_port/pc_discord.cpp
     pc_port/pc_speedrun.cpp
+    pc_port/pc_livesplit.cpp
+    pc_port/pc_day_history.cpp
     pc_port/pc_art.cpp
     pc_port/pc_icon.cpp
     pc_port/settings/pc_glass_menu.cpp
@@ -278,6 +292,15 @@ set(PC_PORT_SOURCES
     pc_port/mods/pc_hd_models.cpp
     pc_port/mods/pc_hd_model_convert.cpp
     pc_port/mods/pc_vs_arena.cpp
+    pc_port/mods/pc_vs_map.cpp
+    # Mapas VS: formato y compilador compartidos con el editor de mapas.
+    ${NECTAR_LIBS_DIR}/nectar_mapcore/src/map_json.cpp
+    ${NECTAR_LIBS_DIR}/nectar_mapcore/src/i18n.cpp
+    ${NECTAR_LIBS_DIR}/nectar_mapcore/src/compile.cpp
+    ${NECTAR_LIBS_DIR}/nectar_assets/src/mod.cpp
+    ${NECTAR_LIBS_DIR}/nectar_assets/src/gen.cpp
+    ${NECTAR_LIBS_DIR}/nectar_assets/src/image.cpp
+    ${PC_PORT_DIR}/launcher/bti_decode.cpp
     pc_port/pc_vs.cpp
     pc_port/pc_achievements.cpp
     pc_port/pc_file_dialog.cpp
@@ -292,6 +315,19 @@ set(PC_PORT_SOURCES
     pc_port/timing/pc_visual_runtime.cpp
     pc_port/timing/pc_render_packet.cpp
     pc_port/timing/pc_tick_profiler.cpp
+    # Netplay determinism seams. Inert unless a netplay switch is set (see
+    # pc_netplay_det.h, pc_input_log.h and pc_state_hash.h).
+    pc_port/netplay/pc_netplay_det.cpp
+    pc_port/netplay/pc_netplay_policy.cpp
+    pc_port/netplay/pc_sim_rng.cpp
+    pc_port/netplay/pc_input_log.cpp
+    pc_port/netplay/pc_state_hash.cpp
+    # Two-pass sim/presentation frame and the session lead camera.
+    pc_port/netplay/pc_netplay_present.cpp
+    pc_port/netplay/pc_netplay_camlead.cpp
+    pc_port/netplay/pc_netplay_navilead.cpp
+    # Co-op switch and direct boot (--coop-direct, netplay).
+    pc_port/netplay/pc_coop_switch.cpp
     pc_port/audio/pc_audio.cpp
     pc_port/audio/pc_envelope.cpp
     pc_port/audio/pc_jam.cpp
@@ -320,7 +356,8 @@ if (ANDROID)
     list(APPEND PC_PORT_SOURCES
         pc_port/android/pc_android.cpp
         pc_port/android/pc_texpack_android.cpp
-        pc_port/android/pc_save_android.cpp)
+        pc_port/android/pc_save_android.cpp
+        pc_port/android/pc_net_gateway_android.cpp)
 endif()
 if (PIKMIN_TOUCH)
     list(APPEND PC_PORT_SOURCES pc_port/touch/pc_touch.cpp)
@@ -332,7 +369,24 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/bcdec
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xxhash
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/include
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
+    ${NECTAR_LIBS_DIR}/nectar_mapcore/include
+    ${NECTAR_LIBS_DIR}/nectar_assets/include
 )
+# Cabeceras internas de nectar_assets solo para sus fuentes.
+set_source_files_properties(
+    ${NECTAR_LIBS_DIR}/nectar_assets/src/mod.cpp
+    ${NECTAR_LIBS_DIR}/nectar_assets/src/gen.cpp
+    ${NECTAR_LIBS_DIR}/nectar_assets/src/image.cpp
+    PROPERTIES INCLUDE_DIRECTORIES
+    "${NECTAR_LIBS_DIR}/nectar_assets/src;${NECTAR_LIBS_DIR}/nectar_assets/third_party;${PC_PORT_DIR}/launcher")
+
+# Mapa VS de serie incrustado en el ejecutable (así también vale en Android).
+set(PC_VS_DEFAULT_MAP_JSON "${CMAKE_CURRENT_SOURCE_DIR}/maps/vs/impact_arena/map.json")
+file(READ "${PC_VS_DEFAULT_MAP_JSON}" PC_VS_DEFAULT_MAP)
+configure_file(pc_port/mods/pc_vs_default_map.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/pc_vs_default_map.h" @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${PC_VS_DEFAULT_MAP_JSON}")
 
 # ─── System Common (platform-independent game engine) ───
 file(GLOB SYSCOMMON_SOURCES "src/sysCommon/*.cpp")
@@ -511,6 +565,18 @@ else()
 endif()
 target_compile_options(${NECTAR_GAME} PRIVATE ${NATIVE_COMPILE_OPTIONS})
 target_link_libraries(${NECTAR_GAME} PRIVATE ${NECTAR_LEGACY})
+if(NECTAR_ONLINE)
+    if(NOT TARGET nectar_net)
+        add_subdirectory("${NECTAR_LIBS_DIR}/nectar_net" "${CMAKE_BINARY_DIR}/nectar_net")
+    endif()
+    target_link_libraries(${NECTAR_GAME} PRIVATE nectar_net)
+    target_compile_definitions(${NECTAR_GAME} PRIVATE PIKI_NECTAR_ONLINE=1)
+    if(PIKMIN_NETPLAY_BUILD)
+        target_sources(${NECTAR_GAME} PRIVATE pc_port/netplay/pc_online_navi.cpp)
+    endif()
+else()
+    target_compile_definitions(${NECTAR_GAME} PRIVATE PIKI_NECTAR_ONLINE=0)
+endif()
 
 if(EMSCRIPTEN)
     include("${CMAKE_CURRENT_SOURCE_DIR}/../../packaging/web/pikmin1.cmake")
@@ -538,20 +604,192 @@ foreach(target IN LISTS PIKMIN_OPTIMIZED_TARGETS)
         $<$<AND:$<CONFIG:RelWithDebInfo>,$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>>:-O3>)
 endforeach()
 
-if(EMSCRIPTEN)
-    set(PIKMIN_NATIVE_OPTIMIZE_DEFAULT OFF)
-    set(PIKMIN_IPO_DEFAULT OFF)
-else()
-    set(PIKMIN_NATIVE_OPTIMIZE_DEFAULT ON)
-    set(PIKMIN_IPO_DEFAULT ON)
-endif()
-option(PIKMIN_NATIVE_OPTIMIZE "Use this build machine's CPU instruction set" ${PIKMIN_NATIVE_OPTIMIZE_DEFAULT})
+# OFF by default: a binary built with -march=native dies on the first
+# unsupported instruction, before any window or log, on every CPU older than
+# the build machine's (issues #41 and #77). Turn it on for local builds only.
+option(PIKMIN_NATIVE_OPTIMIZE "Use this build machine's CPU instruction set" OFF)
 if(PIKMIN_NATIVE_OPTIMIZE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     foreach(target IN LISTS PIKMIN_OPTIMIZED_TARGETS)
         target_compile_options(${target} PRIVATE -march=native)
     endforeach()
 endif()
 
+# Deterministic netplay build. OFF by default, so the default build's flags
+# and libm are unchanged. -ffp-contract=off forbids fused multiply-add (the
+# same binary gives the same FP results on any CPU) and
+# -ftrivial-auto-var-init=zero removes uninitialised-stack garbage from the
+# decompiled code. -march=native would make two machines run different code,
+# so the two options exclude each other.
+option(PIKMIN_NETPLAY_BUILD "Deterministic netplay build" OFF)
+if(PIKMIN_NETPLAY_BUILD AND PIKMIN_NATIVE_OPTIMIZE)
+    message(FATAL_ERROR "PIKMIN_NETPLAY_BUILD cannot be combined with PIKMIN_NATIVE_OPTIMIZE")
+endif()
+if(PIKMIN_NETPLAY_BUILD)
+    set(PIKMIN_NETPLAY_SOURCE_ID "" CACHE STRING
+        "Cross-platform source identity used by the netplay compatibility handshake")
+    if(NOT PIKMIN_NETPLAY_SOURCE_ID)
+        execute_process(
+            COMMAND git rev-parse "HEAD^{tree}"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            RESULT_VARIABLE PIKMIN_NETPLAY_GIT_RESULT
+            OUTPUT_VARIABLE PIKMIN_NETPLAY_GIT_TREE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(NOT PIKMIN_NETPLAY_GIT_RESULT EQUAL 0 OR NOT PIKMIN_NETPLAY_GIT_TREE MATCHES "^[0-9a-f]+$")
+            message(FATAL_ERROR
+                "A deterministic netplay build needs PIKMIN_NETPLAY_SOURCE_ID when built outside a Git checkout")
+        endif()
+        execute_process(
+            COMMAND git status --porcelain --untracked-files=all -- games/pikmin1 libs/nectar_net
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+            RESULT_VARIABLE PIKMIN_NETPLAY_STATUS_RESULT
+            OUTPUT_VARIABLE PIKMIN_NETPLAY_DIRTY_FILES
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(NOT PIKMIN_NETPLAY_STATUS_RESULT EQUAL 0)
+            message(FATAL_ERROR "Could not verify that the netplay source tree is clean")
+        endif()
+        string(REGEX MATCH
+            "(^|\n)[^\n]*(CMakeLists\\.txt|\\.(c|cc|cpp|h|hpp|inl|cmake))($|\n)"
+            PIKMIN_NETPLAY_DIRTY_SOURCE "${PIKMIN_NETPLAY_DIRTY_FILES}")
+        if(PIKMIN_NETPLAY_DIRTY_SOURCE)
+            message(FATAL_ERROR
+                "Refusing an ambiguous netplay source identity for a dirty tree. Commit the source changes, "
+                "or set PIKMIN_NETPLAY_SOURCE_ID explicitly for a private development build.")
+        endif()
+        set(PIKMIN_NETPLAY_SOURCE_ID "${PIKMIN_NETPLAY_GIT_TREE}")
+    endif()
+    message(STATUS "Netplay cross-platform source identity: ${PIKMIN_NETPLAY_SOURCE_ID}")
+    target_compile_definitions(${NECTAR_GAME} PRIVATE
+        PIKMIN_NETPLAY_SOURCE_ID="${PIKMIN_NETPLAY_SOURCE_ID}"
+        PIKMIN_NETPLAY_GAME_VERSION="${PIKMIN_GAME_VERSION}")
+    foreach(target IN LISTS PIKMIN_OPTIMIZED_TARGETS)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(${target} PRIVATE -ffp-contract=off -ftrivial-auto-var-init=zero)
+        endif()
+        target_compile_definitions(${target} PRIVATE PIKI_NETPLAY_BUILD=1)
+    endforeach()
+endif()
+
+# Software libm for the netplay build. pc_netplay_libm.c defines sinf, cosf,
+# atan2f, powf, sqrtf... (and the double versions) as strong symbols, so the
+# static link never pulls the mingw-w64 members that use x87 transcendentals,
+# whose results differ between CPU vendors. It is an OBJECT library so the game
+# and its test share one object and one set of flags. -fno-builtin-<name> keeps
+# GCC from lowering those names back to x87 code (memcpy and sqrt stay
+# builtins). -fno-lto keeps it out of LTO, which can discard builtin-named
+# definitions that other partitions still reference. tools/netplay/fp_gate.py
+# checks the result.
+set(PC_NETPLAY_LIBM_NO_BUILTIN_FLAGS
+    -fno-builtin-sinf -fno-builtin-cosf -fno-builtin-sincosf -fno-builtin-tanf
+    -fno-builtin-atanf -fno-builtin-atan2f -fno-builtin-asinf -fno-builtin-acosf
+    -fno-builtin-expf -fno-builtin-logf -fno-builtin-log10f -fno-builtin-log2f
+    -fno-builtin-exp2f -fno-builtin-powf -fno-builtin-fmodf -fno-builtin-hypotf
+    -fno-builtin-sin -fno-builtin-cos -fno-builtin-sincos -fno-builtin-tan
+    -fno-builtin-asin -fno-builtin-acos -fno-builtin-atan -fno-builtin-atan2
+    -fno-builtin-exp -fno-builtin-log -fno-builtin-log10 -fno-builtin-log2
+    -fno-builtin-exp2 -fno-builtin-pow -fno-builtin-fmod -fno-builtin-hypot)
+# Android too: the online mode (NECTAR_ONLINE) replays the host's ticks, so
+# its simulation must match bit for bit on every platform.
+if(PIKMIN_NETPLAY_BUILD)
+    # Created once: the Android project adds this directory for USA and PAL.
+    if(NOT TARGET pc_netplay_libm_obj)
+        add_library(pc_netplay_libm_obj OBJECT pc_port/netplay/pc_netplay_libm.c)
+        target_compile_options(pc_netplay_libm_obj PRIVATE
+            ${PC_NETPLAY_LIBM_NO_BUILTIN_FLAGS} -fno-lto -ffp-contract=off -ftrivial-auto-var-init=zero)
+    endif()
+    target_sources(${NECTAR_GAME} PRIVATE $<TARGET_OBJECTS:pc_netplay_libm_obj>)
+endif()
+
+# Netplay lockstep session (third_party/NETPLAY_VENDOR.md). GekkoNet is its own
+# static library: GekkoLib/src/*.cpp with -std=gnu++20, GEKKONET_NO_ASIO and
+# GEKKONET_STATIC. Quoted includes search its own directories first
+# (-iquote): on case-insensitive file systems the game's include/Event.h would
+# otherwise shadow GekkoNet's private event.h. The game's session and UDP
+# transport compile as C++17 and include only gekkonet.h.
+if(PIKMIN_NETPLAY_BUILD)
+    if(NOT TARGET gekkonet)
+        set(GEKKONET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/gekkonet/GekkoLib")
+        file(GLOB GEKKONET_SOURCES "${GEKKONET_DIR}/src/*.cpp")
+        add_library(gekkonet STATIC ${GEKKONET_SOURCES})
+        target_include_directories(gekkonet PUBLIC ${GEKKONET_DIR}/include
+            PRIVATE ${GEKKONET_DIR}/include/private ${GEKKONET_DIR}/thirdparty)
+        target_compile_definitions(gekkonet PUBLIC GEKKONET_STATIC PRIVATE GEKKONET_NO_ASIO)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(gekkonet PRIVATE -std=gnu++20
+                "-iquote${GEKKONET_DIR}/include/private"
+                "-iquote${GEKKONET_DIR}/include"
+                "-iquote${GEKKONET_DIR}/thirdparty")
+        endif()
+    endif()
+    target_sources(${NECTAR_GAME} PRIVATE
+        pc_port/netplay/pc_netplay_session.cpp
+        pc_port/netplay/pc_netplay_udp.cpp
+        # Title Local/Online choice: rooms are host-authoritative (NECTAR1)
+        # with NECTAR_ONLINE, the lockstep ICE (NPIX) room otherwise or with
+        # PIKMIN_ONLINE_LEGACY_ICE=1; joining follows the pasted code.
+        pc_port/netplay/pc_online_menu.cpp
+        pc_port/netplay/pc_online_relaunch.cpp)
+    target_link_libraries(${NECTAR_GAME} PRIVATE gekkonet)
+    if(WIN32)
+        target_link_libraries(${NECTAR_GAME} PRIVATE ws2_32 winmm)
+    endif()
+endif()
+
+# Netplay ICE transport (connection codes, NAT traversal). libjuice is its own
+# static C11 library with JUICE_STATIC and USE_NETTLE=0; the game's C++
+# options (NATIVE_COMPILE_OPTIONS) are C++-only and not applied to it.
+if(PIKMIN_NETPLAY_BUILD)
+    if(NOT TARGET juice)
+        file(GLOB LIBJUICE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libjuice/src/*.c")
+        add_library(juice STATIC ${LIBJUICE_SOURCES})
+        set_target_properties(juice PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+        target_include_directories(juice PUBLIC third_party/libjuice/include
+            PRIVATE third_party/libjuice/include/juice third_party/libjuice/src)
+        target_compile_definitions(juice PUBLIC JUICE_STATIC PRIVATE USE_NETTLE=0)
+        if(WIN32)
+            target_compile_definitions(juice PRIVATE WIN32_LEAN_AND_MEAN)
+            target_link_libraries(juice PUBLIC ws2_32 bcrypt)
+        endif()
+        find_package(Threads REQUIRED)
+        target_link_libraries(juice PRIVATE Threads::Threads)
+    endif()
+    target_sources(${NECTAR_GAME} PRIVATE
+        pc_port/netplay/pc_netplay_ice.cpp
+        pc_port/netplay/pc_netplay_launch.cpp
+        # Session HUD, desync forensics and the failure-path diagnostics.
+        pc_port/netplay/pc_netplay_hud.cpp
+        pc_port/netplay/pc_netplay_forensics.cpp
+        pc_port/netplay/pc_netplay_inlog.cpp
+        pc_port/netplay/pc_state_dump.cpp
+        pc_port/netplay/pc_netplay_diag.cpp
+        pc_port/netplay/pc_netplay_diag_bt.cpp)
+    target_link_libraries(${NECTAR_GAME} PRIVATE juice)
+    # Router port mapping for ICE rooms (nectar_net's PortPublisher: PCP and
+    # NAT-PMP always, UPnP when miniupnpc is found, e.g. with CMAKE_PREFIX_PATH
+    # at the scripts/netplay-deps.sh prefix). Created once: Android adds this
+    # directory twice, and NECTAR_ONLINE may have added it already.
+    if(NOT TARGET nectar_net)
+        find_package(miniupnpc CONFIG QUIET)
+        if(miniupnpc_FOUND)
+            set(NECTAR_NET_ENABLE_UPNP ON)
+        endif()
+        add_subdirectory("${NECTAR_LIBS_DIR}/nectar_net" "${CMAKE_BINARY_DIR}/nectar_net")
+    endif()
+    target_link_libraries(${NECTAR_GAME} PRIVATE nectar_net)
+    target_compile_definitions(${NECTAR_GAME} PRIVATE PIKI_NETPLAY_PORTMAP=1)
+endif()
+
+# Default build: the netplay hooks are no-op stubs, so the weak call sites link
+# on Mach-O too (see pc_port/netplay/pc_netplay_stubs.cpp).
+if(NOT PIKMIN_NETPLAY_BUILD)
+    target_sources(${NECTAR_GAME} PRIVATE pc_port/netplay/pc_netplay_stubs.cpp)
+endif()
+
+set(PIKMIN_IPO_DEFAULT ON)
+if(EMSCRIPTEN)
+    set(PIKMIN_IPO_DEFAULT OFF)
+endif()
 option(PIKMIN_ENABLE_IPO "Enable portable interprocedural/link-time optimization" ${PIKMIN_IPO_DEFAULT})
 if(PIKMIN_ENABLE_IPO)
     include(CheckIPOSupported)
@@ -573,7 +811,7 @@ if (WIN32)
     # SDL2main NO se enlaza: aporta un WinMain que llama a SDL_main, y este
     # proyecto declara SDL_MAIN_HANDLED y define su propio main. Enlazarlo deja
     # SDL_main sin definir en todos los ejecutables.
-    target_link_libraries(${NECTAR_GAME} PRIVATE ${SDL2_LIBRARIES} opengl32 comdlg32)
+    target_link_libraries(${NECTAR_GAME} PRIVATE ${SDL2_LIBRARIES} opengl32 comdlg32 ws2_32)
 elseif (EMSCRIPTEN)
     target_link_libraries(${NECTAR_GAME} PRIVATE m)
 elseif (ANDROID)
@@ -586,9 +824,9 @@ elseif (ANDROID)
     target_link_options(${NECTAR_GAME} PRIVATE "-Wl,-z,max-page-size=16384")
 else()
     if(PIKMIN_GLES)
-        target_link_libraries(${NECTAR_GAME} PRIVATE m ${SDL2_LIBRARIES} OpenGL::GLES3 X11)
+        target_link_libraries(${NECTAR_GAME} PRIVATE m ${SDL2_LIBRARIES} OpenGL::GLES3 $<$<NOT:$<PLATFORM_ID:Darwin>>:X11>)
     else()
-        target_link_libraries(${NECTAR_GAME} PRIVATE m ${SDL2_LIBRARIES} OpenGL::GL X11)
+        target_link_libraries(${NECTAR_GAME} PRIVATE m ${SDL2_LIBRARIES} OpenGL::GL $<$<NOT:$<PLATFORM_ID:Darwin>>:X11>)
     endif()
 endif()
 # Export symbol names so the diagnostic backtrace in pc_gfx.cpp prints function
@@ -613,7 +851,7 @@ set_target_properties(${NECTAR_GAME} PROPERTIES
     OUTPUT_NAME "${NECTAR_OUTPUT_NAME}"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
-if (NOT ANDROID AND NOT EMSCRIPTEN)
+if (NOT ANDROID AND NOT WIN32 AND NOT EMSCRIPTEN)
     add_custom_command(TARGET ${NECTAR_GAME} POST_BUILD
         COMMAND /bin/chmod 775 "$<TARGET_FILE:${NECTAR_GAME}>"
         COMMENT "Ensuring the native Pikmin executable is runnable")
@@ -635,6 +873,9 @@ if((PIKMIN_BUILD_LAUNCHER OR ANDROID) AND NOT TARGET pikmin_disc_image)
         ${CMAKE_CURRENT_SOURCE_DIR}/pc_port/launcher)
     target_compile_options(pikmin_disc_image PRIVATE ${NATIVE_COMPILE_OPTIONS})
     set_property(TARGET pikmin_disc_image PROPERTY POSITION_INDEPENDENT_CODE ON)
+    # macOS keeps iconv in its own library. gamecube_image.cpp converts disc
+    # names from Shift-JIS with it.
+    target_link_libraries(pikmin_disc_image PUBLIC $<$<PLATFORM_ID:Darwin>:iconv>)
 endif()
 
 # Instalador Android: la misma biblioteca de extracción, con un puente JNI
@@ -645,6 +886,55 @@ if(ANDROID AND NOT TARGET nectar_installer)
     target_compile_options(nectar_installer PRIVATE ${NATIVE_COMPILE_OPTIONS})
     target_link_libraries(nectar_installer PRIVATE pikmin_disc_image log)
     target_link_options(nectar_installer PRIVATE "-Wl,-z,max-page-size=16384")
+endif()
+
+# Launcher en Android: la misma ventana del hub (launcher_gui.cpp) en una .so
+# que carga LauncherActivity, con su propio arranque (launcher_android_main)
+# y plataforma (launcher_platform_android). Ver games/pikmin2/docs/ANDROID.md.
+if(ANDROID AND NOT TARGET nectar_launcher)
+    add_library(launcher_imgui_android STATIC
+        third_party/imgui/imgui.cpp
+        third_party/imgui/imgui_draw.cpp
+        third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp
+        third_party/imgui/backends/imgui_impl_sdl2.cpp
+        third_party/imgui/backends/imgui_impl_opengl3.cpp)
+    set_property(TARGET launcher_imgui_android PROPERTY INCLUDE_DIRECTORIES "")
+    target_include_directories(launcher_imgui_android PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui
+        ${SDL2_INCLUDE_DIRS})
+    target_compile_definitions(launcher_imgui_android PUBLIC IMGUI_IMPL_OPENGL_ES3)
+    target_link_libraries(launcher_imgui_android PUBLIC ${SDL2_LIBRARIES} GLESv3)
+
+    include(cmake/EmbedFile.cmake)
+    set(LAUNCHER_EMBED_DIR "${CMAKE_CURRENT_BINARY_DIR}/launcher_embedded")
+    file(MAKE_DIRECTORY "${LAUNCHER_EMBED_DIR}")
+    embed_file("${CMAKE_CURRENT_SOURCE_DIR}/pc_port/launcher/assets/logo.png" "${LAUNCHER_EMBED_DIR}/logo_open_nectar.h" kLogoOpenNectar)
+    embed_file("${CMAKE_CURRENT_SOURCE_DIR}/pc_port/launcher/assets/Fredoka.ttf" "${LAUNCHER_EMBED_DIR}/font_fredoka.h" kFontFredoka)
+
+    add_library(nectar_launcher SHARED
+        pc_port/launcher/launcher_android_main.cpp
+        pc_port/launcher/launcher_gui.cpp
+        pc_port/launcher/bti_decode.cpp
+        pc_port/launcher/settings_model.cpp
+        pc_port/launcher/release_update.cpp
+        pc_port/launcher/texture_pack_download.cpp
+        pc_port/launcher/installer_ui.cpp
+        pc_port/launcher/launcher_platform_android.cpp
+        pc_port/pc_icon.cpp
+        "${LAUNCHER_EMBED_DIR}/logo_open_nectar.h"
+        "${LAUNCHER_EMBED_DIR}/font_fredoka.h")
+    set_property(TARGET nectar_launcher PROPERTY INCLUDE_DIRECTORIES "")
+    target_include_directories(nectar_launcher PRIVATE
+        ${PC_PORT_DIR}
+        "${LAUNCHER_EMBED_DIR}"
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
+        ${SDL2_INCLUDE_DIRS})
+    set(OPEN_NECTAR_VERSION "1.0.2" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    target_compile_definitions(nectar_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
+    target_compile_options(nectar_launcher PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    target_link_libraries(nectar_launcher PRIVATE launcher_imgui_android pikmin_disc_image ${SDL2_LIBRARIES} GLESv3 EGL log android)
+    target_link_options(nectar_launcher PRIVATE "-Wl,-z,max-page-size=16384")
 endif()
 
 if(PIKMIN_BUILD_LAUNCHER)
@@ -696,6 +986,7 @@ if(PIKMIN_BUILD_LAUNCHER)
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
         pc_port/launcher/release_update.cpp
+        pc_port/launcher/texture_pack_download.cpp
         pc_port/launcher/installer_ui.cpp
         pc_port/pc_icon.cpp
         ${LAUNCHER_PLATFORM_SOURCE}
@@ -710,10 +1001,17 @@ if(PIKMIN_BUILD_LAUNCHER)
     target_link_libraries(pikmin_launcher PRIVATE launcher_imgui)
     # Versión que el launcher compara con el último release de GitHub para
     # avisar y actualizarse. Súbela en cada release (la etiqueta de GitHub).
-    set(OPEN_NECTAR_VERSION "0.9.2" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0.2" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(pikmin_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     if (WIN32)
         target_sources(pikmin_launcher PRIVATE packaging/windows/nectar.rc)
+    endif()
+    # Host Co-op / Join Co-op en el launcher: apagado por defecto, el online se
+    # abre desde el propio juego (Co-op / VS -> Online).
+    option(PIKMIN_LAUNCHER_NETPLAY_BUTTONS "Show the Host/Join Co-op buttons in the launcher" OFF)
+    if(PIKMIN_NETPLAY_BUILD AND PIKMIN_LAUNCHER_NETPLAY_BUTTONS)
+        target_sources(pikmin_launcher PRIVATE pc_port/launcher/launcher_coop.cpp)
+        target_compile_definitions(pikmin_launcher PRIVATE PIKMIN_LAUNCHER_NETPLAY=1)
     endif()
     target_include_directories(pikmin_launcher PRIVATE ${SDL2_INCLUDE_DIRS})
     target_link_libraries(pikmin_launcher PRIVATE pikmin_disc_image ${SDL2_LIBRARIES} Threads::Threads)
@@ -769,6 +1067,13 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
         target_link_libraries(prepared_image_test PRIVATE comdlg32 ole32 shell32 uuid)
     endif()
     add_test(NAME prepared_image_test COMMAND prepared_image_test)
+
+    if(PIKMIN_NETPLAY_BUILD)
+        # Host Co-op / Join Co-op flow with a fake game.
+        add_executable(launcher_coop_test pc_port/launcher/launcher_coop_test.cpp pc_port/launcher/launcher_coop.cpp)
+        target_compile_options(launcher_coop_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+        add_test(NAME launcher_coop_test COMMAND launcher_coop_test)
+    endif()
 endif()
 
 if(PIKMIN_BUILD_TESTS)
@@ -919,10 +1224,144 @@ if(PIKMIN_BUILD_TESTS)
 
     add_executable(pc_tick_profiler_test
         pc_port/timing/pc_tick_profiler_test.cpp
-        pc_port/timing/pc_tick_profiler.cpp)
+        pc_port/timing/pc_tick_profiler.cpp
+        pc_port/netplay/pc_netplay_det.cpp
+        pc_port/netplay/pc_sim_rng.cpp)
     target_include_directories(pc_tick_profiler_test PRIVATE pc_port/timing)
     target_compile_options(pc_tick_profiler_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME pc_tick_profiler_test COMMAND pc_tick_profiler_test)
+
+    # Netplay determinism seams (engine-free). They also check that every
+    # helper is a pass-through with the deterministic switch off.
+    add_executable(pc_sim_rng_test
+        pc_port/netplay/pc_sim_rng_test.cpp
+        pc_port/netplay/pc_sim_rng.cpp
+        pc_port/netplay/pc_netplay_det.cpp)
+    target_compile_options(pc_sim_rng_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_sim_rng_test COMMAND pc_sim_rng_test)
+
+    add_executable(pc_netplay_policy_test
+        pc_port/netplay/pc_netplay_policy_test.cpp
+        pc_port/netplay/pc_netplay_policy.cpp
+        pc_port/netplay/pc_netplay_det.cpp
+        pc_port/netplay/pc_sim_rng.cpp)
+    target_compile_options(pc_netplay_policy_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_netplay_policy_test COMMAND pc_netplay_policy_test)
+
+    # Two-pass present module: skip flag, null-GX counters, local player.
+    add_executable(pc_netplay_present_test
+        pc_port/netplay/pc_netplay_present_test.cpp
+        pc_port/netplay/pc_netplay_present.cpp
+        pc_port/netplay/pc_netplay_det.cpp
+        pc_port/netplay/pc_sim_rng.cpp)
+    target_compile_definitions(pc_netplay_present_test PRIVATE PC_NETPLAY_PRESENT_HOST=1)
+    target_compile_options(pc_netplay_present_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_netplay_present_test COMMAND pc_netplay_present_test)
+
+    # Lead camera core (header-only): key mapping, input history, prediction
+    # window, correction filter.
+    add_executable(pc_netplay_camlead_test pc_port/netplay/pc_netplay_camlead_test.cpp)
+    target_include_directories(pc_netplay_camlead_test PRIVATE pc_port)
+    target_compile_options(pc_netplay_camlead_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_netplay_camlead_test COMMAND pc_netplay_camlead_test)
+
+    # Netplay audio ownership gate (header-only).
+    add_executable(pc_audio_source_test pc_port/audio/pc_audio_source_test.cpp)
+    target_include_directories(pc_audio_source_test PRIVATE pc_port)
+    target_compile_options(pc_audio_source_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_audio_source_test COMMAND pc_audio_source_test)
+
+    # Netplay session HUD model and the desync forensics data model / input log.
+    add_executable(pc_netplay_hud_model_test pc_port/netplay/pc_netplay_hud_model_test.cpp)
+    target_include_directories(pc_netplay_hud_model_test PRIVATE pc_port)
+    target_compile_options(pc_netplay_hud_model_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_netplay_hud_model_test COMMAND pc_netplay_hud_model_test)
+    add_executable(pc_netplay_forensics_test
+        pc_port/netplay/pc_netplay_forensics_test.cpp
+        pc_port/netplay/pc_netplay_forensics.cpp
+        pc_port/netplay/pc_netplay_inlog.cpp)
+    target_include_directories(pc_netplay_forensics_test PRIVATE pc_port)
+    target_compile_options(pc_netplay_forensics_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_netplay_forensics_test COMMAND pc_netplay_forensics_test)
+
+    # Netplay handshake Hello codec, --netplay-input parse and the co-op switch.
+    add_executable(pc_netplay_transfer_test pc_port/netplay/pc_netplay_transfer_test.cpp)
+    target_include_directories(pc_netplay_transfer_test PRIVATE pc_port)
+    target_compile_options(pc_netplay_transfer_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_netplay_transfer_test COMMAND pc_netplay_transfer_test)
+    add_executable(pc_netplay_input_sel_test pc_port/netplay/pc_netplay_input_sel_test.cpp)
+    target_include_directories(pc_netplay_input_sel_test PRIVATE pc_port)
+    target_compile_options(pc_netplay_input_sel_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_netplay_input_sel_test COMMAND pc_netplay_input_sel_test)
+    add_executable(pc_coop_switch_test
+        pc_port/netplay/pc_coop_switch_test.cpp
+        pc_port/netplay/pc_coop_switch.cpp)
+    target_include_directories(pc_coop_switch_test PRIVATE pc_port)
+    target_compile_options(pc_coop_switch_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_coop_switch_test COMMAND pc_coop_switch_test)
+
+    # PKNI input-file format, yaw quantisation and the per-tick yaw slots.
+    add_executable(pc_input_log_test
+        pc_port/netplay/pc_input_log_test.cpp
+        pc_port/netplay/pc_input_log.cpp)
+    target_compile_options(pc_input_log_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_input_log_test COMMAND pc_input_log_test)
+    # A stray switch in the caller's environment would load a real file.
+    set_tests_properties(pc_input_log_test PROPERTIES ENVIRONMENT "PIKMIN_INPUT_RECORD=;PIKMIN_INPUT_REPLAY=")
+endif()
+
+# Netplay-only checks. The libm test compares against the platform libm
+# (msvcrt.dll on Windows), which varies with the OS version, so it is not
+# part of the default test run. fp_gate disassembles the linked game and
+# fails on any x87 transcendental or fsqrt, any FMA, and any math import
+# from the C runtime.
+if(PIKMIN_NETPLAY_BUILD AND PIKMIN_BUILD_TESTS AND NOT ANDROID)
+    add_executable(pc_netplay_libm_test
+        pc_port/netplay/pc_netplay_libm_test.cpp
+        $<TARGET_OBJECTS:pc_netplay_libm_obj>)
+    target_compile_options(pc_netplay_libm_test PRIVATE ${NATIVE_COMPILE_OPTIONS}
+        ${PC_NETPLAY_LIBM_NO_BUILTIN_FLAGS} -ffp-contract=off)
+    add_test(NAME pc_netplay_libm_test COMMAND pc_netplay_libm_test)
+
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND AND CMAKE_OBJDUMP)
+        add_test(NAME netplay_fp_gate
+            COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/netplay/fp_gate.py"
+                    --objdump "${CMAKE_OBJDUMP}" "$<TARGET_FILE:${NECTAR_GAME}>")
+    endif()
+
+    # GekkoNet-backed host tests: the UDP transport and lossy wrapper over two
+    # in-process sessions, the load guard's GekkoNet assumptions, and the
+    # adaptive delay's transitions.
+    foreach(test pc_netplay_transport_test pc_netplay_loadguard_test pc_netplay_adaptive_test)
+        add_executable(${test} pc_port/netplay/${test}.cpp)
+        target_include_directories(${test} PRIVATE pc_port)
+        target_compile_options(${test} PRIVATE ${NATIVE_COMPILE_OPTIONS})
+        target_link_libraries(${test} PRIVATE gekkonet)
+        if(WIN32)
+            target_link_libraries(${test} PRIVATE ws2_32)
+        endif()
+        add_test(NAME ${test} COMMAND ${test})
+    endforeach()
+    target_sources(pc_netplay_transport_test PRIVATE pc_port/netplay/pc_netplay_udp.cpp)
+
+    # ICE codes and two libjuice agents over loopback (no network needed).
+    add_executable(pc_netplay_ice_test
+        pc_port/netplay/pc_netplay_ice_test.cpp
+        pc_port/netplay/pc_netplay_ice.cpp)
+    target_include_directories(pc_netplay_ice_test PRIVATE pc_port)
+    target_compile_options(pc_netplay_ice_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    target_link_libraries(pc_netplay_ice_test PRIVATE juice gekkonet)
+    add_test(NAME pc_netplay_ice_test COMMAND pc_netplay_ice_test)
+endif()
+
+# Loopback UDP impairment proxy for netplay tests (pc_netplay_impair.h). It sits
+# between the two peers, so any executable sees the same impaired link.
+if(PIKMIN_NETPLAY_BUILD AND WIN32 AND NOT ANDROID)
+    add_executable(netplay_impair_proxy tools/netplay/udp_impair_proxy.cpp)
+    target_include_directories(netplay_impair_proxy PRIVATE pc_port)
+    target_compile_options(netplay_impair_proxy PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    target_link_libraries(netplay_impair_proxy PRIVATE ws2_32 winmm)
 endif()
 
 message(STATUS "")
@@ -945,4 +1384,10 @@ if(PIKMIN_NATIVE_JAUDIO AND PIKMIN_BUILD_TESTS)
     set_tests_properties(pc_jaudio_integration_test PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 30
         SKIP_RETURN_CODE 77 LABELS "game-assets")
+endif()
+
+# Editor de mapas VS (tools/mapmaker): sale en bin/ junto al juego, que es
+# donde busca el ejecutable para "Probar". Usa la ImGui del launcher.
+if (NECTAR_BUILD_MAPMAKER AND NOT ANDROID)
+    add_subdirectory("${NECTAR_LIBS_DIR}/../tools/mapmaker" "${CMAKE_CURRENT_BINARY_DIR}/mapmaker")
 endif()

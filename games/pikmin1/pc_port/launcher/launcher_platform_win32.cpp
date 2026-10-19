@@ -253,7 +253,7 @@ bool downloadFile(const std::string& url, const fs::path& destination, std::stri
     // curl.exe viene con Windows 10 1803 y posteriores, en System32.
     const fs::path partial = destination.wstring() + L".part";
     const std::wstring wideUrl(url.begin(), url.end()); // las URL son ASCII
-    std::wstring command = L"curl.exe -fsSL --max-time 30 -o \"" + partial.wstring() + L"\" \"" + wideUrl + L"\"";
+    std::wstring command = L"curl.exe -fsSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o \"" + partial.wstring() + L"\" \"" + wideUrl + L"\"";
     STARTUPINFOW startup {};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process {};
@@ -372,6 +372,33 @@ bool runAndCapture(const fs::path& program, const std::vector<std::string>& argu
     return true;
 }
 
+bool createDesktopShortcut(const fs::path& launcher)
+{
+    PWSTR folder = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &folder))) return false;
+    const fs::path link = fs::path(folder) / L"Open Nectar.lnk";
+    CoTaskMemFree(folder);
+
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool ok = false;
+    IShellLinkW* shell = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW,
+                                   reinterpret_cast<void**>(&shell)))) {
+        shell->SetPath(launcher.wstring().c_str());
+        shell->SetWorkingDirectory(launcher.parent_path().wstring().c_str());
+        shell->SetIconLocation(launcher.wstring().c_str(), 0);
+        shell->SetDescription(L"Open Nectar - Pikmin 1 and Pikmin 2");
+        IPersistFile* file = nullptr;
+        if (SUCCEEDED(shell->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&file)))) {
+            ok = SUCCEEDED(file->Save(link.wstring().c_str(), TRUE));
+            file->Release();
+        }
+        shell->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return ok;
+}
+
 void relaunch(const fs::path& program, const std::vector<std::string>& arguments)
 {
     // Sin exec(): se arranca el nuevo y este termina.
@@ -388,7 +415,8 @@ void relaunch(const fs::path& program, const std::vector<std::string>& arguments
     std::exit(0);
 }
 
-[[noreturn]] void launchGame(const fs::path& dataRoot, const fs::path& gameBinary)
+[[noreturn]] void launchGame(const fs::path& dataRoot, const fs::path& gameBinary,
+                             const std::vector<std::string>& arguments)
 {
     if (!SetCurrentDirectoryW(dataRoot.c_str())) {
         std::cerr << "No se pudo entrar en " << dataRoot.string() << '\n';
@@ -398,7 +426,7 @@ void relaunch(const fs::path& program, const std::vector<std::string>& arguments
     // Windows no tiene exec(): se crea el proceso del juego y el launcher espera
     // a que termine para devolver su mismo código de salida. Así el
     // comportamiento visible coincide con el de Linux.
-    std::wstring command = L"\"" + gameBinary.wstring() + L"\"";
+    std::wstring command = quotedCommand(gameBinary, arguments);
 
     STARTUPINFOW startup {};
     startup.cb = sizeof(startup);
@@ -417,6 +445,44 @@ void relaunch(const fs::path& program, const std::vector<std::string>& arguments
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     std::exit(static_cast<int>(code));
+}
+
+bool spawnGame(const fs::path& dataRoot, const fs::path& gameBinary, const std::vector<std::string>& arguments,
+               GameProcess& process, std::string& error)
+{
+    std::wstring command = quotedCommand(gameBinary, arguments);
+    STARTUPINFOW self {};
+    self.cb = sizeof(self);
+    GetStartupInfoW(&self);
+    STARTUPINFOW startup {};
+    startup.cb = sizeof(startup);
+    if (self.dwFlags & STARTF_USESHOWWINDOW) {
+        startup.dwFlags     = STARTF_USESHOWWINDOW;
+        startup.wShowWindow = self.wShowWindow;
+    }
+    PROCESS_INFORMATION info {};
+    if (!CreateProcessW(gameBinary.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, dataRoot.c_str(),
+                        &startup, &info)) {
+        error = "could not start " + gameBinary.string() + " (error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    CloseHandle(info.hThread);
+    process.handle = reinterpret_cast<unsigned long long>(info.hProcess);
+    process.pid    = info.dwProcessId;
+    return true;
+}
+
+bool gameRunning(GameProcess& process, int& exitCode)
+{
+    if (process.handle == 0) return false;
+    HANDLE h = reinterpret_cast<HANDLE>(process.handle);
+    if (WaitForSingleObject(h, 0) == WAIT_TIMEOUT) return true;
+    DWORD code = 1;
+    GetExitCodeProcess(h, &code);
+    CloseHandle(h);
+    process.handle = 0;
+    exitCode       = static_cast<int>(code);
+    return false;
 }
 
 } // namespace platform

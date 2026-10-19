@@ -1,4 +1,5 @@
 #include "types.h"
+#include "Game/pcCoop.h"
 #include "Game/Entities/DangoMushi.h"
 #include "PSSystem/PSMainSide_ObjSound.h"
 #include "Game/EnemyFunc.h"
@@ -411,7 +412,11 @@ Creature* Obj::getSearchedTarget()
 void Obj::rollingMove()
 {
 	Vector3f targetPos;
+#ifdef PIKI_PC_PORT
+	Navi* navi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 	Navi* navi = naviMgr->getActiveNavi();
+#endif
 	if (!navi) {
 		navi
 		    = static_cast<Navi*>(EnemyFunc::getNearestPikminOrNavi(this, 180.0f, C_GENERALPARMS.mSightRadius(), nullptr, nullptr, nullptr));
@@ -535,7 +540,11 @@ int Obj::getFallEggNum()
 	f32 pikiCount = (f32)pikiMgr->mActiveCount;
 	f32 weight    = 0.0f;
 
+#ifdef PIKI_PC_PORT
+	Navi* navi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 	Navi* navi = naviMgr->getActiveNavi();
+#endif
 	if (navi) {
 		weight = (f32)navi->mCPlateMgr->mActiveGroupSize; // what even is this
 	}
@@ -560,7 +569,11 @@ Vector3f Obj::getFallPosition(int fallEnemyType)
 	if (fallEnemyType == DANGOFALL_Rock) {
 
 		// if possible, spawn rocks centred at active navi's position
+#ifdef PIKI_PC_PORT
+		Navi* navi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 		Navi* navi = naviMgr->getActiveNavi();
+#endif
 		if (navi) {
 			fallPos = navi->getPosition();
 

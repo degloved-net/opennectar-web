@@ -47,9 +47,30 @@ public final class TexturePack {
     public static final String INCOMPLETE_MARKER = ".incomplete";
     private static int sProgressFiles = 0;
 
+    // Desde el launcher (botón HD textures) la biblioteca del juego no está
+    // cargada: sin avisos de progreso al nativo.
+    private static boolean sReportProgress = true;
+
     private static void progress() {
         sProgressFiles++;
-        if ((sProgressFiles & 15) == 0) nativeInstallProgress(sProgressFiles);
+        if (sReportProgress && (sProgressFiles & 15) == 0) nativeInstallProgress(sProgressFiles);
+    }
+
+    /** Instala un zip ya descargado en gameDir/Load/Textures (lo llama el
+     *  launcher; bloquea). Lanza excepción si no trae texturas. */
+    public static synchronized void installZipFile(File zipFile, File gameDir) throws Exception {
+        File targetRoot = new File(gameDir, "Load");
+        File categoryRoot = new File(targetRoot, "Textures");
+        mkdirs(categoryRoot);
+        File marker = new File(categoryRoot, INCOMPLETE_MARKER);
+        try { new FileOutputStream(marker).close(); } catch (Exception ignored) {}
+        sReportProgress = false;
+        try (InputStream in = new java.io.FileInputStream(zipFile)) {
+            installZip(in, targetRoot, "Textures", false);
+        } finally {
+            sReportProgress = true;
+        }
+        deleteQuietly(marker);
     }
 
     /** Abre el selector del sistema en el hilo de UI (lo llama JNI desde el
@@ -206,9 +227,15 @@ public final class TexturePack {
     private static void installZip(ContentResolver resolver, Uri uri, File targetRoot,
                                    String category, boolean modelPack)
             throws Exception {
+        try (InputStream in = resolver.openInputStream(uri)) {
+            installZip(in, targetRoot, category, modelPack);
+        }
+    }
+
+    private static void installZip(InputStream in, File targetRoot, String category, boolean modelPack)
+            throws Exception {
         int extracted = 0;
-        try (InputStream in = resolver.openInputStream(uri);
-             ZipInputStream zip = new ZipInputStream(in)) {
+        try (ZipInputStream zip = new ZipInputStream(new java.io.BufferedInputStream(in, 256 * 1024))) {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
                 String rel = loadPackRelativePath(entry.getName(), category);

@@ -17,10 +17,27 @@ PcFrameScheduler::PcFrameScheduler(int maxCatchUpTicks, double suspendThreshold)
 {
 }
 
+// Tick rate behind the port-only frame clamp 0: 120 Hz, or the display's
+// refresh rate in the "monitor" FPS mode.
+static double sHighRateHz = 120.0;
+
+void pc_frame_set_high_rate(double hz)
+{
+	sHighRateHz = std::clamp(hz, 30.0, 360.0);
+}
+
+double pc_frame_high_rate(void) { return sHighRateHz; }
+
+static bool sVsyncLock = false;
+
+void pc_frame_set_vsync_lock(bool on) { sVsyncLock = on; }
+
+bool pc_frame_vsync_lock(void) { return sVsyncLock; }
+
 double PcFrameScheduler::deltaForClamp(int frameClamp)
 {
-	// Special case: frameClamp 0 means 120 Hz (0.5 frame periods at 60 Hz base)
-	if (frameClamp == 0) return 1.0 / 120.0;
+	// Special case: frameClamp 0 is the high-rate mode (120 Hz or the monitor's)
+	if (frameClamp == 0) return 1.0 / sHighRateHz;
 	if (frameClamp == 1) return 1.0 / 60.0;
 	if (frameClamp == 2) return 2.0 / 60.0;  // 30 Hz
 	return frameClamp / 60.0;
@@ -38,7 +55,7 @@ void PcFrameScheduler::reset(double now, int frameClamp)
 
 PcFrameSchedule PcFrameScheduler::advance(double now, int frameClamp)
 {
-	if (!mInitialised || frameClamp != mFrameClamp || now < mLastTime) {
+	if (!mInitialised || frameClamp != mFrameClamp || deltaForClamp(frameClamp) != mFixedDelta || now < mLastTime) {
 		reset(now, frameClamp);
 		return { 0, mFixedDelta, 0.0, mNextDeadline, mDiscardedTicks };
 	}

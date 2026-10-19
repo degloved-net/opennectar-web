@@ -1,3 +1,4 @@
+#include "pc_p2_captains.h"
 #include "og/newScreen/Vs.h"
 #include "og/newScreen/Challenge.h"
 #include "efx2d/Arg.h"
@@ -379,6 +380,11 @@ void ObjVs::ScreenSet::init(og::Screen::DataNavi* data, JKRArchive* arc, u32* pi
 	mLifeGauge->init(mScreen, data, og::Screen::CallBack_LifeGauge::LIFEGAUGE_OLIMAR);
 	mScreen->addCallBack('back', mLifeGauge);
 	mLifeGauge->setOffset(msVal.mLifeGaugeXOffs, msVal.mLifeGaugeYOffs);
+#ifdef PIKI_PC_PORT
+	if (!og::Screen::CallBack_LifeGauge::sPcPresidentTex) {
+		og::Screen::CallBack_LifeGauge::sPcPresidentTex = static_cast<ResTIMG*>(arc->getResource('TIMG', "president.bti"));
+	}
+#endif
 	og::Screen::setCallBack_DrawAfter(mScreen, 'mete');
 }
 
@@ -533,6 +539,9 @@ void ObjVs::doUpdateCommon()
 	mDisp->mDoneState = mDoneState;
 	mScreenP1->update(mDisp->mOlimarData);
 	mScreenP2->update(mDisp->mLouieData);
+	// Selector de capitanes: retrato del personaje de cada capitán.
+	mScreenP1->mLifeGauge->pcSetCharacter(pc_p2_captain_loaded_character(0), 0);
+	mScreenP2->mLifeGauge->pcSetCharacter(pc_p2_captain_loaded_character(1), 1);
 
 	mScreenP1->mScreen->setXY(0.0f, scale * -300.0f);
 	mScreenP2->mScreen->setXY(0.0f, scale * 300.0f);

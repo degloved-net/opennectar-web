@@ -4,7 +4,7 @@ the browser build shares the native engine, renderer, and settings. both games k
 
 ## pikmin 2
 
-the engines are updated from open nectar fusion at `830e38d99c19`. both game source directories match upstream fusion. browser storage names for pikmin 1 are preserved. pikmin 2 has separate saves, imported discs, texture libraries, and save backups on the same origin.
+the engines are updated from open nectar 1.0.2 at `5d898ac6`. both game source directories match upstream fusion. browser storage names for pikmin 1 are preserved. pikmin 2 has separate saves, imported discs, texture libraries, and save backups on the same origin.
 
 build pikmin 2 in both browser modes with your gamecube usa or european disc:
 

@@ -899,6 +899,12 @@ void Graphics::initRender(int screenWidth, int screenHeight)
 	mActiveLightMask = 0;
 	mLight.initCore("");
 	resetMatrixBuffer();
+#if defined(PIKI_PC_PORT)
+	// The animation presentation pose has its own matrix bank. Reset it with
+	// the normal bank every rendered frame; netplay may reset it once more when
+	// it begins its explicit second pass.
+	resetPresentBuffer();
+#endif
 	resetCacheBuffer();
 }
 
@@ -943,6 +949,32 @@ Matrix4f* Graphics::getMatrices(int requestedMatrixCount)
 	mNextFreeMatrixIdx += requestedMatrixCount;
 	return mtx;
 }
+
+#if defined(PIKI_PC_PORT)
+void Graphics::resetPresentBuffer()
+{
+	if (!mPresentMatrixBuffer || mPresentMatrixMax < mMaxMatrixCount) {
+		delete[] mPresentMatrixBuffer;
+		mPresentMatrixBuffer = new Matrix4f[mMaxMatrixCount > 0 ? mMaxMatrixCount : 1];
+		mPresentMatrixMax    = mMaxMatrixCount;
+	}
+	mNextFreePresentMatrixIdx = 0;
+}
+
+Matrix4f* Graphics::getPresentMatrices(int requestedMatrixCount)
+{
+	if (!mPresentMatrixBuffer || mPresentMatrixMax < mMaxMatrixCount) {
+		resetPresentBuffer();
+	}
+	if (mNextFreePresentMatrixIdx + requestedMatrixCount > mPresentMatrixMax) {
+		ERROR("using too many present matrices!! (%d + %d > %d)\n", mNextFreePresentMatrixIdx, requestedMatrixCount,
+		      mPresentMatrixMax);
+	}
+	Matrix4f* mtx = &mPresentMatrixBuffer[mNextFreePresentMatrixIdx];
+	mNextFreePresentMatrixIdx += requestedMatrixCount;
+	return mtx;
+}
+#endif
 
 /**
  * @todo: Documentation

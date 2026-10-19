@@ -17,6 +17,12 @@ DEFINE_ERROR(18)
  */
 DEFINE_PRINT("Enter")
 
+#if defined(PIKI_PC_PORT)
+// Netplay failure-path diagnostic, strong-defined by pc_netplay_diag.cpp in
+// netplay builds only. Null otherwise, and the halt below is unchanged.
+void pc_netplay_diag_bad_action_target(const char* site, Piki* piki, Creature* target);
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -37,6 +43,9 @@ void ActEnter::init(Creature* target)
 		mOnyon = static_cast<GoalItem*>(target);
 	} else {
 		PRINT("TARGET IS %x : %d\n", target, target ? target->mObjType : -1);
+#if defined(PIKI_PC_PORT)
+		if (pc_netplay_diag_bad_action_target != nullptr) pc_netplay_diag_bad_action_target("ActEnter::init", mPiki, target);
+#endif
 		ERROR("karl caught a cold !\n");
 	}
 

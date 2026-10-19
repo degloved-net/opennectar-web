@@ -13,6 +13,10 @@ extern "C" {
 void pc_gfx_init(void);
 void pc_gfx_begin_frame(void);
 void pc_gfx_present(void);
+// Cinematicos a 30 Hz: copia del frame terminado / restaurarlo en el frame
+// intermedio (devuelve false si no hay copia valida).
+bool pc_gfx_held_frame_capture(void);
+bool pc_gfx_held_frame_restore(void);
 void pc_gfx_perf_scope_begin(const char* name);
 void pc_gfx_perf_scope_end(void);
 
@@ -124,6 +128,9 @@ void pc_gfx_set_current_mtx(u32 id);
 void pc_gfx_load_nrm_mtx(const Mtx mtx, u32 id);
 void pc_gfx_load_tex_mtx(const Mtx mtx, u32 id);
 void pc_gfx_set_tex_coord_gen(GXTexCoordID coord, GXTexGenType type, GXTexGenSrc src, u32 matrixIdx);
+// Dual tex: matriz de post-transformación (GX_PTTEXMTXn / GX_PTIDENTITY) y normalizar.
+void pc_gfx_set_tex_coord_post(u32 coord, u32 postIdx, u32 normalize);
+void pc_gfx_load_post_tex_mtx(const f32 mtx[3][4], u32 id);
 
 // State Settings
 void pc_gfx_set_z_mode(GXBool compareEnable, GXCompare func, GXBool updateEnable);
@@ -155,6 +162,8 @@ void pc_gfx_clear_mat_color_tint(void);
 // (tinte del HUD de J2 en coop). (1,1,1) lo quita.
 void pc_gfx_set_out_tint(float r, float g, float b);
 void pc_gfx_clear_out_tint(void);
+// Vacía la profundidad del destino actual (3D sobre un frame ya terminado).
+void pc_gfx_clear_depth(void);
 void pc_gfx_set_chan_amb_color(GXChannelID chan, GXColor color);
 void pc_gfx_init_light_pos(void* ltObj, f32 x, f32 y, f32 z);
 void pc_gfx_init_light_dir(void* ltObj, f32 x, f32 y, f32 z);
@@ -167,6 +176,12 @@ void pc_gfx_load_light(void* ltObj, u32 lightMask);
 void pc_gfx_set_tev_order(GXTevStageID stage, GXTexCoordID coord, GXTexMapID map, GXChannelID chan);
 void pc_gfx_set_tev_op(GXTevStageID stage, GXTevMode mode);
 void pc_gfx_set_num_tev_stages(u8 num);
+// Texturas indirectas (GXBump). Valores con la codificación de los enums GX.
+void pc_gfx_set_tev_indirect(u32 stage, u32 indStage, u32 fmt, u32 bias, u32 mtx, u32 wrapS, u32 wrapT, u32 addPrev);
+void pc_gfx_set_ind_tex_order(u32 indStage, u32 texCoord, u32 texMap);
+void pc_gfx_set_num_ind_stages(u32 num);
+void pc_gfx_set_ind_tex_coord_scale(u32 indStage, u32 scaleS, u32 scaleT);
+void pc_gfx_set_ind_tex_mtx(u32 id, const f32 mtx[2][3], s32 scaleExp);
 void pc_gfx_set_tev_color_in(GXTevStageID stage, GXTevColorArg a, GXTevColorArg b, GXTevColorArg c, GXTevColorArg d);
 void pc_gfx_set_tev_alpha_in(GXTevStageID stage, GXTevAlphaArg a, GXTevAlphaArg b, GXTevAlphaArg c, GXTevAlphaArg d);
 void pc_gfx_set_tev_color_op(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp, GXTevRegID outReg);
@@ -216,9 +231,9 @@ void pc_gfx_push_f32(f32 val);
 void pc_gfx_position(f32 x, f32 y, f32 z);
 void pc_gfx_color(u8 r, u8 g, u8 b, u8 a);
 void pc_gfx_texcoord(f32 u, f32 v);
-// Fixed-point immediate texcoord (GXTexCoord2s8/u8/s16/u16): scaled by the
-// fractional-bit count that GXSetVtxAttrFmt set for GX_VA_TEX0 in the vertex
-// format of the current GXBegin.
+// Fixed-point immediate texcoord (GXTexCoord2s8/u8/s16/u16): interpreted with
+// both the component type and fractional-bit count that GXSetVtxAttrFmt set
+// for GX_VA_TEX0.  The FIFO helper's C++ signedness does not define GX's VAT.
 void pc_gfx_texcoord_fixed(s32 u, s32 v);
 void pc_gfx_normal(f32 x, f32 y, f32 z);
 // GXInitTexObjLOD: min/mag filter for a texture object (applied on load).
@@ -377,6 +392,7 @@ void pc_gfx_get_drawable_size(int* width, int* height);
 // posición y proyección GX vigentes) a píxeles de ventana. Sirve para
 // colocar sprites de la capa sobre texto o paneles P2D. false si no se puede.
 bool pc_gfx_project_current(float x, float y, float z, float* winX, float* winY);
+bool pc_gfx_project_mtx34(const float (*m)[4], float x, float y, float* winX, float* winY);
 #endif
 
 #endif // PC_GFX_H

@@ -2,6 +2,9 @@
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
 #include "pc_vs.h"
+#include "netplay/pc_netplay_policy.h"
+#include "netplay/pc_netplay_present.h"
+#include "timing/pc_render_phase.h"
 #endif
 #include "DebugLog.h"
 #include "Graphics.h"
@@ -990,7 +993,13 @@ void UfoItem::refresh(Graphics& gfx)
 	Vector3f pos = mSRT.t;
 	mWorldMtx.makeSRT(mSRT.s, mSRT.r, pos);
 
+#if defined(PIKI_PC_PORT)
+	if (!pc_netplay_present_sim_side()) {
+		// Netplay presentation pass: AI culling is sim state.
+	} else if (!pc_netplay_sim_visible(gfx.mCamera->isPointVisible(mSRT.t, 200.0f))) {
+#else
 	if (!gfx.mCamera->isPointVisible(mSRT.t, 200.0f)) {
+#endif
 		enableAICulling();
 	} else {
 		disableAICulling();
@@ -1014,11 +1023,24 @@ void UfoItem::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 	mAnimator.updateContext();
 	mShipModel->mShape->updateAnim(gfx, *mtx, nullptr, this);
 
+#if defined(PIKI_PC_PORT)
+	// Netplay: the presentation pass submits only what the local frustum
+	// sees; the effect anchors, spots and waypoint below are sim.
+	const bool simSide = pc_netplay_present_sim_side();
+	const bool submit  = simSide || gfx.mCamera->isPointVisible(mSRT.t, 200.0f);
+	if ((gameflow.mMoviePlayer->mIsActive || aiCullable()) && submit) {
+#else
 	if (gameflow.mMoviePlayer->mIsActive || aiCullable()) {
+#endif
 		mShipModel->mShape->drawshape(gfx, *gfx.mCamera, mAnimatedMaterialsList);
 		playerState->renderParts(gfx, mShipModel->mShape);
 	}
 
+#if defined(PIKI_PC_PORT)
+	if (!simSide) {
+		return;
+	}
+#endif
 	Vector3f pos;
 	f32 cjwpret; // `BaseShape::calcJointWorldPos` return value is stored but never used.
 

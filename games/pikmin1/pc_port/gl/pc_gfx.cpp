@@ -37,6 +37,12 @@
 #include "pc_texpack.h"
 #include "../timing/pc_render_phase.h"
 #include "../timing/pc_tick_profiler.h"
+#include "../netplay/pc_netplay_present.h"
+#include "../netplay/pc_netplay_loadguard.h"
+
+// Netplay keep-alive (pc_netplay_loadguard.h): strong-defined by
+// pc_netplay_session.cpp in netplay builds only, null otherwise.
+void pc_netplay_load_keepalive(int site);
 
 #include "pc_opengl.h"
 #ifdef __ANDROID__
@@ -156,6 +162,103 @@ static PCGLBEGINQUERYPROC glBeginQuery_ptr = nullptr;
 static PCGLENDQUERYPROC glEndQuery_ptr = nullptr;
 static PCGLGETQUERYOBJECTIVPROC glGetQueryObjectiv_ptr = nullptr;
 static PCGLGETQUERYOBJECTUI64VPROC glGetQueryObjectui64v_ptr = nullptr;
+
+// Netplay null-GX tripwire: every raw GL call in this TU (and the cached
+// uniform wrappers below) counts as real GL while the null flag is on, so
+// the authoritative pass's null_gl counter is a measurement. The
+// parenthesised inner name calls the real function or pointer.
+static inline void pc_gfx_count_real_gl()
+{
+    if (pc_netplay_present_null_active()) {
+        pc_netplay_present_note_real();
+    }
+}
+#define glActiveTexture_ptr(...) (pc_gfx_count_real_gl(), (glActiveTexture_ptr)(__VA_ARGS__))
+#define glAttachShader_ptr(...) (pc_gfx_count_real_gl(), (glAttachShader_ptr)(__VA_ARGS__))
+#define glBeginQuery_ptr(...) (pc_gfx_count_real_gl(), (glBeginQuery_ptr)(__VA_ARGS__))
+#define glBindAttribLocation_ptr(...) (pc_gfx_count_real_gl(), (glBindAttribLocation_ptr)(__VA_ARGS__))
+#define glBindBuffer_ptr(...) (pc_gfx_count_real_gl(), (glBindBuffer_ptr)(__VA_ARGS__))
+#define glBindFramebuffer_ptr(...) (pc_gfx_count_real_gl(), (glBindFramebuffer_ptr)(__VA_ARGS__))
+#define glBindRenderbuffer_ptr(...) (pc_gfx_count_real_gl(), (glBindRenderbuffer_ptr)(__VA_ARGS__))
+#define glBindTexture(...) (pc_gfx_count_real_gl(), (glBindTexture)(__VA_ARGS__))
+#define glBindVertexArray_ptr(...) (pc_gfx_count_real_gl(), (glBindVertexArray_ptr)(__VA_ARGS__))
+#define glBlendEquation_ptr(...) (pc_gfx_count_real_gl(), (glBlendEquation_ptr)(__VA_ARGS__))
+#define glBlendFunc(...) (pc_gfx_count_real_gl(), (glBlendFunc)(__VA_ARGS__))
+#define glBlitFramebuffer_ptr(...) (pc_gfx_count_real_gl(), (glBlitFramebuffer_ptr)(__VA_ARGS__))
+#define glBufferData_ptr(...) (pc_gfx_count_real_gl(), (glBufferData_ptr)(__VA_ARGS__))
+#define glBufferSubData_ptr(...) (pc_gfx_count_real_gl(), (glBufferSubData_ptr)(__VA_ARGS__))
+#define glCheckFramebufferStatus_ptr(...) (pc_gfx_count_real_gl(), (glCheckFramebufferStatus_ptr)(__VA_ARGS__))
+#define glClear(...) (pc_gfx_count_real_gl(), (glClear)(__VA_ARGS__))
+#define glClearColor(...) (pc_gfx_count_real_gl(), (glClearColor)(__VA_ARGS__))
+#define glClearDepth(...) (pc_gfx_count_real_gl(), (glClearDepth)(__VA_ARGS__))
+#define glClearDepthf(...) (pc_gfx_count_real_gl(), (glClearDepthf)(__VA_ARGS__))
+#define glClientWaitSync_ptr(...) (pc_gfx_count_real_gl(), (glClientWaitSync_ptr)(__VA_ARGS__))
+#define glColorMask(...) (pc_gfx_count_real_gl(), (glColorMask)(__VA_ARGS__))
+#define glCompileShader_ptr(...) (pc_gfx_count_real_gl(), (glCompileShader_ptr)(__VA_ARGS__))
+#define glCreateProgram_ptr(...) (pc_gfx_count_real_gl(), (glCreateProgram_ptr)(__VA_ARGS__))
+#define glCreateShader_ptr(...) (pc_gfx_count_real_gl(), (glCreateShader_ptr)(__VA_ARGS__))
+#define glCullFace(...) (pc_gfx_count_real_gl(), (glCullFace)(__VA_ARGS__))
+#define glDeleteProgram_ptr(...) (pc_gfx_count_real_gl(), (glDeleteProgram_ptr)(__VA_ARGS__))
+#define glDeleteShader_ptr(...) (pc_gfx_count_real_gl(), (glDeleteShader_ptr)(__VA_ARGS__))
+#define glDeleteSync_ptr(...) (pc_gfx_count_real_gl(), (glDeleteSync_ptr)(__VA_ARGS__))
+#define glDeleteTextures(...) (pc_gfx_count_real_gl(), (glDeleteTextures)(__VA_ARGS__))
+#define glDepthFunc(...) (pc_gfx_count_real_gl(), (glDepthFunc)(__VA_ARGS__))
+#define glDepthMask(...) (pc_gfx_count_real_gl(), (glDepthMask)(__VA_ARGS__))
+#define glDisable(...) (pc_gfx_count_real_gl(), (glDisable)(__VA_ARGS__))
+#define glDrawArrays(...) (pc_gfx_count_real_gl(), (glDrawArrays)(__VA_ARGS__))
+#define glEnable(...) (pc_gfx_count_real_gl(), (glEnable)(__VA_ARGS__))
+#define glEnableVertexAttribArray_ptr(...) (pc_gfx_count_real_gl(), (glEnableVertexAttribArray_ptr)(__VA_ARGS__))
+#define glEndQuery_ptr(...) (pc_gfx_count_real_gl(), (glEndQuery_ptr)(__VA_ARGS__))
+#define glFenceSync_ptr(...) (pc_gfx_count_real_gl(), (glFenceSync_ptr)(__VA_ARGS__))
+#define glFramebufferRenderbuffer_ptr(...) (pc_gfx_count_real_gl(), (glFramebufferRenderbuffer_ptr)(__VA_ARGS__))
+#define glFramebufferTexture2D_ptr(...) (pc_gfx_count_real_gl(), (glFramebufferTexture2D_ptr)(__VA_ARGS__))
+#define glFrontFace(...) (pc_gfx_count_real_gl(), (glFrontFace)(__VA_ARGS__))
+#define glGenBuffers_ptr(...) (pc_gfx_count_real_gl(), (glGenBuffers_ptr)(__VA_ARGS__))
+#define glGenFramebuffers_ptr(...) (pc_gfx_count_real_gl(), (glGenFramebuffers_ptr)(__VA_ARGS__))
+#define glGenQueries_ptr(...) (pc_gfx_count_real_gl(), (glGenQueries_ptr)(__VA_ARGS__))
+#define glGenRenderbuffers_ptr(...) (pc_gfx_count_real_gl(), (glGenRenderbuffers_ptr)(__VA_ARGS__))
+#define glGenTextures(...) (pc_gfx_count_real_gl(), (glGenTextures)(__VA_ARGS__))
+#define glGenVertexArrays_ptr(...) (pc_gfx_count_real_gl(), (glGenVertexArrays_ptr)(__VA_ARGS__))
+#define glGenerateMipmap_ptr(...) (pc_gfx_count_real_gl(), (glGenerateMipmap_ptr)(__VA_ARGS__))
+#define glGetActiveUniform_ptr(...) (pc_gfx_count_real_gl(), (glGetActiveUniform_ptr)(__VA_ARGS__))
+#define glGetBooleanv(...) (pc_gfx_count_real_gl(), (glGetBooleanv)(__VA_ARGS__))
+#define glGetError(...) (pc_gfx_count_real_gl(), (glGetError)(__VA_ARGS__))
+#define glGetFloatv(...) (pc_gfx_count_real_gl(), (glGetFloatv)(__VA_ARGS__))
+#define glGetIntegerv(...) (pc_gfx_count_real_gl(), (glGetIntegerv)(__VA_ARGS__))
+#define glGetProgramBinary_ptr(...) (pc_gfx_count_real_gl(), (glGetProgramBinary_ptr)(__VA_ARGS__))
+#define glGetProgramInfoLog_ptr(...) (pc_gfx_count_real_gl(), (glGetProgramInfoLog_ptr)(__VA_ARGS__))
+#define glGetProgramiv_ptr(...) (pc_gfx_count_real_gl(), (glGetProgramiv_ptr)(__VA_ARGS__))
+#define glGetQueryObjectiv_ptr(...) (pc_gfx_count_real_gl(), (glGetQueryObjectiv_ptr)(__VA_ARGS__))
+#define glGetQueryObjectui64v_ptr(...) (pc_gfx_count_real_gl(), (glGetQueryObjectui64v_ptr)(__VA_ARGS__))
+#define glGetShaderInfoLog_ptr(...) (pc_gfx_count_real_gl(), (glGetShaderInfoLog_ptr)(__VA_ARGS__))
+#define glGetShaderiv_ptr(...) (pc_gfx_count_real_gl(), (glGetShaderiv_ptr)(__VA_ARGS__))
+#define glGetString(...) (pc_gfx_count_real_gl(), (glGetString)(__VA_ARGS__))
+#define glGetUniformLocation_ptr(...) (pc_gfx_count_real_gl(), (glGetUniformLocation_ptr)(__VA_ARGS__))
+#define glGetUniformiv_ptr(...) (pc_gfx_count_real_gl(), (glGetUniformiv_ptr)(__VA_ARGS__))
+#define glInvalidateFramebuffer_ptr(...) (pc_gfx_count_real_gl(), (glInvalidateFramebuffer_ptr)(__VA_ARGS__))
+#define glIsEnabled(...) (pc_gfx_count_real_gl(), (glIsEnabled)(__VA_ARGS__))
+#define glLinkProgram_ptr(...) (pc_gfx_count_real_gl(), (glLinkProgram_ptr)(__VA_ARGS__))
+#define glLogicOp(...) (pc_gfx_count_real_gl(), (glLogicOp)(__VA_ARGS__))
+#define glMapBufferRange_ptr(...) (pc_gfx_count_real_gl(), (glMapBufferRange_ptr)(__VA_ARGS__))
+#define glPixelStorei(...) (pc_gfx_count_real_gl(), (glPixelStorei)(__VA_ARGS__))
+#define glPolygonOffset(...) (pc_gfx_count_real_gl(), (glPolygonOffset)(__VA_ARGS__))
+#define glDrawBuffers_ptr(...) (pc_gfx_count_real_gl(), (glDrawBuffers_ptr)(__VA_ARGS__))
+#define glProgramBinary_ptr(...) (pc_gfx_count_real_gl(), (glProgramBinary_ptr)(__VA_ARGS__))
+#define glProgramParameteri_ptr(...) (pc_gfx_count_real_gl(), (glProgramParameteri_ptr)(__VA_ARGS__))
+#define glReadPixels(...) (pc_gfx_count_real_gl(), (glReadPixels)(__VA_ARGS__))
+#define glRenderbufferStorage_ptr(...) (pc_gfx_count_real_gl(), (glRenderbufferStorage_ptr)(__VA_ARGS__))
+#define glScissor(...) (pc_gfx_count_real_gl(), (glScissor)(__VA_ARGS__))
+#define glShaderSource_ptr(...) (pc_gfx_count_real_gl(), (glShaderSource_ptr)(__VA_ARGS__))
+#define glTexImage2D(...) (pc_gfx_count_real_gl(), (glTexImage2D)(__VA_ARGS__))
+#define glTexParameterf(...) (pc_gfx_count_real_gl(), (glTexParameterf)(__VA_ARGS__))
+#define glTexParameteri(...) (pc_gfx_count_real_gl(), (glTexParameteri)(__VA_ARGS__))
+#define glUniform2f_ptr(...) (pc_gfx_count_real_gl(), (glUniform2f_ptr)(__VA_ARGS__))
+#define glUniform3f_ptr(...) (pc_gfx_count_real_gl(), (glUniform3f_ptr)(__VA_ARGS__))
+#define glUniform4fv_ptr(...) (pc_gfx_count_real_gl(), (glUniform4fv_ptr)(__VA_ARGS__))
+#define glUnmapBuffer_ptr(...) (pc_gfx_count_real_gl(), (glUnmapBuffer_ptr)(__VA_ARGS__))
+#define glUseProgram_ptr(...) (pc_gfx_count_real_gl(), (glUseProgram_ptr)(__VA_ARGS__))
+#define glVertexAttribPointer_ptr(...) (pc_gfx_count_real_gl(), (glVertexAttribPointer_ptr)(__VA_ARGS__))
+#define glViewport(...) (pc_gfx_count_real_gl(), (glViewport)(__VA_ARGS__))
 
 #include <SDL2/SDL.h>
 
@@ -362,79 +465,79 @@ static void check_uniform_write(GLint loc, const char* kind) {
 
 static void cached_uniform1i(GLint loc, GLint value) {
     if (loc < 0) return;
-    if (uniform_cache_disabled()) { glUniform1i_ptr(loc, value); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform1i_ptr(loc, value); return; }
+    if (uniform_cache_disabled()) { pc_gfx_count_real_gl(); glUniform1i_ptr(loc, value); return; }
+    if (loc >= PC_UNIFORM_CACHE_SIZE) { pc_gfx_count_real_gl(); glUniform1i_ptr(loc, value); return; }
     auto& entry = sUniform1iCache[loc];
     if (entry.generation == sUniformGeneration && entry.value == value) return;
     entry.generation = sUniformGeneration; entry.value = value;
-    glUniform1i_ptr(loc, value);
+    pc_gfx_count_real_gl(); glUniform1i_ptr(loc, value);
     check_uniform_write(loc, "1i");
 }
 static void cached_uniform1f(GLint loc, GLfloat value) {
     if (loc < 0) return;
-    if (uniform_cache_disabled()) { glUniform1f_ptr(loc, value); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform1f_ptr(loc, value); return; }
+    if (uniform_cache_disabled()) { pc_gfx_count_real_gl(); glUniform1f_ptr(loc, value); return; }
+    if (loc >= PC_UNIFORM_CACHE_SIZE) { pc_gfx_count_real_gl(); glUniform1f_ptr(loc, value); return; }
     auto& entry = sUniform1fCache[loc];
     if (entry.generation == sUniformGeneration && entry.value == value) return;
     entry.generation = sUniformGeneration; entry.value = value;
-    glUniform1f_ptr(loc, value);
+    pc_gfx_count_real_gl(); glUniform1f_ptr(loc, value);
     check_uniform_write(loc, "1f");
 }
 static void cached_uniform2i(GLint loc, GLint x, GLint y) {
     if (loc < 0) return;
-    if (uniform_cache_disabled()) { glUniform2i_ptr(loc, x, y); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform2i_ptr(loc, x, y); return; }
+    if (uniform_cache_disabled()) { pc_gfx_count_real_gl(); glUniform2i_ptr(loc, x, y); return; }
+    if (loc >= PC_UNIFORM_CACHE_SIZE) { pc_gfx_count_real_gl(); glUniform2i_ptr(loc, x, y); return; }
     auto& entry = sUniform2iCache[loc];
     const Uniform2iValue value { x, y };
     if (entry.generation == sUniformGeneration && memcmp(&entry.value, &value, sizeof(value)) == 0) return;
     entry.generation = sUniformGeneration; entry.value = value;
-    glUniform2i_ptr(loc, x, y);
+    pc_gfx_count_real_gl(); glUniform2i_ptr(loc, x, y);
     check_uniform_write(loc, "2i");
 }
 static void cached_uniform4i(GLint loc, GLint x, GLint y, GLint z, GLint w) {
     if (loc < 0) return;
-    if (uniform_cache_disabled()) { glUniform4i_ptr(loc, x, y, z, w); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform4i_ptr(loc, x, y, z, w); return; }
+    if (uniform_cache_disabled()) { pc_gfx_count_real_gl(); glUniform4i_ptr(loc, x, y, z, w); return; }
+    if (loc >= PC_UNIFORM_CACHE_SIZE) { pc_gfx_count_real_gl(); glUniform4i_ptr(loc, x, y, z, w); return; }
     auto& entry = sUniform4iCache[loc];
     const Uniform4iValue value { x, y, z, w };
     if (entry.generation == sUniformGeneration && memcmp(&entry.value, &value, sizeof(value)) == 0) return;
     entry.generation = sUniformGeneration; entry.value = value;
-    glUniform4i_ptr(loc, x, y, z, w);
+    pc_gfx_count_real_gl(); glUniform4i_ptr(loc, x, y, z, w);
     check_uniform_write(loc, "4i");
 }
 static void cached_uniform4f(GLint loc, GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     if (loc < 0) return;
-    if (uniform_cache_disabled()) { glUniform4f_ptr(loc, x, y, z, w); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform4f_ptr(loc, x, y, z, w); return; }
+    if (uniform_cache_disabled()) { pc_gfx_count_real_gl(); glUniform4f_ptr(loc, x, y, z, w); return; }
+    if (loc >= PC_UNIFORM_CACHE_SIZE) { pc_gfx_count_real_gl(); glUniform4f_ptr(loc, x, y, z, w); return; }
     auto& entry = sUniform4fCache[loc];
     const Uniform4fValue value { x, y, z, w };
     if (entry.generation == sUniformGeneration && memcmp(&entry.value, &value, sizeof(value)) == 0) return;
     entry.generation = sUniformGeneration; entry.value = value;
-    glUniform4f_ptr(loc, x, y, z, w);
+    pc_gfx_count_real_gl(); glUniform4f_ptr(loc, x, y, z, w);
     check_uniform_write(loc, "4f");
 }
 static void cached_uniform_mat4(GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) {
     if (loc < 0 || !value) return;
-    if (uniform_cache_disabled()) { glUniformMatrix4fv_ptr(loc, count, transpose, value); return; }
+    if (uniform_cache_disabled()) { pc_gfx_count_real_gl(); glUniformMatrix4fv_ptr(loc, count, transpose, value); return; }
     if (count != 1 || transpose != GL_FALSE || loc >= PC_UNIFORM_CACHE_SIZE) {
-        glUniformMatrix4fv_ptr(loc, count, transpose, value); return;
+        pc_gfx_count_real_gl(); glUniformMatrix4fv_ptr(loc, count, transpose, value); return;
     }
     auto& entry = sUniformMat4Cache[loc];
     if (entry.generation == sUniformGeneration && memcmp(entry.value.value, value, sizeof(entry.value.value)) == 0) return;
     entry.generation = sUniformGeneration; memcpy(entry.value.value, value, sizeof(entry.value.value));
-    glUniformMatrix4fv_ptr(loc, count, transpose, value);
+    pc_gfx_count_real_gl(); glUniformMatrix4fv_ptr(loc, count, transpose, value);
     check_uniform_write(loc, "mat4");
 }
 static void cached_uniform_mat3(GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) {
     if (loc < 0 || !value) return;
-    if (uniform_cache_disabled()) { glUniformMatrix3fv_ptr(loc, count, transpose, value); return; }
+    if (uniform_cache_disabled()) { pc_gfx_count_real_gl(); glUniformMatrix3fv_ptr(loc, count, transpose, value); return; }
     if (count != 1 || transpose != GL_FALSE || loc >= PC_UNIFORM_CACHE_SIZE) {
-        glUniformMatrix3fv_ptr(loc, count, transpose, value); return;
+        pc_gfx_count_real_gl(); glUniformMatrix3fv_ptr(loc, count, transpose, value); return;
     }
     auto& entry = sUniformMat3Cache[loc];
     if (entry.generation == sUniformGeneration && memcmp(entry.value.value, value, sizeof(entry.value.value)) == 0) return;
     entry.generation = sUniformGeneration; memcpy(entry.value.value, value, sizeof(entry.value.value));
-    glUniformMatrix3fv_ptr(loc, count, transpose, value);
+    pc_gfx_count_real_gl(); glUniformMatrix3fv_ptr(loc, count, transpose, value);
     check_uniform_write(loc, "mat3");
 }
 
@@ -809,6 +912,18 @@ static inline void pc_gfx_note_gl_state_change() {
     ++sGlStateEpoch;
 }
 
+// Netplay null GX: every entry below that can reach GL returns through here
+// while the authoritative pass runs. It sits before the redundancy caches so
+// the presentation pass re-emits the state it needs. CPU-only setters are
+// not gated.
+static inline bool pc_gfx_null_skip() {
+    if (pc_netplay_present_null_active()) {
+        pc_netplay_present_note_attempt();
+        return true;
+    }
+    return false;
+}
+
 // The pipeline setters (blend, depth, cull, viewport, scissor) keep a
 // redundancy guard so a repeated GX call does not touch GL. post_apply()
 // writes those bits of GL itself -- it disables blend, depth and cull --
@@ -974,7 +1089,7 @@ static std::unordered_map<const void*, ResidentMesh> sResidentMeshes;
 static bool sMeshDecodeCacheEnabled = true;
 static GLuint sMeshArena = 0;
 static GLuint sMeshVAO = 0;
-static GLint  sStreamVAO = 0;
+static GLuint sStreamVAO = 0;
 static size_t sMeshArenaCapacity = size_t(48) << 20;
 static size_t sMeshArenaUsed = 0;
 static bool   sMeshArenaReady = false;
@@ -1193,6 +1308,33 @@ struct WebTextureCache {
 static WebTextureCache sWebTextures;
 static std::unordered_set<std::string> sReadyTextureNames;
 #endif
+// Netplay: GL names released in the authoritative pass wait here for the next
+// real present, and texture inits from that pass are kept (with their own
+// copy of the bytes) and uploaded on first presentation use.
+static std::vector<GLuint> sNullDoomedTextures;
+struct PcNullDeferredTex {
+    std::vector<u8> bytes;
+    const void* sigImage = nullptr;
+    u16 width = 0;
+    u16 height = 0;
+    u32 format = 0;
+    GXTexWrapMode wrapS = GX_CLAMP;
+    GXTexWrapMode wrapT = GX_CLAMP;
+    bool mipmap = false;
+    bool rgba = false;
+};
+static std::unordered_map<uintptr_t, PcNullDeferredTex> sNullDeferred;
+static long sNullDeferredInits = 0;
+static long sNullDeferredDrains = 0;
+static void pc_gfx_log_null_deferred()
+{
+    printf("[netplay] deferred texture inits: auth=%ld drained=%ld\n", sNullDeferredInits, sNullDeferredDrains);
+    fflush(stdout);
+}
+static void pc_gfx_note_null_deferred()
+{
+    if (sNullDeferredInits++ == 0) std::atexit(pc_gfx_log_null_deferred);
+}
 // Texturas con reemplazo HD del pack (PLAN_TEXTURAS_HD fase 1): texId -> si
 // trae cadena de mips propia. Sobre estas hay que saltarse glGenerateMipmap:
 // sobre un bloque comprimido es GL_INVALID_OPERATION, y además la cadena ya
@@ -1499,6 +1641,7 @@ static void fill_ui_43_bars() {
 }
 
 void pc_gfx_set_ui_43(int enabled) {
+    if (pc_gfx_null_skip()) return;
     const bool want = enabled != 0;
     if (want != sUi43) {
         sUi43 = want;
@@ -1572,7 +1715,7 @@ static void dim_draw(unsigned char alpha)
     glUniform4f_ptr(sDimColorLoc, 0.0f, 0.0f, 0.0f, float(alpha) / 255.0f);
     glBindVertexArray_ptr(sDimVAO);
     glDrawArrays(GL_TRIANGLES, 0, 3);
-    glBindVertexArray_ptr(0);
+    glBindVertexArray_ptr(sStreamVAO);
     glUseProgram_ptr(0);
     // Same trap as post_apply(): GX thinks the TEV program is still bound
     // and skips glUseProgram. P2D plates then draw with program 0 and show
@@ -1683,6 +1826,7 @@ void pc_gfx_get_drawable_size(int* width, int* height)
 
 void pc_gfx_overlay_begin(void)
 {
+    if (pc_gfx_null_skip()) return;
     if (!ensure_overlay_program() || sDrawableWidth <= 0 || sDrawableHeight <= 0) return;
     pc_gfx_note_gl_state_change();
     invalidate_gl_pipeline_guards();
@@ -1706,6 +1850,7 @@ void pc_gfx_overlay_begin(void)
 void pc_gfx_overlay_sprite(unsigned texture, float x, float y, float w, float h,
                            float r, float g, float b, float a, float angleRadians)
 {
+    if (pc_gfx_null_skip()) return;
     if (!sOverlayProgram || sDrawableWidth <= 0 || sDrawableHeight <= 0) return;
     const float cx = (x + w * 0.5f) / float(sDrawableWidth) * 2.0f - 1.0f;
     const float cy = 1.0f - (y + h * 0.5f) / float(sDrawableHeight) * 2.0f;
@@ -1722,9 +1867,10 @@ void pc_gfx_overlay_sprite(unsigned texture, float x, float y, float w, float h,
 
 void pc_gfx_overlay_end(void)
 {
+    if (pc_gfx_null_skip()) return;
     if (!sOverlayProgram) return;
     glBindTexture(GL_TEXTURE_2D, 0);
-    glBindVertexArray_ptr(0);
+    glBindVertexArray_ptr(sStreamVAO);
     glUseProgram_ptr(0);
     for (int i = 0; i < 8; i++) sBoundTextures[i] = 0;
     gl_program_cache_invalidate();
@@ -1736,6 +1882,7 @@ void pc_gfx_overlay_end(void)
 
 void pc_gfx_dim_full_target(unsigned char alpha)
 {
+    if (pc_gfx_null_skip()) return;
     const GLint w = sNativeFramebufferReady ? sRenderWidth : sDrawableWidth;
     const GLint h = sNativeFramebufferReady ? sRenderHeight : sDrawableHeight;
     if (w <= 0 || h <= 0 || alpha == 0) return;
@@ -1787,6 +1934,7 @@ static bool blur_target(int i, int w, int h)
 
 void pc_gfx_blur_gx_rect(int gxX, int gxY, int gxW, int gxH, int passes)
 {
+    if (pc_gfx_null_skip()) return;
     if (!sNativeFramebufferReady || !glBlitFramebuffer_ptr || !glBindFramebuffer_ptr) return;
     float sx, sy, ox, oy;
     gx_rect_params(sx, sy, ox, oy);
@@ -2725,10 +2873,15 @@ static void program_binary_store(GLuint program, uint64_t key) {
 // ── Fase 5: GPU móvil ───────────────────────────────────────────────────────
 // PIKMIN_FB_INVALIDATE=0 keeps every attachment resolved to memory each
 // frame (the pre-phase-5 behaviour) for A/B comparison.
+// Solo en GLES (GPU de móvil por tiles, donde ahorra ancho de banda). En
+// escritorio no aporta nada y un fotograma sin dibujos (cargas, transiciones)
+// presentaba el framebuffer invalidado: memoria indefinida, que en NVIDIA son
+// restos de imágenes viejas troceados. PIKMIN_FB_INVALIDATE=1/0 lo fuerza.
 static bool fb_invalidate_enabled() {
     static const bool enabled = [] {
         const char* v = std::getenv("PIKMIN_FB_INVALIDATE");
-        return !(v && v[0] == '0');
+        if (v) return v[0] != '0';
+        return PIKI_USE_GLES != 0;
     }();
     return enabled;
 }
@@ -2786,7 +2939,6 @@ static void mesh_arena_init() {
         sMeshDecodeCacheEnabled = false;
         return;
     }
-    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &sStreamVAO);
     glGenVertexArrays_ptr(1, &sMeshVAO);
     glBindVertexArray_ptr(sMeshVAO);
     glGenBuffers_ptr(1, &sMeshArena);
@@ -3018,6 +3170,16 @@ void pc_gfx_init(void) {
                sNativeFramebufferReady ? "active" : "unavailable", sRenderScale,
                sDepthIsTexture ? "texture (readable)" : "renderbuffer (not readable)");
     }
+    // macOS only. Core profiles have no default VAO (name 0), so the streaming
+    // ring's attribute layout must be recorded in its own VAO. The ring (sVBO)
+    // is already bound, so the attributes refer to it. Elsewhere sStreamVAO stays
+    // 0 and the default VAO is used, as before.
+#if defined(__APPLE__)
+    if (glGenVertexArrays_ptr && glBindVertexArray_ptr) {
+        glGenVertexArrays_ptr(1, &sStreamVAO);
+        glBindVertexArray_ptr(sStreamVAO);
+    }
+#endif
     setup_vertex_attribs();
     gl_error_checkpoint("vertex array setup");
     mesh_arena_init();
@@ -3133,7 +3295,22 @@ static void perf_gpu_scene_begin() {
 #endif
 }
 
+// Netplay two-pass frame: the authoritative pass draws its 2D screens with
+// the null GX and can leave the 4:3 / wide-HUD mapping set; the driver calls
+// this between the passes so the presentation pass starts as a single pass
+// does.
+void pc_gfx_reset_ui_state(void) {
+    if (sUi43 || sHudWide || sMenuClip43) {
+        sUi43 = false;
+        sHudWide = false;
+        sMenuClip43 = false;
+        invalidate_gl_pipeline_guards();
+    }
+}
+
 void pc_gfx_begin_frame(void) {
+    // Runs per renderall; the presentation pass owns the frame's GL.
+    if (pc_gfx_null_skip()) return;
 #ifdef __EMSCRIPTEN__
     pc_gfx_process_texture_uploads();
 #endif
@@ -3890,7 +4067,7 @@ static bool dof_build()
         }
     }
 
-    glBindVertexArray_ptr(0);
+    glBindVertexArray_ptr(sStreamVAO);
     return true;
 }
 
@@ -3933,7 +4110,7 @@ static bool bloom_build()
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    glBindVertexArray_ptr(0);
+    glBindVertexArray_ptr(sStreamVAO);
     return true;
 }
 
@@ -4041,7 +4218,7 @@ static bool ao_build()
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    glBindVertexArray_ptr(0);
+    glBindVertexArray_ptr(sStreamVAO);
     return true;
 }
 
@@ -4216,7 +4393,7 @@ static GLuint post_apply(bool allowDof)
     // the last draw was doing; the geometry comes from gl_VertexID.
     glBindVertexArray_ptr(sPostVAO);
     glDrawArrays(GL_TRIANGLES, 0, 3);
-    glBindVertexArray_ptr(0);
+    glBindVertexArray_ptr(sStreamVAO);
 
     glUseProgram_ptr(0);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -4387,7 +4564,30 @@ static void post_apply_before_interface()
     invalidate_uniform_cache();
 }
 
+// The window shows the frame only when the default framebuffer is bound at the
+// swap. The renderer leaves its own target bound after present, and on macOS
+// (OpenGL 4.1 core) a swap made with that target bound shows a black window.
+// pc_window_swap_buffers brackets SDL_GL_SwapWindow with these two calls.
+unsigned int pc_gfx_begin_swap_framebuffer(void) {
+    GLint bound = 0;
+    if (!glBindFramebuffer_ptr) return 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, 0);
+    return static_cast<unsigned int>(bound);
+}
+
+void pc_gfx_end_swap_framebuffer(unsigned int bound) {
+    if (glBindFramebuffer_ptr) glBindFramebuffer_ptr(GL_FRAMEBUFFER, GLuint(bound));
+}
+
 void pc_gfx_present(void) {
+    if (pc_gfx_null_skip()) return;
+    if (!sNullDoomedTextures.empty()) {
+        for (GLuint doomed : sNullDoomedTextures) {
+            glDeleteTextures(1, &doomed);
+        }
+        sNullDoomedTextures.clear();
+    }
     pc_gfx_flush_batch();
 #ifdef GL_TIME_ELAPSED
     if (sPerfGpuSceneActive) {
@@ -4488,6 +4688,7 @@ void pc_gfx_present(void) {
 }
 
 void pc_gfx_set_projection(const Mtx44 mtx, GXProjectionType type) {
+    if (pc_gfx_null_skip()) return;
     state_touched();
     // The orthographic ones matter as much as the perspective ones: the point
     // of this trace is to find where the world stops and the interface starts,
@@ -4614,6 +4815,7 @@ bool pc_gfx_project_current(float x, float y, float z, float* winX, float* winY)
 }
 
 void pc_gfx_set_viewport(f32 xOrig, f32 yOrig, f32 wd, f32 ht, f32 nearZ, f32 farZ) {
+    if (pc_gfx_null_skip()) return;
     (void)nearZ; (void)farZ;
     GLint x, y; GLsizei width, height;
     map_gx_rect(xOrig, yOrig, wd, ht, x, y, width, height);
@@ -4630,6 +4832,7 @@ void pc_gfx_set_viewport(f32 xOrig, f32 yOrig, f32 wd, f32 ht, f32 nearZ, f32 fa
 }
 
 void pc_gfx_set_scissor(u32 xOrig, u32 yOrig, u32 wd, u32 ht) {
+    if (pc_gfx_null_skip()) return;
     GLint x, y; GLsizei width, height;
     map_gx_rect((float)xOrig, (float)yOrig, (float)wd, (float)ht, x, y, width, height);
     static GLint lastX = -1, lastY = -1;
@@ -4700,6 +4903,7 @@ void pc_gfx_set_pipeline_state(const PcGfxPipelineState& st) {
 }
 
 void pc_gfx_set_z_mode(GXBool compareEnable, GXCompare func, GXBool updateEnable) {
+    if (pc_gfx_null_skip()) return;
     sPipelineState.zCompare = compareEnable; sPipelineState.zFunc = func; sPipelineState.zUpdate = updateEnable;
     static bool valid = false;
     static uint32_t seenSerial = 0;
@@ -4731,6 +4935,7 @@ void pc_gfx_set_z_mode(GXBool compareEnable, GXCompare func, GXBool updateEnable
 }
 
 void pc_gfx_set_blend_mode(GXBlendMode type, GXBlendFactor srcFactor, GXBlendFactor dstFactor, GXLogicOp op) {
+    if (pc_gfx_null_skip()) return;
     sPipelineState.blendType = type; sPipelineState.blendSrc = srcFactor; sPipelineState.blendDst = dstFactor; sPipelineState.blendOp = op;
     static bool valid = false;
     static uint32_t seenSerial = 0;
@@ -4803,6 +5008,7 @@ void pc_gfx_set_blend_mode(GXBlendMode type, GXBlendFactor srcFactor, GXBlendFac
 }
 
 void pc_gfx_set_cull_mode(GXCullMode mode) {
+    if (pc_gfx_null_skip()) return;
     sPipelineState.cull = mode;
     static bool valid = false;
     static uint32_t seenSerial = 0;
@@ -4820,6 +5026,7 @@ void pc_gfx_set_cull_mode(GXCullMode mode) {
 }
 
 void pc_gfx_set_color_update(GXBool updateEnable) {
+    if (pc_gfx_null_skip()) return;
     if (sColorUpdate == updateEnable) return;
     sColorUpdate = updateEnable;
     pc_gfx_note_gl_state_change();
@@ -4827,6 +5034,7 @@ void pc_gfx_set_color_update(GXBool updateEnable) {
 }
 
 void pc_gfx_set_alpha_update(GXBool updateEnable) {
+    if (pc_gfx_null_skip()) return;
     if (sAlphaUpdate == updateEnable) return;
     sAlphaUpdate = updateEnable;
     pc_gfx_note_gl_state_change();
@@ -4840,6 +5048,14 @@ void pc_gfx_set_alpha_compare(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare 
     sAlphaOp = op;
     sAlphaRef0 = ref0 / 255.0f;
     sAlphaRef1 = ref1 / 255.0f;
+}
+
+void pc_gfx_get_alpha_compare(GXCompare* comp0, u8* ref0, GXAlphaOp* op, GXCompare* comp1, u8* ref1) {
+    if (comp0) *comp0 = sAlphaComp0;
+    if (ref0) *ref0 = static_cast<u8>(sAlphaRef0 * 255.0f + 0.5f);
+    if (op) *op = sAlphaOp;
+    if (comp1) *comp1 = sAlphaComp1;
+    if (ref1) *ref1 = static_cast<u8>(sAlphaRef1 * 255.0f + 0.5f);
 }
 
 void pc_gfx_set_chan_ctrl(GXChannelID chan, GXBool enable, GXColorSrc ambSrc, GXColorSrc matSrc,
@@ -5246,6 +5462,7 @@ void pc_gfx_release_texture(void* gxTexObj)
     sCiTextures.erase(key);
     sTextureSignatures.erase(key);
 #endif
+    sNullDeferred.erase(key);
     auto it = sTextureCache.find(key);
     if (it == sTextureCache.end()) return;
 
@@ -5254,7 +5471,13 @@ void pc_gfx_release_texture(void* gxTexObj)
     for (int unit = 0; unit < 8; ++unit) {
         if (sBoundTextures[unit] == id) sBoundTextures[unit] = 0;
     }
-    glDeleteTextures(1, &id);
+    // Netplay authoritative pass (heap resets on section changes run there):
+    // forget the texture now, free the GL name on the next real present.
+    if (pc_gfx_null_skip()) {
+        sNullDoomedTextures.push_back(id);
+    } else {
+        glDeleteTextures(1, &id);
+    }
     sExternalMipChain.erase(id);
     sTextureCache.erase(it);
     sTextureSignatures.erase(key);
@@ -5372,8 +5595,46 @@ static void apply_texture_filtering(bool gameRequestedMipmaps)
     }
 }
 
+// Netplay authoritative-pass init: drop the live entry (GL name freed at the
+// next present) so the presentation pass never draws the stale image.
+static void null_auth_invalidate(uintptr_t key)
+{
+    auto cached = sTextureCache.find(key);
+    if (cached != sTextureCache.end()) {
+        const GLuint doomed = cached->second;
+        sNullDoomedTextures.push_back(doomed);
+        for (int unit = 0; unit < 8; ++unit) {
+            if (sBoundTextures[unit] == doomed) sBoundTextures[unit] = 0;
+        }
+        sExternalMipChain.erase(doomed);
+        sTextureCache.erase(cached);
+        auto bytesIt = sTextureBytes.find(key);
+        if (bytesIt != sTextureBytes.end()) {
+            sTextureBytesLive -= bytesIt->second;
+            sTextureBytes.erase(bytesIt);
+        }
+    }
+    sTextureSignatures.erase(key);
+    sNullDeferred.erase(key);
+}
+
 void pc_gfx_init_tex_obj_rgba(GXTexObj* obj, void* rgba, u16 width, u16 height, GXTexWrapMode wrapS, GXTexWrapMode wrapT) {
     if (!obj || !rgba || width == 0 || height == 0) return;
+    if (pc_gfx_null_skip()) {
+        // Always re-recorded: the movie reuses one buffer for every picture.
+        const uintptr_t nullKey = reinterpret_cast<uintptr_t>(obj);
+        null_auth_invalidate(nullKey);
+        PcNullDeferredTex& def = sNullDeferred[nullKey];
+        const u8* src = static_cast<const u8*>(rgba);
+        def.bytes.assign(src, src + size_t(width) * size_t(height) * 4);
+        def.width = width;
+        def.height = height;
+        def.wrapS = wrapS;
+        def.wrapT = wrapT;
+        def.rgba = true;
+        pc_gfx_note_null_deferred();
+        return;
+    }
 #ifdef __EMSCRIPTEN__
     sWebTextures.sources.erase(reinterpret_cast<uintptr_t>(obj));
     sTextureSignatures.erase(reinterpret_cast<uintptr_t>(obj));
@@ -5381,6 +5642,7 @@ void pc_gfx_init_tex_obj_rgba(GXTexObj* obj, void* rgba, u16 width, u16 height, 
 #endif
 
     const uintptr_t key = (uintptr_t)obj;
+    sNullDeferred.erase(key);
     GLuint texId = 0;
     auto it = sTextureCache.find(key);
     if (it != sTextureCache.end()) {
@@ -5419,6 +5681,25 @@ void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, G
         && sTextureCache.find(key) != sTextureCache.end()) {
         return;
     }
+    if (pc_gfx_null_skip()) {
+        const size_t rawBytes = gx_base_level_size(width, height, static_cast<u32>(format));
+        if (rawBytes == 0) return; // unknown layout: the presentation pass inits it
+        null_auth_invalidate(key);
+        PcNullDeferredTex& def = sNullDeferred[key];
+        const u8* src = static_cast<const u8*>(imagePtr);
+        def.bytes.assign(src, src + rawBytes);
+        def.sigImage = imagePtr;
+        def.width = width;
+        def.height = height;
+        def.format = static_cast<u32>(format);
+        def.wrapS = wrapS;
+        def.wrapT = wrapT;
+        def.mipmap = mipmap != GX_FALSE;
+        def.rgba = false;
+        pc_gfx_note_null_deferred();
+        return;
+    }
+    sNullDeferred.erase(key);
 
 #ifdef __EMSCRIPTEN__
     sWebTextures.remember(key, signature, gx_base_level_size(width, height, format), mipmap != GX_FALSE);
@@ -5784,6 +6065,12 @@ void pc_gfx_init_tex_obj_ci(GXTexObj* obj, void* imagePtr, u16 width, u16 height
     PcCiTexture ci { static_cast<const u8*>(imagePtr), width, height, format, wrapS, wrapT, tlutName,
                      mipmap != GX_FALSE };
     sCiTextures[key] = ci;
+    if (pc_gfx_null_skip()) {
+        // Netplay authoritative pass: load_tex_obj uploads it on first
+        // presentation use.
+        null_auth_invalidate(key);
+        return;
+    }
     if (upload_ci_texture(obj, ci)) {
         sTextureSignatures[key] = signature;
     }
@@ -5842,6 +6129,7 @@ void pc_gfx_process_texture_uploads(void) {
 #endif
 
 void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
+    if (pc_gfx_null_skip()) return;
     state_touched();
     if (id < GX_TEXMAP0 || id >= GX_MAX_TEXMAP) return;
     if (!obj) {
@@ -5854,6 +6142,26 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
     if (it == sTextureCache.end()) {
         auto ci = sCiTextures.find(key);
         if (ci != sCiTextures.end() && upload_ci_texture(obj, ci->second)) it = sTextureCache.find(key);
+    }
+    if (it == sTextureCache.end()) {
+        // Netplay: an init recorded in the authoritative pass uploads now.
+        // Move the entry out first; the init below erases the map node.
+        auto def = sNullDeferred.find(key);
+        if (def != sNullDeferred.end()) {
+            PcNullDeferredTex taken = std::move(def->second);
+            sNullDeferred.erase(def);
+            if (taken.rgba) {
+                pc_gfx_init_tex_obj_rgba(obj, taken.bytes.data(), taken.width, taken.height, taken.wrapS, taken.wrapT);
+            } else {
+                pc_gfx_init_tex_obj(obj, taken.bytes.data(), taken.width, taken.height, (GXTexFmt)taken.format,
+                                    taken.wrapS, taken.wrapT, taken.mipmap ? GX_TRUE : GX_FALSE);
+                // The signature must name the game's pointer, not the copy.
+                auto sigIt = sTextureSignatures.find(key);
+                if (sigIt != sTextureSignatures.end()) sigIt->second.image = taken.sigImage;
+            }
+            it = sTextureCache.find(key);
+            if (it != sTextureCache.end()) ++sNullDeferredDrains;
+        }
     }
     if (it != sTextureCache.end()) {
         sActiveGLTextures[id] = it->second;
@@ -6704,6 +7012,9 @@ static void use_program_for_current_state() {
     printf("[PC GX] specialised TEV program #%zu: %u stages, %.1f ms%s\n",
            sTevPrograms.size() + 1, (unsigned)sNumTevStages, submit_clock_ms() - compileT0,
            program ? "" : " (FAILED)");
+    // A burst of these blocks one netplay tick; between two programs the
+    // netplay keep-alive polls the network.
+    if (pc_netplay_load_keepalive != nullptr) pc_netplay_load_keepalive(pc_netplay_loadguard::kSiteShader);
     if (!program) {
         // One failure is treated as a permanent fallback: a configuration this
         // generator cannot express must not be retried for every draw.
@@ -7128,16 +7439,22 @@ static GLenum batch_mode_for(GXPrimitive prim) {
     }
 }
 
-// Mapeo sin sincronizar por defecto en GLES (el caso móvil); en escritorio se
-// conserva glBufferSubData, que es la ruta medida a 60 FPS. PIKMIN_VBO_MAP=0/1
-// fuerza una u otra para comparar.
+// Mapeo sin sincronizar por defecto en GLES (el caso móvil) y en macOS, donde
+// glBufferSubData sobre el GL de Metal costaba ~8,75 ms de CPU por frame
+// (medido en un M3 Max); en el resto de escritorio se conserva
+// glBufferSubData, que es la ruta medida a 60 FPS. PIKMIN_VBO_MAP=0/1 fuerza
+// una u otra para comparar.
 static bool vbo_upload_by_mapping() {
 #ifdef __EMSCRIPTEN__
     return false;
 #else
     static const bool enabled = [] {
         if (const char* v = std::getenv("PIKMIN_VBO_MAP")) return v[0] == '1';
+#if defined(__APPLE__)
+        return true;
+#else
         return PIKI_USE_GLES != 0;
+#endif
     }();
     return enabled;
 #endif
@@ -7215,6 +7532,12 @@ static void vbo_ring_frame_begin() {
 // Draws whatever has accumulated. Safe to call at any time: a no-op when no
 // batch is open, which is what makes it cheap to place at every flush point.
 void pc_gfx_flush_batch(void) {
+    if (pc_gfx_null_skip()) {
+        sBatchOpen  = false;
+        sBatchPrims = 0;
+        sBatchVerts.clear();
+        return;
+    }
     if (!sBatchOpen || sBatchVerts.empty()) {
         sBatchOpen  = false;
         sBatchPrims = 0;
@@ -7280,6 +7603,10 @@ void pc_gfx_flush_batch(void) {
     gl_error_checkpoint("batch upload");
     const GLint firstVertex = static_cast<GLint>(sVboWriteOffset / sizeof(Vertex));
     shadow_record_stream(sBatchVerts, sBatchMode);
+    // The other passes (dim, overlay, post, shadows) bind their own VAO and
+    // restore this one. Bind it here too, so the batch never depends on that.
+    // sStreamVAO is 0 (the default VAO) everywhere except macOS.
+    if (sStreamVAO != 0 && glBindVertexArray_ptr) glBindVertexArray_ptr(sStreamVAO);
     glDrawArrays(sBatchMode, firstVertex, (GLsizei)sBatchVerts.size());
     gl_error_checkpoint("batch draw");
 
@@ -7750,11 +8077,12 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
     int numLights = 0;
     float ambR = 1.0f, ambG = 1.0f, ambB = 1.0f, ambA = 1.0f;
     if (sShadowProjPerspective && !sPostRanThisFrame) sun_capture_from_channel0();
-    // Iluminación del canal GX_ALPHA0: desactivada. Se probó para el agua y
-    // el casco, pero volvía semitransparente a Olimar (sus materiales se
-    // mezclan con alfa y la luz del port no da el alfa que da la consola).
-    // El agua la arregló el recorte a 8 bits de las entradas TEV (tevU8).
-    const bool alphaLit0 = false;
+    // Iluminación del canal GX_ALPHA0, solo en los materiales que la activan
+    // (como la consola): el cristal del casco de Olimar es casi transparente
+    // gracias a ella. Antes se forzaba apagada para todo porque volvía
+    // semitransparente al Olimar HD, que es quien la encendía sin quererlo
+    // (setLighting sin material activa GX_COLOR0A0); ahora la apaga él.
+    const bool alphaLit0 = sChannels[0].alphaEnabled;
     if (sChannels[0].enabled || alphaLit0) {
         // Only lit channels contribute lighting; a disabled channel must pass
         // rasterized colors through untouched (matches GX hardware behavior).
@@ -7767,7 +8095,7 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
             ambG = std::min(1.0f, ambG + sAmbBoost[1]);
             ambB = std::min(1.0f, ambB + sAmbBoost[2]);
         }
-        u32 mask = sChannels[0].lightMask;
+        u32 mask = sChannels[0].enabled ? sChannels[0].lightMask : sChannels[0].alphaLightMask;
         for (int i = 0; i < 8 && numLights < 4; i++) {
             if (mask & (1u << i)) {
                 glUniform4f_ptr(sLoc.lightPos[numLights], sLights[i].pos[0], sLights[i].pos[1], sLights[i].pos[2], 0.0f);
@@ -7775,7 +8103,8 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
                 // Distance attenuation applies when the channel's attention
                 // function requests it (game uses GX_AF_SPOT with lights).
                 const float* k = sLights[i].k;
-                bool attnOn = (sChannels[0].attnFn != GX_AF_NONE);
+                bool attnOn = sChannels[0].enabled ? (sChannels[0].attnFn != GX_AF_NONE)
+                                                   : (sChannels[0].alphaAttnFn != GX_AF_NONE);
                 glUniform4f_ptr(sLoc.lightK[numLights], k[0], k[1], k[2], attnOn ? 1.0f : 0.0f);
                 numLights++;
             }
@@ -7864,6 +8193,14 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
 }
 
 void pc_gfx_end(void) {
+    // Netplay null GX: drop the primitive; apply_draw_state would issue GL.
+    if (pc_gfx_null_skip()) {
+        sVertexStream.clear();
+        sInPrimitive = false;
+        sHaveVertex = false;
+        sAttrStep = 0;
+        return;
+    }
     if (sInPrimitive && sHaveVertex) {
         sVertexStream.push_back(sCurVertex);
         sHaveVertex = false;
@@ -8488,6 +8825,9 @@ static void mesh_arena_reset() {
 #else
     // Draws already queued may still read the arena: the next upload waits
     // on this fence before writing over them. Level loads can afford it.
+    // A reset in the netplay authoritative pass has nothing queued and may
+    // not issue GL; only the fence is skipped.
+    if (pc_gfx_null_skip()) return;
     if (glFenceSync_ptr) {
         if (sMeshArenaResetFence && glDeleteSync_ptr) glDeleteSync_ptr(sMeshArenaResetFence);
         sMeshArenaResetFence = glFenceSync_ptr(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -8514,6 +8854,7 @@ void pc_gfx_invalidate_cpu_range(const void* addr, size_t bytes) {
 // Copies the built vertices into the arena and registers the mesh. Returns
 // false (and caches nothing) when the arena is full.
 static bool mesh_upload(ResidentMesh& mesh, const std::vector<Vertex>& verts) {
+    if (pc_gfx_null_skip()) return false;
     const size_t bytes = verts.size() * sizeof(Vertex);
     if (bytes == 0 || sMeshArenaUsed + bytes > sMeshArenaCapacity) return false;
     if (sMeshArenaResetFence) {
@@ -8548,6 +8889,7 @@ static bool mesh_upload(ResidentMesh& mesh, const std::vector<Vertex>& verts) {
 // programmed exactly as pc_gfx_end would, and the mesh is drawn from the
 // arena. Skinned meshes use the palette; static ones the current matrix.
 static void draw_resident_mesh(ResidentMesh& mesh) {
+    if (pc_gfx_null_skip()) return;
     const bool profiling = pc_tick_profiler_enabled();
     const double t0 = profiling ? submit_clock_ms() : 0.0;
     pc_gfx_flush_batch();
@@ -8578,6 +8920,9 @@ static void draw_resident_mesh(ResidentMesh& mesh) {
 }
 
 void pc_gfx_call_display_list(const void* list, u32 nbytes) {
+    // Netplay authoritative pass: skipped whole; the presentation pass parses
+    // and uploads on first draw.
+    if (pc_gfx_null_skip()) return;
     // Two clock reads per display list (~1000 a frame): cheap enough, and it
     // is the one cost of renderall that nothing else was attributing.
     if (!pc_tick_profiler_enabled()) {
@@ -9029,6 +9374,7 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
 }
 
 void pc_gfx_copy_disp(void* dest, GXBool clear) {
+    if (pc_gfx_null_skip()) return;
     pc_gfx_note_gl_state_change();
     (void)dest;
     if (clear) {

@@ -21,10 +21,10 @@ build_mode() {
     label=$2
     output="${nectar_web_pikmin2_build_dir:-build-web-pikmin2}-$3"
     emcmake cmake -S games/pikmin2 -B "$output" -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_TESTING=OFF -DPIKMIN2_GAME_VERSION=VERSION_GPVP01 "-DPIKMIN_WEB_THREADS=$threads"
+        -DBUILD_TESTING=OFF -DPIKMIN_GAME_VERSION=VERSION_GPVP01 "-DPIKMIN_WEB_THREADS=$threads"
     cmake --build "$output" --parallel "$jobs"
     emcmake cmake -S games/pikmin2 -B "$output/usa-engine" -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_TESTING=OFF -DPIKMIN2_GAME_VERSION=VERSION_GPVE01 "-DPIKMIN_WEB_THREADS=$threads"
+        -DBUILD_TESTING=OFF -DPIKMIN_GAME_VERSION=VERSION_GPVE01 "-DPIKMIN_WEB_THREADS=$threads"
     cmake --build "$output/usa-engine" --parallel "$jobs"
     cp "$output/usa-engine/bin/nectar.html" "$output/bin/nectar.html"
     cp "$output/usa-engine/bin/nectar.js" "$output/bin/nectar.js"

@@ -23,6 +23,7 @@
 #include "settings/pc_settings.h"
 #include "pc_achievements.h"
 #include "pc_speedrun.h"
+#include "netplay/pc_netplay_present.h"
 #endif
 
 int PlayerState::totalUfoParts = MAX_UFO_PARTS;
@@ -1393,8 +1394,15 @@ void PlayerState::renderParts(Graphics& gfx, Shape* shape)
 			parts->mAnimator.updateAnimation(parts->mMotionSpeed, 30.0f);
 			parts->mAnimator.updateContext();
 			immut Matrix4f& temp = shape->getAnimMatrix(parts->mRepairAnimJointIndex);
+#if defined(PIKI_PC_PORT)
+			// Netplay: the repair effect anchor is sim.
+			if (pc_netplay_present_sim_side()) {
+#endif
 			parts->mRepairEffectPosition.set(0.0f, 0.0f, 0.0f);
 			shape->calcJointWorldPos(gfx, parts->mRepairAnimJointIndex, parts->mRepairEffectPosition);
+#if defined(PIKI_PC_PORT)
+			}
+#endif
 			Matrix4f mtx = temp;
 			parts->mPelletShape->mShape->updateAnim(gfx, mtx, nullptr, parts);
 			parts->mAnimatedMaterials.animate(nullptr);
@@ -1412,10 +1420,17 @@ void PlayerState::renderParts(Graphics& gfx, Shape* shape)
 		mtx.multiplyTo(mtx2, mtx3);
 		mOlimarShapeObj->mShape->updateAnim(gfx, mtx3, nullptr, this);
 		mOlimarShapeObj->mShape->drawshape(gfx, *gfx.mCamera, nullptr);
+#if defined(PIKI_PC_PORT)
+		// Netplay: the navi-light anchor is sim.
+		if (pc_netplay_present_sim_side()) {
+#endif
 		mNaviLightEfxPos.set(2.0f, 0.0f, 0.0f);
 		mOlimarShapeObj->mShape->calcJointWorldPos(gfx, 6, mNaviLightEfxPos);
 		mNaviLightEfx->updatePos(mNaviLightEfxPos);
 		mNaviLightGlowEfx->updatePos(mNaviLightEfxPos);
+#if defined(PIKI_PC_PORT)
+		}
+#endif
 	}
 
 	STACK_PAD_TERNARY(mIsNaviPilot, 3);

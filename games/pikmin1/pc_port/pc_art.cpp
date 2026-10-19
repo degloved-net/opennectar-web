@@ -29,10 +29,17 @@ bool readFile(const char* name, std::vector<unsigned char>& bytes)
 	// Mismas rutas que la capa táctil: assets del APK en Android, árbol de
 	// fuentes en escritorio (o PIKMIN_TOUCH_ART).
 	std::vector<std::string> candidates;
-	candidates.push_back(std::string("art/") + name + ".png");
-	if (const char* dir = std::getenv("PIKMIN_TOUCH_ART")) candidates.insert(candidates.begin(), std::string(dir) + "/" + name + ".png");
-	candidates.push_back(std::string("pc_port/touch/assets/art/") + name + ".png");
-	candidates.push_back(std::string("../pc_port/touch/assets/art/") + name + ".png");
+	if (name[0] == '@') {
+		// Ruta tal cual (miniaturas de los mapas VS).
+		candidates.push_back(name + 1);
+	} else {
+		candidates.push_back(std::string("art/") + name + ".png");
+		// Retratos sacados de un Pikmin 2 instalado (pc_hd_models_import_pikmin2).
+		candidates.push_back(std::string("Load/Art/") + name + ".png");
+		if (const char* dir = std::getenv("PIKMIN_TOUCH_ART")) candidates.insert(candidates.begin(), std::string(dir) + "/" + name + ".png");
+		candidates.push_back(std::string("pc_port/touch/assets/art/") + name + ".png");
+		candidates.push_back(std::string("../pc_port/touch/assets/art/") + name + ".png");
+	}
 	for (const std::string& path : candidates) {
 		SDL_RWops* rw = SDL_RWFromFile(path.c_str(), "rb");
 		if (!rw) continue;

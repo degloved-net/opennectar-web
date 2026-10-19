@@ -346,6 +346,9 @@ private:
 	KingGenDamageStarCallBack* mDamageStarCallBack;               ///< _104
 	KingGenRippleCallBack* mRippleCallBacks;                      ///< _108
 	KingGenSpitPartsParticleCallBack* mSpitPartsParticleCallBack; ///< _10C
+#if defined(PIKI_PC_PORT)
+	BossPresentJoints mPresentJoints; // world-space joints for the netplay presentation pass
+#endif
 };
 
 /**

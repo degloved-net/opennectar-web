@@ -80,6 +80,7 @@ int pc_settings_get_navi_health_pct(void);
 int pc_settings_get_teki_health_pct(void);
 int pc_settings_get_infinite_day(void);
 int pc_settings_get_eternal_night(void);
+int pc_settings_get_fireflies(void);
 int pc_settings_get_free_camera(void);
 /// Radio máximo del silbato, % del original (100 = sin cambio).
 int pc_settings_get_whistle_radius_pct(void);
@@ -138,6 +139,10 @@ void pc_settings_draw_vs_hud(void);
 void pc_settings_draw_achievement_toast(void);
 /// VS: pasa las reglas guardadas (menú previo) a la partida.
 void pc_settings_apply_vs_rules(void);
+#if defined(PIKI_PC_PORT)
+/// VS: el mapa elegido en el menú previo (id de pc_vs_map_list; "" = la arena de serie).
+const char* pc_settings_get_vs_map(void);
+#endif
 /// VS: menú previo con la explicación y las reglas. Resultado: PC_DEVASSIGN_*.
 void pc_vsrules_prompt_open(void);
 bool pc_vsrules_prompt_active(void);
@@ -191,6 +196,33 @@ bool pc_speedrun_intro_open_if_needed(void);
 bool pc_speedrun_intro_active(void);
 int  pc_speedrun_intro_result(void);
 void pc_speedrun_intro_draw(void);
+// Splits visibles bajo el reloj del modo Speedrun (1-10).
+int  pc_settings_get_speedrun_splits_shown(void);
+// Categoría del modo Speedrun (PC_SR_CAT_* de pc_speedrun.h).
+int  pc_settings_get_speedrun_category(void);
+// LiveSplit (pc_livesplit.h): opción, ocultar el reloj propio, host y puerto.
+int  pc_settings_get_speedrun_livesplit(void);
+int  pc_settings_get_speedrun_ls_hide_clock(void);
+const char* pc_settings_get_speedrun_ls_host(void);
+int  pc_settings_get_speedrun_ls_port(void);
+/// Online rooms may use a public STUN server (F1 > Data > Online over the Internet).
+int  pc_settings_get_online_stun(void);
+// Explicación del modo Randomizer al elegirlo en el título. CONTINUE = seguir
+// a capitán y slots, BACK = volver al título.
+enum { PC_RANDOMIZER_INTRO_PENDING = 0, PC_RANDOMIZER_INTRO_CONTINUE = 1, PC_RANDOMIZER_INTRO_BACK = 2 };
+void pc_randomizer_intro_open(void);
+/// "Randomizer Settings" de una partida nueva (ranura vacía). Mismos
+/// resultados: CONTINUE = seguir a New Game, BACK = volver a las ranuras.
+void pc_randomizer_settings_open(void);
+/// Semilla y ajustes de la partida Randomizer en curso, bajo el menú de
+/// pausa. Update: Ctrl+C copia el código.
+void pc_randomizer_pause_draw(void);
+void pc_randomizer_pause_update(void);
+bool pc_randomizer_intro_active(void);
+int  pc_randomizer_intro_result(void);
+void pc_randomizer_intro_draw(void);
+/// Texto tecleado (SDL_TEXTINPUT): edición de la semilla del Randomizer.
+void pc_settings_text_input(const char* text);
 void pc_erased_notice_queue(void);
 bool pc_erased_notice_open_if_queued(void);
 bool pc_erased_notice_active(void);
@@ -199,8 +231,16 @@ void pc_newgame_prompt_open(void);
 bool pc_newgame_prompt_active(void);
 void pc_newgame_prompt_draw(void);
 int  pc_newgame_prompt_result(void);
-/// True after accept on the second prompt if Hard was chosen.
+/// True after accepting the new-game prompt with Hard selected.
 bool pc_newgame_prompt_chose_hard(void);
+/// True after accepting the new-game prompt with "Skip tutorial: Yes".
+bool pc_newgame_prompt_chose_skip_tutorial(void);
+
+/* One-shot request carried from file select to the first playable tutorial
+   stage. It is not a saved rule: the resulting day-2 save is a normal save. */
+void pc_tutorial_skip_set_pending(bool on);
+bool pc_tutorial_skip_pending(void);
+void pc_tutorial_skip_clear_pending(void);
 
 /* Selector 1 jugador / 2 jugadores (PLAN_COOP fase 0b). Lo abre la sección de
    selección de slot justo al entrar desde "Empezar". Si se eligen 2 jugadores
@@ -211,6 +251,10 @@ bool pc_newgame_prompt_chose_hard(void);
 #define PC_PLAYERCOUNT_TWO       (2)
 
 void pc_playercount_prompt_open(void);
+/// Variante del Modo Desafío: 1 jugador / Cooperativo / 1 vs 1 (este aún
+/// deshabilitado). Devuelve ONE, TWO (cooperativo) o, en el futuro, VS.
+#define PC_PLAYERCOUNT_VS        (3)
+void pc_playercount_prompt_open_challenge(void);
 bool pc_playercount_prompt_active(void);
 void pc_playercount_prompt_draw(void);
 int  pc_playercount_prompt_result(void);
@@ -235,6 +279,11 @@ int  pc_devassign_prompt_result(void);
 
 /// Debug shortcuts F5 and F6, off by default.
 int pc_settings_get_debug_keys(void);
+/// Atajo de grabación (Ctrl+2): 1 = aspecto del juego original (sin sombras,
+/// AO, bloom, desenfoque, FXAA, luz por píxel, anisotrópico, gradación ni
+/// modelos HD); 0 = vuelve a lo que había. En vivo y sin guardar el .conf.
+/// El pack de texturas no cambia: se aplica al reiniciar.
+void pc_settings_record_original_look(int original);
 /// Modelo HD de esa fila del selector (0 Olimar, 1 Louie, 2 Louie HD,
 /// 3 Pikmin, 4 Bulborb, 5 Dwarf Bulborb): 0 = apagado, se usa el original.
 int pc_settings_get_hd_model_enabled(int row);
@@ -287,6 +336,20 @@ void pc_texpack_install_progress(int files);
    importación Android (SaveTransfer.java), entregado desde un hilo Java para
    que el submenú F1 Save Data lo pinte unos segundos. */
 void pc_save_transfer_finished(bool ok, const char* message);
+
+#if defined(PIKI_PC_PORT)
+// Netplay builds: the sim-relevant settings both peers must share, as
+// "key=value;" pairs (the session hashes it in the handshake). Valid until
+// the next call.
+const char* pc_settings_netplay_config_text(void);
+// Netplay builds: locks those settings for the session. A save keeps them
+// at the values the session started with, so an F1 edit of a sim row
+// reverts when the menu closes; presentation settings still save. With
+// adoptConfigText (the host's pc_settings_netplay_config_text) the session
+// takes those values instead, and the settings file keeps this player's own.
+// Only the first call takes effect.
+void pc_settings_netplay_session_begin(const char* adoptConfigText);
+#endif
 
 #ifdef __cplusplus
 }

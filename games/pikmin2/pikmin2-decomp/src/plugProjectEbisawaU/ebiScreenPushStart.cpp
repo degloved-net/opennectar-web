@@ -8,6 +8,10 @@
 #include "Graphics.h"
 #include "SoundID.h"
 #include "Dolphin/rand.h"
+#if PIKI_PC_TOUCH
+extern "C" void pc_touch_claim_game_menu(void);
+extern "C" bool pc_touch_take_game_menu_tap(float* x, float* y);
+#endif
 
 static const char name[] = "ebiScreenPushStart";
 
@@ -95,7 +99,18 @@ void TPressStart::doCloseScreen(ArgClose*)
 bool TPressStart::doUpdateStateWait()
 {
 	mScreens[mCurrentScreen]->update();
+#if PIKI_PC_TOUCH
+	// "Pulsa Start": tocar en cualquier parte de la pantalla.
+	pc_touch_claim_game_menu();
+	bool pcTouchStart = false;
+	if (mIsOpen) {
+		float nx, ny;
+		pcTouchStart = pc_touch_take_game_menu_tap(&nx, &ny);
+	}
+	if (mIsOpen && (pcTouchStart || mControl->getButton() & (Controller::PRESS_START | Controller::PRESS_A))) {
+#else
 	if (mIsOpen && mControl->getButton() & (Controller::PRESS_START | Controller::PRESS_A)) {
+#endif
 		PSSystem::spSysIF->playSystemSe(PSSE_SY_MENU_DECIDE, 0);
 		return true;
 	} else {

@@ -1,6 +1,9 @@
 #include "DebugLog.h"
 #include "Pcam/Camera.h"
 #include "Pcam/MotionEvents.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_sim_rng.h"
+#endif
 #include "sysNew.h"
 
 /**
@@ -119,15 +122,29 @@ void PcamRandomMoveEvent::update()
 {
 	PeveEvent::update();
 	NVector3f offset;
+#if defined(PIKI_PC_PORT)
+	// Netplay: camera shake is presentation, so the cosmetic stream. Each
+	// line is one rangeRandom(-1, 1) draw.
+	offset.x = pc_cosmetic_randf(2.0f) - 1.0f;
+	offset.y = pc_cosmetic_randf(2.0f) - 1.0f;
+	offset.z = pc_cosmetic_randf(2.0f) - 1.0f;
+#else
 	offset.x = NMathF::rangeRandom(-1.0f, 1.0f);
 	offset.y = NMathF::rangeRandom(-1.0f, 1.0f);
 	offset.z = NMathF::rangeRandom(-1.0f, 1.0f);
+#endif
 	offset.scale(mMoveScale);
 	mCamera->getViewpoint().add(offset);
 
+#if defined(PIKI_PC_PORT)
+	offset.x = pc_cosmetic_randf(2.0f) - 1.0f;
+	offset.y = pc_cosmetic_randf(2.0f) - 1.0f;
+	offset.z = pc_cosmetic_randf(2.0f) - 1.0f;
+#else
 	offset.x = NMathF::rangeRandom(-1.0f, 1.0f);
 	offset.y = NMathF::rangeRandom(-1.0f, 1.0f);
 	offset.z = NMathF::rangeRandom(-1.0f, 1.0f);
+#endif
 	offset.scale(mMoveScale);
 	mCamera->getWatchpoint().add(offset);
 }

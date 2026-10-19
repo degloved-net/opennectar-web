@@ -1,6 +1,10 @@
 #include "ItemAI.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "pc_speedrun.h"
+#include "netplay/pc_input_log.h"
+#include "netplay/pc_netplay_det.h"
+#include <cstdio>
 #endif
 #include "BaseInf.h"
 #include "BombItem.h"
@@ -261,6 +265,16 @@ void PikiHeadAI::BuryExec2::act(AICreature* item)
 void PikiHeadAI::BuryInit::act(AICreature* item)
 {
 	PikiHeadItem* obj = (PikiHeadItem*)item;
+#if defined(PIKI_PC_PORT)
+	// startFix congela la semilla donde esté. Tras el rebote del aterrizaje
+	// puede seguir en el aire, y a más de 30 FPS el rebote cambia lo bastante
+	// como para que se plantara flotando: se baja al suelo antes de fijarla.
+	f32 groundY = mapMgr->getMinY(obj->mSRT.t.x, obj->mSRT.t.z, true);
+	if (obj->mSRT.t.y > groundY) {
+		obj->mSRT.t.y = groundY;
+	}
+	obj->mVelocity.set(0.0f, 0.0f, 0.0f);
+#endif
 	obj->startFix();
 	obj->mFlowerStage               = Leaf;
 	obj->mSAICtx.mCurrentItemHealth = pikiMgr->mPikiParms->mPikiParms.mSeedUpTime() + gsys->getRand(1.0f) * 2.0f;
@@ -484,6 +498,11 @@ void BombAI::BombInit::act(AICreature* item)
 	if (item->mObjType != OBJTYPE_Bomb) {
 		ERROR("this is not bomb %s\n", "bombinit");
 	}
+#if defined(PIKI_PC_PORT)
+	if (pc_netplay_deterministic() && pc_netplay_ext_trace()) {
+		printf("[EXT] tick=%u bomb exploded at (%.1f %.1f)\n", pc_netplay_tick(), item->mSRT.t.x, item->mSRT.t.z);
+	}
+#endif
 	CndBombable cnd;
 	f32 maxRange = pikiMgr->mPikiParms->mPikiParms.mBombExplodeRadius();
 	f32 unused   = pikiMgr->mPikiParms->mPikiParms.mBombDamageBomb();
@@ -774,6 +793,7 @@ void GoalAI::BootEmit::act(AICreature* item)
 		seed->mParentOnion = obj;
 #if defined(PIKI_PC_PORT)
 		seed->mPcOwner = obj->mPcOwner;
+		pc_speedrun_on_onion_sprout();
 #endif
 		C_SAI(seed)->start(seed, PikiHeadAI::PIKIHEAD_Flying);
 		return;
@@ -894,6 +914,7 @@ void GoalAI::EmitPiki::act(AICreature* item)
 			seed->mParentOnion = obj;
 #if defined(PIKI_PC_PORT)
 			seed->mPcOwner = obj->mPcOwner;
+			pc_speedrun_on_onion_sprout();
 #endif
 			C_SAI(seed)->start(seed, PikiHeadAI::PIKIHEAD_Flying);
 		} else {

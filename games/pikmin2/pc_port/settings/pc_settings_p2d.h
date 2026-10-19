@@ -21,6 +21,11 @@ void pc_settings_p2d_text_styled(int x, int y, const char* text, Colour top, Col
 // Cursor de los menús del juego (burbuja) girando sobre su eje vertical, con
 // estela; angle en radianes.
 void pc_settings_p2d_cursor(int cx, int cy, int size, float angle);
+/// La misma burbuja teñida (cursores rojo y azul del selector de capitanes).
+void pc_settings_p2d_cursor_tinted(int cx, int cy, int size, float angle, Colour tint);
+/// Placa con la forma del degradado del juego, de un color cualquiera (muestras
+/// de color del selector de capitanes). Va en la cola del atlas, sobre las placas.
+void pc_settings_p2d_tinted_plate(int x, int y, int w, int h, Colour top, Colour bottom);
 // Icono del botón del mando del juego. false si no hay.
 bool pc_settings_p2d_button(int x, int y, int size, char button);
 // Zona horizontal en la que el texto se encoge para caber (como hace la placa 0).

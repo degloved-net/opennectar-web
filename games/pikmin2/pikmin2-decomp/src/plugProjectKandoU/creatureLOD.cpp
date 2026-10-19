@@ -1,4 +1,5 @@
 #include "Game/AILOD.h"
+#include "Game/pcCoop.h"
 #include "Game/Creature.h"
 #include "Game/GameSystem.h"
 #include "Sys/Sphere.h"
@@ -84,7 +85,7 @@ void Creature::updateLOD(Game::AILODParm& parm)
 		}
 	}
 
-	if (!(gameSystem->isMultiplayerMode() && (2 <= viewportCount))) {
+	if (!(PC_TWO_CAPTAIN_PLAY() && (2 <= viewportCount))) {
 		mLod.mSoundVPID = 0;
 	} else {
 		Viewport* vp0 = gfx->getViewport(PLAYER1_VIEWPORT);

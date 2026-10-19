@@ -1,9 +1,21 @@
+// El online está apagado en todo el proyecto (pc_online_switch.h): sin
+// botones de co-op/VS online aunque el launcher se compile con ellos.
+#include "../netplay/pc_online_switch.h"
+#if !PC_ONLINE_ENABLED
+#undef PIKMIN_LAUNCHER_NETPLAY
+#endif
+
 #include "gamecube_image.h"
 #include "asset_finalize.h"
 #include "prepared_image.h"
 #include "installer_ui.h"
 #include "launcher_gui.h"
 #include "launcher_platform.h"
+#include "release_update.h"
+#include "texture_pack_download.h"
+#if PIKMIN_LAUNCHER_NETPLAY
+#include "launcher_coop.h"
+#endif
 
 #include <cerrno>
 #include <chrono>
@@ -17,6 +29,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -33,9 +46,11 @@ namespace platform = pikmin::launcher::platform;
 #ifdef _WIN32
 constexpr const char* kGameExecutable     = "nectar.exe";
 constexpr const char* kLauncherExecutable = "nectar-launcher.exe";
+constexpr const char* kMapEditorExecutable = "nectar-mapmaker.exe";
 #else
 constexpr const char* kGameExecutable     = "nectar";
 constexpr const char* kLauncherExecutable = "nectar-launcher";
+constexpr const char* kMapEditorExecutable = "nectar-mapmaker";
 #endif
 
 
@@ -265,6 +280,21 @@ fs::path gameSource(const fs::path& sourceDirectory, const std::string& build,
         return sourceDirectory / (std::string(kGameExecutable) + suffix);
     }
     return {};
+}
+
+// The game binary to run from `directory`. A package folder carries both
+// builds (nectar and nectar-pal) beside the launcher: with European data the
+// PAL one has to run, or the American build looks for blo_eng.arc and closes
+// (issue #72). An installation made by the launcher already copied the right
+// build under the plain name, so that one is used when there is no variant.
+fs::path gameBinaryFor(const fs::path& directory)
+{
+    const std::string build = installedGameBuild(directory);
+    if (build != defaultBuildStem()) {
+        const fs::path variant = directory / gameFileName(build, "");
+        if (fs::is_regular_file(variant)) return variant;
+    }
+    return directory / kGameExecutable;
 }
 
 std::string missingGameBuildMessage(const std::string& build, const std::string& suffix)
@@ -537,8 +567,12 @@ bool runWhilePainting(pikmin::launcher::HubWindow& hub, const std::string& phase
     return ok;
 }
 
+bool installPackage(const fs::path& package, const fs::path& install, std::string& failure);
+bool packageMissing(const fs::path& install);
+void rememberInstallDirectory(const fs::path& directory);
+
 UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& sourceDirectory, bool fromInsideInstall,
-                        fs::path& playDirectory)
+                        fs::path& playDirectory, bool silentIfCurrent = false)
 {
     using pikmin::launcher::ReleaseInfo;
     const auto answer = [](int choice) {
@@ -560,11 +594,13 @@ UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& source
         }
         std::string failure;
         hub.updateProgress(101, "", "Installing the update");
-        if (!installExecutables(package, install, failure)) {
+        if (!installPackage(package, install, failure)) {
             const int choice = hub.ask("Update did not finish", failure, "Try again", "Cancel", true);
             retry = choice == 0;
             return answer(choice);
         }
+        pikmin::launcher::forgetCachedRelease();
+        rememberInstallDirectory(install);
         if (fromInsideInstall) {
             if (hub.ask("Open Nectar updated", "The new version is installed. The launcher restarts now to use it.",
                         "Restart") < 0) return UpdateOutcome::Quit;
@@ -586,6 +622,10 @@ UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& source
     if (fromInsideInstall) {
         ReleaseInfo release;
         std::string error;
+        const std::string current = pikmin::launcher::currentVersion();
+        // Actualizada por un launcher viejo (0.9.2 o antes): solo trajo Pikmin 1
+        // y el launcher. Se baja el release otra vez aunque sea esta versión.
+        const bool repair = packageMissing(sourceDirectory);
         bool newer = hub.newerRelease(release);
         if (!newer) {
             // La comprobación en segundo plano no encontró nada o no terminó:
@@ -593,15 +633,22 @@ UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& source
             const bool reached = runWhilePainting(hub, "Checking for updates", [&] {
                 return pikmin::launcher::fetchLatestRelease(release, error);
             });
-            newer = reached && pikmin::launcher::isNewerVersion(release.version, pikmin::launcher::currentVersion());
+            newer = reached && (pikmin::launcher::isNewerVersion(release.version, current)
+                                || (repair && !pikmin::launcher::isNewerVersion(current, release.version)));
         }
-        const std::string current = pikmin::launcher::currentVersion();
         if (newer) {
-            int choice = hub.ask("Update available",
-                                 "Open Nectar " + release.version + (release.title.empty() ? "" : " - " + release.title)
-                                     + "\nYou have " + current + ". The update downloads and installs by itself;"
-                                       " your saves, settings and packs stay as they are.",
-                                 "Update now", "Not now");
+            const bool sameVersion = !pikmin::launcher::isNewerVersion(release.version, current);
+            int choice = sameVersion
+                ? hub.ask("Finish the update",
+                          "Pikmin 2 and the map editor are not installed yet: the previous launcher only updated "
+                          "Pikmin 1.\nOpen Nectar " + release.version + " downloads again and installs the rest;"
+                          " your saves, settings and packs stay as they are.",
+                          "Finish now", "Not now")
+                : hub.ask("Update available",
+                          "Open Nectar " + release.version + (release.title.empty() ? "" : " - " + release.title)
+                              + "\nYou have " + current + ". The update downloads and installs by itself;"
+                                " your saves, settings and packs stay as they are.",
+                          "Update now", "Not now");
             if (choice != 0) return answer(choice);
             for (;;) {
                 fs::path package;
@@ -619,6 +666,8 @@ UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& source
                 if (choice < 0) return UpdateOutcome::Quit;
                 if (choice == 1) break; // a la vía manual
             }
+        } else if (silentIfCurrent) {
+            return UpdateOutcome::BackHome;
         } else {
             const int choice = error.empty()
                 ? hub.ask("Open Nectar is up to date", "You have the latest version (" + current + ").", "Close",
@@ -663,6 +712,384 @@ UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& source
     }
 }
 
+#ifdef _WIN32
+constexpr const char* kPikmin2Executable = "pikmin2_pc.exe";
+constexpr const char* kPikmin2UsaExecutable = "pikmin2_pc-usa.exe";
+#else
+constexpr const char* kPikmin2Executable = "pikmin2_pc";
+constexpr const char* kPikmin2UsaExecutable = "pikmin2_pc-usa";
+#endif
+// El paquete trae dos builds de Pikmin 2: Europa (GPVP01, pikmin2_pc) y USA
+// (GPVE01, pikmin2_pc-usa). Al instalar se copia la del disco como pikmin2_pc.
+constexpr const char* kPikmin2DiscId = "GPVP01";
+constexpr const char* kPikmin2UsaDiscId = "GPVE01";
+
+// Región de los datos instalados: primera línea de assets/.pikmin2-assets.
+std::string installedPikmin2DiscId(const fs::path& gameDirectory)
+{
+    std::ifstream in(gameDirectory / "assets" / ".pikmin2-assets");
+    std::string line;
+    if (!in || !std::getline(in, line)) return kPikmin2DiscId;
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    return line == kPikmin2UsaDiscId ? kPikmin2UsaDiscId : kPikmin2DiscId;
+}
+
+// Pikmin 2 vive en <instalación>/pikmin2: su ejecutable y su carpeta assets,
+// aparte de los de Pikmin 1, que ocupan la raíz.
+fs::path pikmin2GameDirectory(const fs::path& installDirectory) { return installDirectory / "pikmin2"; }
+
+// Pikmin 2 puede instalarse en cualquier carpeta: su ruta se guarda en un
+// fichero de usuario para que el launcher lo encuentre al abrirse desde otro
+// sitio y para que Pikmin 1 use su Louie (pc_pikmin2_dir_file, misma ruta).
+fs::path pikmin2DirFile()
+{
+#ifdef _WIN32
+    const char* base = std::getenv("LOCALAPPDATA");
+    if (!base || !*base) return {};
+    return fs::path(base) / "Open Nectar" / "pikmin2_dir";
+#else
+    fs::path base;
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) base = xdg;
+    else if (const char* home = std::getenv("HOME"); home && *home) base = fs::path(home) / ".config";
+    else return {};
+    return base / "open-nectar" / "pikmin2_dir";
+#endif
+}
+
+fs::path rememberedPikmin2Directory()
+{
+    std::ifstream in(pikmin2DirFile());
+    std::string line;
+    if (!in || !std::getline(in, line)) return {};
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+    return line.empty() ? fs::path() : fs::u8path(line);
+}
+
+// Guarda la carpeta y la exporta a los juegos que lance este proceso.
+void rememberPikmin2Directory(const fs::path& directory)
+{
+    std::error_code ec;
+    const fs::path absolute = fs::absolute(directory, ec);
+    const std::string text = (ec ? directory : absolute).u8string();
+#ifdef _WIN32
+    _putenv_s("NECTAR_PIKMIN2_DIR", text.c_str());
+#else
+    setenv("NECTAR_PIKMIN2_DIR", text.c_str(), 1);
+#endif
+    const fs::path file = pikmin2DirFile();
+    if (file.empty() || rememberedPikmin2Directory() == fs::u8path(text)) return;
+    fs::create_directories(file.parent_path(), ec);
+    std::ofstream out(file, std::ios::trunc);
+    if (out) out << text << '\n';
+}
+
+bool installPikmin2Assets(const fs::path& image, const fs::path& gameDirectory, std::string& failure,
+                          const std::function<void(std::uint32_t, const std::string&)>& progressCallback)
+{
+    DiscIdentity identity;
+    std::string error;
+    if (!pikmin::launcher::inspectGameCubeImage(image, identity, error)) {
+        failure = error;
+        return false;
+    }
+    if (identity.gameId != kPikmin2DiscId && identity.gameId != kPikmin2UsaDiscId) {
+        failure = identity.gameId.rfind("GPV", 0) == 0
+                    ? "Pikmin 2 needs the USA (GPVE01) or European (GPVP01) disc; this one is " + identity.gameId + "."
+                    : "This is not a Pikmin 2 disc (" + identity.gameId + "). Choose Pikmin 2 USA (GPVE01) or Europe (GPVP01).";
+        return false;
+    }
+
+    const fs::path finalAssets = gameDirectory / "assets";
+    const fs::path partialAssets = gameDirectory / ("assets.partial." + std::to_string(platform::currentProcessId()));
+    std::error_code ec;
+    fs::create_directories(gameDirectory, ec);
+    if (ec) {
+        failure = "Could not create the install folder: " + ec.message();
+        return false;
+    }
+    if (fs::exists(finalAssets)) {
+        failure = "An assets folder already exists at " + finalAssets.string()
+                + ". It will not be overwritten automatically.";
+        return false;
+    }
+    if (fs::exists(partialAssets)) {
+        failure = "A temporary extraction already exists at " + partialAssets.string()
+                + ". Remove it by hand if nothing is using it.";
+        return false;
+    }
+
+    std::uint32_t lastPercent = 101;
+    const bool extracted = pikmin::launcher::extractGameCubeImage(
+        image, partialAssets, error,
+        [&](std::uint32_t current, std::uint32_t total, const std::string& path) {
+            const std::uint32_t percent = total ? current * 100 / total : 100;
+            if (percent != lastPercent) {
+                if (progressCallback) progressCallback(percent, path);
+                lastPercent = percent;
+            }
+        });
+    if (!extracted) {
+        fs::remove_all(partialAssets, ec);
+        failure = "Extraction failed: " + error;
+        return false;
+    }
+    if (!fs::is_directory(partialAssets / "user")) {
+        fs::remove_all(partialAssets, ec);
+        failure = "The image does not contain the expected Pikmin 2 files.";
+        return false;
+    }
+    {
+        std::ofstream marker(partialAssets / ".pikmin2-assets", std::ios::trunc);
+        marker << identity.gameId << "\nextracted_from=" << image.filename().string() << '\n';
+    }
+    if (progressCallback) progressCallback(100, "Finishing installation...");
+    ec = pikmin::launcher::finalizeAssets(partialAssets, finalAssets);
+    if (ec) {
+        failure = "Could not finish the installation: " + ec.message()
+                + ". Close programs using the install folder. The extracted files remain at "
+                + partialAssets.string() + ".";
+        return false;
+    }
+    return true;
+}
+
+// Copia pikmin2_pc a <instalación>/pikmin2 y el launcher a <instalación>, para
+// que abriendo el launcher de esa carpeta aparezca el juego.
+bool installPikmin2Executables(const fs::path& sourceDirectory, const fs::path& installDirectory,
+                               std::string& failure)
+{
+    const fs::path gameDirectory = pikmin2GameDirectory(installDirectory);
+    const bool usa = installedPikmin2DiscId(gameDirectory) == kPikmin2UsaDiscId;
+    const char* sourceName = usa ? kPikmin2UsaExecutable : kPikmin2Executable;
+    fs::path game = sourceDirectory / sourceName;
+    if (!fs::is_regular_file(game)) game = pikmin2GameDirectory(sourceDirectory) / sourceName;
+    if (!fs::is_regular_file(game)) {
+        failure = "The package is incomplete: missing " + std::string(sourceName) + ".";
+        return false;
+    }
+    const std::pair<fs::path, fs::path> copies[] = {
+        { game, gameDirectory / kPikmin2Executable },
+        { sourceDirectory / kLauncherExecutable, installDirectory / kLauncherExecutable },
+    };
+    for (const auto& [source, destination] : copies) {
+        if (!fs::is_regular_file(source) || sameFile(source, destination)) continue;
+        std::error_code ec;
+        fs::create_directories(destination.parent_path(), ec);
+        // Un ejecutable abierto no se puede sobrescribir en Windows, pero sí
+        // renombrar: se aparta como .old.
+        if (fs::exists(destination, ec)) {
+            fs::path aside = destination;
+            aside += ".old";
+            fs::remove(aside, ec);
+            fs::rename(destination, aside, ec);
+        }
+        fs::copy_file(source, destination, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            failure = "Could not install " + destination.filename().string() + ": " + ec.message();
+            return false;
+        }
+        fs::permissions(destination, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                        fs::perm_options::add, ec);
+    }
+    return true;
+}
+
+// Copia un ejecutable apartando el que había como .old (en Windows no se
+// puede sobrescribir uno abierto).
+bool replaceExecutable(const fs::path& source, const fs::path& destination, std::string& failure)
+{
+    if (sameFile(source, destination)) return true;
+    std::error_code ec;
+    fs::create_directories(destination.parent_path(), ec);
+    if (fs::exists(destination, ec)) {
+        fs::path aside = destination;
+        aside += ".old";
+        fs::remove(aside, ec);
+        fs::rename(destination, aside, ec);
+    }
+    fs::copy_file(source, destination, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        failure = "Could not install " + destination.filename().string() + ": " + ec.message();
+        return false;
+    }
+    fs::permissions(destination, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                    fs::perm_options::add, ec);
+    return true;
+}
+
+// Lo que el paquete trae además de Pikmin 1 y el launcher: Pikmin 2 (las dos
+// regiones, en <instalación>/pikmin2, para instalarlo luego con cualquier
+// disco) y el editor de mapas. Se instala esté o no instalado cada juego, así
+// una sola actualización deja los dos al día. Lo que el paquete no trae se
+// salta: un paquete antiguo no tiene Pikmin 2.
+bool installSharedParts(const fs::path& package, const fs::path& install, std::string& failure)
+{
+    const auto fromPackage = [&package](const char* name) {
+        const fs::path beside = package / name;
+        return fs::is_regular_file(beside) ? beside : pikmin2GameDirectory(package) / name;
+    };
+    const fs::path europe = fromPackage(kPikmin2Executable), usa = fromPackage(kPikmin2UsaExecutable);
+    // Carpetas de Pikmin 2 a poner al día: la de esta instalación y, si se
+    // instaló en otro sitio, la recordada.
+    std::vector<fs::path> gameDirectories { pikmin2GameDirectory(install) };
+    const fs::path remembered = rememberedPikmin2Directory();
+    std::error_code ec;
+    if (!remembered.empty() && fs::is_regular_file(remembered / "assets/.pikmin2-assets", ec)
+        && !fs::equivalent(remembered, gameDirectories[0], ec)) {
+        gameDirectories.push_back(remembered);
+    }
+    for (const fs::path& gameDirectory : gameDirectories) {
+        const bool usaDisc = installedPikmin2DiscId(gameDirectory) == kPikmin2UsaDiscId;
+        const fs::path& game = usaDisc ? usa : europe; // la otra región no arrancaría con estos datos
+        if (fs::is_regular_file(game) && !replaceExecutable(game, gameDirectory / kPikmin2Executable, failure)) return false;
+        if (fs::is_regular_file(usa) && !replaceExecutable(usa, gameDirectory / kPikmin2UsaExecutable, failure)) return false;
+    }
+    // La build europea de Pikmin 1 también se queda en la instalación: si se
+    // instaló antes Pikmin 2, Pikmin 1 se instala luego desde el launcher de
+    // la instalación, y sin ella un disco PAL no se podía instalar (issue #126).
+    const fs::path palBuild = package / gameFileName("nectar-pal", "");
+    if (fs::is_regular_file(palBuild) && !replaceExecutable(palBuild, install / palBuild.filename(), failure)) return false;
+    const fs::path mapEditor = package / kMapEditorExecutable;
+    if (fs::is_regular_file(mapEditor) && !replaceExecutable(mapEditor, install / kMapEditorExecutable, failure)) return false;
+    const fs::path icon = package / "open_nectar.png";
+    if (fs::is_regular_file(icon) && !sameFile(icon, install / icon.filename())) {
+        fs::copy_file(icon, install / icon.filename(), fs::copy_options::overwrite_existing, ec);
+    }
+    return true;
+}
+
+// Instalación a medias: le falta el editor de mapas o Pikmin 2, porque la
+// actualizó un launcher que solo copiaba Pikmin 1 y el launcher.
+bool packageMissing(const fs::path& install)
+{
+    std::error_code ec;
+    const fs::path pikmin2 = pikmin2GameDirectory(install);
+    return !fs::is_regular_file(install / kMapEditorExecutable, ec)
+        || (!fs::is_regular_file(pikmin2 / kPikmin2Executable, ec)
+            && !fs::is_regular_file(pikmin2 / kPikmin2UsaExecutable, ec));
+}
+
+// Todo el paquete en la instalación: Pikmin 1, launcher, Pikmin 2 y editor.
+bool installPackage(const fs::path& package, const fs::path& install, std::string& failure)
+{
+    return installExecutables(package, install, failure) && installSharedParts(package, install, failure);
+}
+
+// true si los dos ficheros tienen los mismos bytes.
+bool sameContents(const fs::path& lhs, const fs::path& rhs)
+{
+    std::error_code ec;
+    if (fs::file_size(lhs, ec) != fs::file_size(rhs, ec) || ec) return false;
+    std::ifstream a(lhs, std::ios::binary), b(rhs, std::ios::binary);
+    return a && b
+        && std::equal(std::istreambuf_iterator<char>(a), std::istreambuf_iterator<char>(),
+                      std::istreambuf_iterator<char>(b));
+}
+
+// La carpeta de instalación se recuerda (junto a pikmin2_dir) para que el
+// launcher descargado de GitHub, si se vuelve a abrir, mande al instalado en
+// vez de instalar otra vez.
+fs::path installDirFile()
+{
+    const fs::path pikmin2File = pikmin2DirFile();
+    return pikmin2File.empty() ? fs::path() : pikmin2File.parent_path() / "install_dir";
+}
+
+fs::path rememberedInstallDirectory()
+{
+    std::ifstream in(installDirFile());
+    std::string line;
+    if (!in || !std::getline(in, line)) return {};
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+    return line.empty() ? fs::path() : fs::u8path(line);
+}
+
+// Guarda la carpeta y, si es nueva, pone en el escritorio el acceso directo a
+// su launcher. Solo la primera vez: si el usuario lo borra, no vuelve.
+void rememberInstallDirectory(const fs::path& directory)
+{
+    std::error_code ec;
+    const fs::path absolute = fs::absolute(directory, ec);
+    const fs::path install = ec ? directory : absolute;
+    const fs::path file = installDirFile();
+    if (file.empty()) return;
+    const fs::path previous = rememberedInstallDirectory();
+    if (!previous.empty() && fs::equivalent(previous, install, ec)) return;
+    fs::create_directories(file.parent_path(), ec);
+    std::ofstream out(file, std::ios::trunc);
+    if (!(out << install.u8string() << '\n')) return;
+    out.close();
+    platform::createDesktopShortcut(install / kLauncherExecutable);
+}
+
+// Instalación de Pikmin 2 desde la pantalla principal: pide disco y carpeta,
+// extrae y vuelve. `gameDirectory` queda con la carpeta del juego si se elige
+// jugar.
+UpdateOutcome runPikmin2Install(pikmin::launcher::HubWindow& hub, const fs::path& sourceDirectory,
+                                const fs::path& suggestedDirectory, fs::path& converter, fs::path& gameDirectory)
+{
+    hub.setInstallGame(pikmin::launcher::HubGame::Pikmin2, suggestedDirectory.string());
+    const auto retry = [&hub](const std::string& error) {
+        return hub.ask("Installation did not finish", error, "Back to setup", "Close", true) == 0;
+    };
+    for (;;) {
+        std::string rom, directory;
+        if (!hub.choosePaths([] { return askForImage().string(); },
+                             [] { return askForInstallDirectory().string(); }, rom, directory)) {
+            return UpdateOutcome::BackHome;
+        }
+        fs::path image = rom;
+        pikmin::launcher::PreparedImage prepared;
+        if (pikmin::launcher::isCompressedImage(image)) {
+            if (converter.empty()) converter = platform::findConverter();
+            if (converter.empty()) converter = platform::askForConverter();
+            if (converter.empty()) {
+                if (retry("Compressed images need dolphin-tool from a Dolphin installation. "
+                          "Choose it when prompted, or select an ISO/GCM.")) continue;
+                return UpdateOutcome::BackHome;
+            }
+            const auto pump = [&hub] { hub.updateProgress(101, "Preparing a temporary ISO", "Converting disc"); };
+            pump();
+            std::string error;
+            if (!prepared.prepare(fs::absolute(image), [&](const fs::path& source, const fs::path& output, std::string& f) {
+                    return platform::convertImage(converter, source, output, pump, f);
+                }, error)) {
+                converter.clear();
+                if (retry(error)) continue;
+                return UpdateOutcome::BackHome;
+            }
+            image = prepared.image;
+        }
+        const std::string ext = lowerExtension(image);
+        if (ext != ".iso" && ext != ".gcm") {
+            if (retry("Choose an ISO/GCM, or an RVZ/WIA/GCZ with dolphin-tool available.")) continue;
+            return UpdateOutcome::BackHome;
+        }
+
+        const fs::path installDirectory = directory;
+        gameDirectory = pikmin2GameDirectory(installDirectory);
+        std::string failure;
+        const auto progress = [&hub](std::uint32_t percent, const std::string& path) {
+            hub.updateProgress(percent, path, path == "Finishing installation..." ? "Finishing" : "Extracting");
+        };
+        if (!installPikmin2Assets(image, gameDirectory, failure, progress)
+            || !installPikmin2Executables(sourceDirectory, installDirectory, failure)
+            || !installPackage(sourceDirectory, installDirectory, failure)) {
+            if (retry(failure)) continue;
+            return UpdateOutcome::BackHome;
+        }
+        hub.markInstalled(pikmin::launcher::HubGame::Pikmin2, gameDirectory.string(),
+                          (gameDirectory / kPikmin2Executable).string(), "GPVE01");
+        rememberPikmin2Directory(gameDirectory);
+        rememberInstallDirectory(installDirectory);
+        const std::string text = "Pikmin 2 is installed in:\n" + gameDirectory.string()
+                               + "\n\nOpen " + std::string(kLauncherExecutable) + " from\n" + installDirectory.string()
+                               + "\nto play again.";
+        return hub.ask("Installation complete", text, "Play now", "Back") == 0 ? UpdateOutcome::Play
+                                                                              : UpdateOutcome::BackHome;
+    }
+}
+
 void usage(const char* argv0)
 {
     std::cout << "Usage: " << argv0 << " [--rom FILE.iso] [--install-dir DIR] [--extract-only]\n"
@@ -674,10 +1101,94 @@ void usage(const char* argv0)
               << "In game, F1 opens graphics, controls and gameplay settings.\n";
 }
 
+#if PIKMIN_LAUNCHER_NETPLAY
+// Scripted Host Co-op / Join Co-op without the window, for tests: the same
+// CoopFlow and game start as the panel, with the paste replaced by files.
+//   --coop-smoke host --exchange DIR --answer-file FILE --game EXE --data-root DIR [--coop-arg A]...
+//   --coop-smoke join --exchange DIR --offer-file FILE  --game EXE --data-root DIR [--coop-arg A]...
+// --vs runs Host VS / Join VS instead.
+// Prints each stage; returns the game's exit code.
+int coopSmoke(int argc, char** argv)
+{
+    std::string role, exchange, answerFile, offerFile, game, dataRoot;
+    std::vector<std::string> extra;
+    bool vs = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::string arg = argv[i];
+        const bool more = i + 1 < argc;
+        if (arg == "host" || arg == "join") role = arg;
+        else if (arg == "--vs") vs = true;
+        else if (arg == "--exchange" && more) exchange = argv[++i];
+        else if (arg == "--answer-file" && more) answerFile = argv[++i];
+        else if (arg == "--offer-file" && more) offerFile = argv[++i];
+        else if (arg == "--game" && more) game = argv[++i];
+        else if (arg == "--data-root" && more) dataRoot = argv[++i];
+        else if (arg == "--coop-arg" && more) extra.push_back(argv[++i]);
+        else {
+            std::cerr << "coop-smoke: unknown argument " << arg << '\n';
+            return 2;
+        }
+    }
+    if (role.empty() || exchange.empty() || game.empty() || dataRoot.empty()) {
+        std::cerr << "coop-smoke: needs host|join, --exchange, --game and --data-root\n";
+        return 2;
+    }
+    platform::GameProcess process;
+    pikmin::launcher::CoopFlow flow(
+        [&](const std::vector<std::string>& args, std::string& error) {
+            std::cout << "coop-smoke: starting " << game;
+            for (const std::string& a : args) std::cout << ' ' << a;
+            std::cout << std::endl;
+            return platform::spawnGame(dataRoot, game, args, process, error);
+        },
+        [&](int& code) { return platform::gameRunning(process, code); });
+    const auto readText = [](const std::string& path, std::string& out) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return false;
+        out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        return !pikmin::launcher::CoopFlow::clean(out).empty();
+    };
+    std::string error;
+    if (role == "host") {
+        if (!flow.startHost(exchange, error, extra, vs)) {
+            std::cerr << "coop-smoke: " << error << '\n';
+            return 1;
+        }
+    } else {
+        flow.startJoin(exchange, extra, vs);
+    }
+    auto last = pikmin::launcher::CoopFlow::Stage::Idle;
+    for (;;) {
+        flow.poll();
+        std::string text;
+        if (flow.stage() == pikmin::launcher::CoopFlow::Stage::PasteOffer && readText(offerFile, text)
+            && !flow.submitOffer(text, error)) {
+            std::cerr << "coop-smoke: offer refused: " << error << '\n';
+            return 1;
+        }
+        if (flow.stage() == pikmin::launcher::CoopFlow::Stage::ShowOffer && readText(answerFile, text)
+            && !flow.submitAnswer(text, error)) {
+            std::cerr << "coop-smoke: answer refused: " << error << '\n';
+            return 1;
+        }
+        if (flow.stage() != last) {
+            last = flow.stage();
+            std::cout << "coop-smoke: " << role << ": " << flow.status() << std::endl;
+        }
+        if (last == pikmin::launcher::CoopFlow::Stage::Exited) return flow.exitCode();
+        if (last == pikmin::launcher::CoopFlow::Stage::Failed) return 1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv)
 {
+#if PIKMIN_LAUNCHER_NETPLAY
+    if (argc >= 2 && std::strcmp(argv[1], "--coop-smoke") == 0) return coopSmoke(argc, argv);
+#endif
     fs::path image;
     fs::path dataRoot;
     bool extractOnly = false;
@@ -701,24 +1212,48 @@ int main(int argc, char** argv)
     }
 
     const fs::path sourceDirectory = executableDirectory();
+    // Instalación (de Pikmin 1, de Pikmin 2 o de los dos) junto a este launcher.
+    const bool isInstallFolder = assetsReady(sourceDirectory)
+                              || fs::is_regular_file(pikmin2GameDirectory(sourceDirectory) / "assets/.pikmin2-assets");
+    if (isInstallFolder) {
+        // Un launcher 0.9.2 o anterior, al actualizarse, solo copia Pikmin 1 y
+        // el launcher y abre este: Pikmin 2 y el editor de mapas siguen en el
+        // paquete descargado. Se instalan ahora, si ese paquete es el de este
+        // launcher.
+        fs::path cached;
+        std::string ignored;
+        if (pikmin::launcher::cachedRelease(kLauncherExecutable, cached)
+            && sameContents(cached / kLauncherExecutable, platform::executablePath())
+            && installSharedParts(cached, sourceDirectory, ignored)) {
+            pikmin::launcher::forgetCachedRelease();
+        }
+        rememberInstallDirectory(sourceDirectory);
+    }
     // Fusion mantiene cada juego en su propio directorio de trabajo. Las
     // variables también hacen que el launcher siga siendo reubicable y que los
     // paquetes normales, que no las definen, conserven el comportamiento previo.
     const fs::path pikmin1Directory = environmentPath("NECTAR_PIKMIN1_DIR", sourceDirectory);
     const fs::path pikmin1Executable = environmentPath(
-        "NECTAR_PIKMIN1_EXECUTABLE", pikmin1Directory / kGameExecutable);
-#ifdef _WIN32
-    const fs::path defaultPikmin2Executable = sourceDirectory / "pikmin2_pc.exe";
-#else
-    const fs::path defaultPikmin2Executable = sourceDirectory / "pikmin2_pc";
-#endif
-    const fs::path pikmin2Directory = environmentPath("NECTAR_PIKMIN2_DIR", sourceDirectory);
-    const fs::path pikmin2Executable = environmentPath(
-        "NECTAR_PIKMIN2_EXECUTABLE", defaultPikmin2Executable);
+        "NECTAR_PIKMIN1_EXECUTABLE", gameBinaryFor(pikmin1Directory));
+    // Pikmin 2 instalado por el launcher está en pikmin2/; el de una build de
+    // desarrollo, junto al launcher.
+    // Si no está ni junto al launcher ni en pikmin2/, la carpeta recordada
+    // de una instalación en otro sitio.
+    fs::path pikmin2Default = fs::is_regular_file(sourceDirectory / "assets/.pikmin2-assets")
+        ? sourceDirectory : pikmin2GameDirectory(sourceDirectory);
+    if (!fs::is_regular_file(pikmin2Default / "assets/.pikmin2-assets")) {
+        const fs::path remembered = rememberedPikmin2Directory();
+        if (!remembered.empty() && fs::is_regular_file(remembered / "assets/.pikmin2-assets")) pikmin2Default = remembered;
+    }
+    const fs::path pikmin2Directory = environmentPath("NECTAR_PIKMIN2_DIR", pikmin2Default);
+    const fs::path pikmin2Executable = environmentPath("NECTAR_PIKMIN2_EXECUTABLE",
+        fs::is_regular_file(pikmin2Directory / kPikmin2Executable) ? pikmin2Directory / kPikmin2Executable
+                                                                    : sourceDirectory / kPikmin2Executable);
     const bool pikmin1Available = assetsReady(pikmin1Directory)
                                && fs::is_regular_file(pikmin1Executable);
     const bool pikmin2Available = fs::is_regular_file(pikmin2Executable)
                                && fs::is_regular_file(pikmin2Directory / "assets/.pikmin2-assets");
+    if (fs::is_regular_file(pikmin2Directory / "assets/.pikmin2-assets")) rememberPikmin2Directory(pikmin2Directory);
     const bool hasStandaloneFiles
         = fs::is_regular_file(sourceDirectory / (std::string(kGameExecutable) + ".real"))
        && fs::is_regular_file(sourceDirectory / (std::string(kLauncherExecutable) + ".real"))
@@ -741,6 +1276,25 @@ int main(int argc, char** argv)
         }
     }
     const bool openWindow = argc == 1 || (argc == 3 && !movedFrom.empty());
+    // El launcher descargado de GitHub, abierto otra vez tras instalar: se
+    // abre el de la instalación, que es el que juega y actualiza. Antes se
+    // copia a la instalación lo que trae este paquete: si es una versión
+    // nueva, la instalación queda al día (partidas y ajustes no se tocan).
+    if (argc == 1 && !isInstallFolder) {
+        const fs::path installed = rememberedInstallDirectory();
+        std::error_code ec;
+        if (!installed.empty() && !fs::equivalent(installed, sourceDirectory, ec)
+            && fs::is_regular_file(installed / kLauncherExecutable, ec)
+            && (assetsReady(installed)
+                || fs::is_regular_file(pikmin2GameDirectory(installed) / "assets/.pikmin2-assets", ec))) {
+            std::string failure;
+            if (fs::is_regular_file(sourceDirectory / kGameExecutable, ec)
+                && !installPackage(sourceDirectory, installed, failure)) {
+                std::cerr << "Could not update " << installed << ": " << failure << '\n';
+            }
+            platform::relaunch(installed / kLauncherExecutable, {});
+        }
+    }
 #ifdef _WIN32
     for (const char* name : { kGameExecutable, kLauncherExecutable }) {
         std::error_code ignored;
@@ -753,12 +1307,15 @@ int main(int argc, char** argv)
     // instalador (modales con la misma estética); hub apunta a ella.
     std::unique_ptr<pikmin::launcher::InstallerUi> installerWindow;
     pikmin::launcher::HubWindow* hub = nullptr;
+    pikmin::launcher::HubState hubState; // fuera del if: el bucle de inicio lo sigue usando
     if (openWindow) {
-        pikmin::launcher::HubState hubState;
         hubState.launcherName = kLauncherExecutable;
         hubState.games[0].installed = pikmin1Available;
         hubState.games[1].installed = pikmin2Available;
         hubState.installerOnly = !pikmin1Available && !pikmin2Available;
+#if PIKMIN_LAUNCHER_NETPLAY
+        hubState.netplay = pikmin1Available;
+#endif
         if (pikmin1Available) {
             hubState.games[0].directory = pikmin1Directory.string();
             hubState.games[0].executable = pikmin1Executable.string();
@@ -776,32 +1333,92 @@ int main(int argc, char** argv)
             hubState.gameDataDirectory = (artRoot / "assets/dataDir").string();
             hubState.games[0].discId = installedGameBuild(artRoot) == "nectar-pal" ? "GPIP01" : "GPIE01";
         }
+        // Editor de mapas VS: en la instalación de Pikmin 1 o junto al launcher.
+        if (pikmin1Available) {
+            for (const fs::path& dir : { pikmin1Directory, platform::executablePath().parent_path() }) {
+                if (!dir.empty() && fs::is_regular_file(dir / kMapEditorExecutable)) {
+                    hubState.mapEditor = (dir / kMapEditorExecutable).string();
+                    break;
+                }
+            }
+        }
         auto window = std::make_unique<pikmin::launcher::HubWindow>();
         std::string hubError;
         if (window->open(hubState, hubError)) {
-            pikmin::launcher::HubResult choice;
-            for (;;) {
-                choice = window->runHome();
-                if (choice.action == pikmin::launcher::HubAction::Quit) return 0;
-                if (choice.action == pikmin::launcher::HubAction::Play) {
-                    const auto& game = hubState.games[int(choice.game)];
-                    if (game.installed && !game.executable.empty()) {
-                        window.reset();
-                        launchGame(game.directory, game.executable);
-                    }
-                    continue;
-                }
-                if (choice.action != pikmin::launcher::HubAction::Update) break;
-                fs::path playDirectory;
-                const UpdateOutcome outcome = runUpdate(*window, sourceDirectory, installedBesideLauncher, playDirectory);
-                if (outcome == UpdateOutcome::Quit) return 0;
-                if (outcome == UpdateOutcome::Play) {
+            pikmin::launcher::HubWindow* home = window.get();
+            // Pantalla principal hasta que se pide instalar Pikmin 1 (o salir):
+            // jugar, actualizar e instalar Pikmin 2 se resuelven aquí. También
+            // la usa el modal de rutas de Pikmin 1 al cancelar.
+            const auto homeLoop = [&, home]() -> pikmin::launcher::HubResult {
+                const auto play = [&](const fs::path& directory, const fs::path& executable) {
                     window.reset(); // cerrar la ventana antes de dar paso al juego
-                    launchGame(playDirectory, playDirectory / kGameExecutable);
+                    installerWindow.reset();
+                    launchGame(directory, executable);
+                };
+                // Recién actualizada por un launcher viejo: se ofrece completar
+                // la instalación nada más abrir, una vez por sesión.
+                static bool repairOffered = false;
+                if (isInstallFolder && !repairOffered && packageMissing(sourceDirectory)) {
+                    repairOffered = true;
+                    fs::path playDirectory;
+                    if (runUpdate(*home, sourceDirectory, true, playDirectory, true) == UpdateOutcome::Quit)
+                        return pikmin::launcher::HubResult();
                 }
-            }
+                for (;;) {
+                    const pikmin::launcher::HubResult choice = home->runHome();
+                    if (choice.action == pikmin::launcher::HubAction::Quit) return choice;
+                    if (choice.action == pikmin::launcher::HubAction::MapEditor) {
+                        // Se abre en la carpeta del juego: de ahí saca assets/ y el ejecutable.
+                        if (!hubState.mapEditor.empty()) play(hubState.games[0].directory, hubState.mapEditor);
+                        continue;
+                    }
+                    if (choice.action == pikmin::launcher::HubAction::TexturePack) {
+                        // El propio juego extrae el zip (--texpack-install) en su carpeta.
+                        const pikmin::launcher::GameInstall game = hubState.games[int(choice.game)];
+                        if (!game.installed || game.executable.empty()) continue;
+                        pikmin::launcher::runTexturePackDownload(*home, int(choice.game), game.directory,
+                            [&game](const fs::path& zip, std::string& error) {
+                                std::string output;
+                                return platform::runAndCapture(game.executable, { "--texpack-install", zip.string() },
+                                                               game.directory, output, error);
+                            });
+                        continue;
+                    }
+                    if (choice.action == pikmin::launcher::HubAction::Play) {
+                        pikmin::launcher::GameInstall game = hubState.games[int(choice.game)];
+                        if (choice.game == pikmin::launcher::HubGame::Pikmin2 && !game.installed) continue;
+                        if (game.installed && !game.executable.empty()) play(game.directory, game.executable);
+                        continue;
+                    }
+                    if (choice.action == pikmin::launcher::HubAction::Install
+                        && choice.game == pikmin::launcher::HubGame::Pikmin2) {
+                        fs::path gameDirectory;
+                        const UpdateOutcome outcome = runPikmin2Install(
+                            *home, sourceDirectory, installedBesideLauncher ? sourceDirectory : fs::path(),
+                            converter, gameDirectory);
+                        if (outcome != UpdateOutcome::BackHome) {
+                            hubState.games[1].installed = true;
+                            hubState.games[1].directory = gameDirectory.string();
+                            hubState.games[1].executable = (gameDirectory / kPikmin2Executable).string();
+                        }
+                        if (outcome == UpdateOutcome::Play) play(gameDirectory, gameDirectory / kPikmin2Executable);
+                        continue;
+                    }
+                    if (choice.action == pikmin::launcher::HubAction::Install) {
+                        home->setInstallGame(pikmin::launcher::HubGame::Pikmin1);
+                        return choice;
+                    }
+                    fs::path playDirectory;
+                    const UpdateOutcome outcome = runUpdate(*home, sourceDirectory, isInstallFolder, playDirectory);
+                    if (outcome == UpdateOutcome::Quit) return pikmin::launcher::HubResult();
+                    if (outcome == UpdateOutcome::Play) play(playDirectory, gameBinaryFor(playDirectory));
+                }
+            };
+            const pikmin::launcher::HubResult choice = homeLoop();
+            if (choice.action == pikmin::launcher::HubAction::Quit) return 0;
+            home->setHomeLoop(homeLoop);
             forceInstall = choice.action == pikmin::launcher::HubAction::Install;
-            hub = window.get();
+            hub = home;
             installerWindow = std::move(window);
         } else {
             std::cerr << "Could not open the launcher window (" << hubError << "); using the installer.\n";
@@ -837,7 +1454,7 @@ int main(int argc, char** argv)
                     // Canceló y pulsó la portada de un juego ya instalado.
                     if (hub && hub->playRequested() && installedBesideLauncher) {
                         installerWindow.reset();
-                        launchGame(sourceDirectory, sourceDirectory / kGameExecutable);
+                        launchGame(sourceDirectory, gameBinaryFor(sourceDirectory));
                     }
                     return 0;
                 }
@@ -939,10 +1556,11 @@ int main(int argc, char** argv)
 
         std::string failure;
         if (installerWindow) installerWindow->updateProgress(100, "Installing the launcher and game", "Finishing");
-        if (!installExecutables(sourceDirectory, dataRoot, failure)) {
+        if (!installPackage(sourceDirectory, dataRoot, failure)) {
             if (reportError(failure)) continue;
             return 1;
         }
+        rememberInstallDirectory(dataRoot);
         if (installedAssetsNow) {
             if (installerWindow) installerWindow->showComplete(dataRoot.string(), !extractOnly);
             else std::cout << "Installed in: " << dataRoot << '\n'
@@ -950,7 +1568,7 @@ int main(int argc, char** argv)
         }
         if (extractOnly) return 0;
 
-        const fs::path gameBinary = dataRoot / kGameExecutable;
+        const fs::path gameBinary = gameBinaryFor(dataRoot);
         if (!fs::is_regular_file(gameBinary)) {
             std::cerr << "The game executable is not next to the launcher: " << gameBinary << '\n';
             return 1;

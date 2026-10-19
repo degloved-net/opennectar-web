@@ -73,7 +73,18 @@ static void unmap_pages(void* p, size_t bytes) { munmap(p, bytes); }
 #endif
 static constexpr size_t BOOT_BUCKET_COUNT = 4096;
 
-static std::mutex sAllocMutex;
+// Constructed on first use and never destroyed. A static std::mutex is torn
+// down at exit, but static destructors in other translation units still free
+// through piki_pc_free after that (the DVD map in dvd_stubs.cpp) and lock it.
+// The first allocation can come from another file's static initialiser, so a
+// namespace-scope object is not safe either.
+static std::mutex& allocMutex()
+{
+	alignas(std::mutex) static unsigned char storage[sizeof(std::mutex)];
+	static std::mutex& mutex = *new (storage) std::mutex;
+	return mutex;
+}
+
 static BootBlockHeader* sBootBuckets[BOOT_BUCKET_COUNT] = {};
 static size_t sLiveAllocations = 0;
 static size_t sLiveBytes = 0;
@@ -113,7 +124,7 @@ static size_t allocationBucket(const void* ptr)
 
 void piki_pc_dump_alloc_stats(void)
 {
-	std::lock_guard<std::mutex> lock(sAllocMutex);
+	std::lock_guard<std::mutex> lock(allocMutex());
 	static const char* kClassNames[SIZE_CLASS_COUNT] = {
 		"<1K", "1K-16K", "16K-64K", "64K-256K", "256K-1M", "1M-8M", "8M-64M", ">64M"
 	};
@@ -175,7 +186,7 @@ void* piki_pc_alloc(size_t size)
 
 	void* result = header + 1;
 	{
-		std::lock_guard<std::mutex> lock(sAllocMutex);
+		std::lock_guard<std::mutex> lock(allocMutex());
 		const size_t bucket = allocationBucket(result);
 		header->mNext = sBootBuckets[bucket];
 		sBootBuckets[bucket] = header;
@@ -212,7 +223,7 @@ void piki_pc_free(void* ptr)
 		return;
 	}
 
-	std::lock_guard<std::mutex> lock(sAllocMutex);
+	std::lock_guard<std::mutex> lock(allocMutex());
 	const size_t bucket = allocationBucket(ptr);
 	for (BootBlockHeader** link = &sBootBuckets[bucket]; *link; link = &(*link)->mNext) {
 		BootBlockHeader* header = *link;

@@ -17,6 +17,13 @@
 #include "gameflow.h"
 #include "sysNew.h"
 #include "timers.h"
+#if defined(PIKI_PC_PORT)
+#include "NaviMgr.h"
+#include "netplay/pc_netplay_det.h"
+#include "netplay/pc_netplay_present.h"
+#include <cstdio>
+#include <cstdlib>
+#endif
 
 /**
  * @todo: Documentation
@@ -801,11 +808,77 @@ void BossMgr::killAll()
 	}
 }
 
+#if defined(PIKI_PC_PORT)
+/**
+ * Netplay test knob: PIKMIN_NETPLAY_TEST_NAVI_TO_BOSS=<BossID>,<tick>[,<dx>,<dz>]
+ * moves captain 1 (and captain 2, 40 units further along z) to dx/dz
+ * (default 100/0) from the first active boss of that BossID once the tick
+ * reaches <tick>: the deterministic tick in netplay, otherwise the number of
+ * boss updates. Lets a scripted replay reach a boss without a long walk. It
+ * changes sim state, so every peer of a run must get the same value. Inert
+ * unless set.
+ */
+static void pcTestPullCaptains(BossNode* activeNodes)
+{
+	struct Cfg {
+		bool armed    = false;
+		int id        = 0;
+		unsigned tick = 0;
+		f32 dx        = 100.0f;
+		f32 dz        = 0.0f;
+	};
+	static const Cfg cfg = [] {
+		Cfg c;
+		if (const char* v = std::getenv("PIKMIN_NETPLAY_TEST_NAVI_TO_BOSS")) {
+			int id     = 0;
+			unsigned t = 0;
+			f32 dx = 100.0f, dz = 0.0f;
+			const int n = std::sscanf(v, "%d,%u,%f,%f", &id, &t, &dx, &dz);
+			if (n >= 2 && id >= BOSS_IDSTART && id < BOSS_IDCOUNT) {
+				c.armed = true;
+				c.id    = id;
+				c.tick  = t;
+				if (n >= 3) c.dx = dx;
+				if (n >= 4) c.dz = dz;
+			}
+		}
+		return c;
+	}();
+	static bool sFired     = false;
+	static unsigned sCalls = 0;
+	if (!cfg.armed || sFired || !naviMgr || !activeNodes) {
+		return;
+	}
+	const unsigned now = pc_netplay_deterministic() ? pc_netplay_tick() : ++sCalls;
+	if (now < cfg.tick) {
+		return;
+	}
+	BossNode* node = static_cast<BossNode*>(activeNodes[cfg.id].mChild);
+	Navi* navi0    = naviMgr->getNavi(0);
+	if (!node || !node->mBoss || !navi0) {
+		return;
+	}
+	sFired             = true;
+	const Vector3f& at = *node->mBoss->getInitPosition();
+	for (int i = 0; i < 2; i++) {
+		Navi* navi = (i == 0) ? navi0 : naviMgr->getNavi(1);
+		if (navi) {
+			Vector3f pos(at.x + cfg.dx, at.y, at.z + cfg.dz + 40.0f * f32(i));
+			navi->resetPosition(pos);
+		}
+	}
+	std::printf("[netplay-test] navis pulled to boss %d init=(%.1f %.1f %.1f) at tick %u\n", cfg.id, at.x, at.y, at.z, now);
+}
+#endif
+
 /**
  * @todo: Documentation
  */
 void BossMgr::update()
 {
+#if defined(PIKI_PC_PORT)
+	pcTestPullCaptains(mActiveNodes);
+#endif
 	gsys->mTimer->start("boss updt", true);
 	if (mForceUpdate) {
 		for (int i = BOSS_IDSTART; i < BOSS_IDCOUNT; i++) {
@@ -859,6 +932,17 @@ void BossMgr::refresh(Graphics& gfx)
 			FOREACH_NODE(BossNode, mActiveNodes[i].mChild, node)
 			{
 				node->mBoss->refreshViewCulling(gfx);
+#if defined(PIKI_PC_PORT)
+				// Netplay presentation pass: draw only what the local frustum
+				// sees, from the stored sim state.
+				if (!pc_netplay_present_sim_side()) {
+					Vector3f point(node->mBoss->mSRT.t);
+					point.y += C_BOSS_PARM(node->mBoss, mRenderSphereHeight);
+					if (!gfx.mCamera->isPointVisible(point, C_BOSS_PARM(node->mBoss, mRenderSphereRadius))) {
+						continue;
+					}
+				}
+#endif
 				if (C_BOSS_PARM(node->mBoss, _1DC) == 0 || !node->mBoss->mGrid.aiCulling() || node->mBoss->aiCullable()) {
 					node->mBoss->refresh(gfx);
 				}

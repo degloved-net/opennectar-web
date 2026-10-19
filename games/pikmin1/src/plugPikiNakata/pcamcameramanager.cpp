@@ -6,6 +6,13 @@
 #include "Peve/Condition.h"
 #include "Peve/Event.h"
 #include "sysNew.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_camlead.h"
+#include "netplay/pc_netplay_det.h"
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#endif
 
 /**
  * @todo: Documentation
@@ -74,9 +81,51 @@ void PcamCameraManager::startCamera(Creature* target)
  */
 void PcamCameraManager::update()
 {
+#if defined(PIKI_PC_PORT)
+	// Netplay test knob, deterministic mode only:
+	// PIKMIN_NETPLAY_TEST_CAMERA_WOBBLE=<degrees> swings the camera yaw on a
+	// 97-tick sine between control (which banks input drag into the azimuth)
+	// and update (which builds the matrices), then restores it, so the view
+	// really moves but nothing drifts. A replay must hash the same with and
+	// without it, since the sim takes its yaw from the input, not the camera.
+	static bool wobRead  = false;
+	static double wobDeg = 0.0;
+	if (!wobRead) {
+		wobRead         = true;
+		const char* env = std::getenv("PIKMIN_NETPLAY_TEST_CAMERA_WOBBLE");
+		wobDeg          = (env != nullptr && *env != '\0') ? std::atof(env) : 0.0;
+		if (wobDeg != 0.0) {
+			std::printf("[netplay] test camera wobble: %.1f deg, 97-tick period\n", wobDeg);
+			std::fflush(stdout);
+		}
+	}
+	mCamera->control(*mController);
+	f32 wobSavedAz  = 0.0f;
+	f32 wobSavedCur = 0.0f;
+	bool wobActive  = false;
+	if (pc_netplay_deterministic() && wobDeg != 0.0) {
+		const double phase  = 6.283185307179586 * (double)pc_netplay_tick() / 97.0;
+		const double wobRad = wobDeg * 3.141592653589793 / 180.0 * std::sin(phase);
+		if (wobRad != 0.0) {
+			wobSavedAz                  = mCamera->mPolarDir.mAzimuth;
+			wobSavedCur                 = mCamera->mCurrentAzimuth;
+			mCamera->mPolarDir.mAzimuth = wobSavedAz + (f32)wobRad;
+			mCamera->mCurrentAzimuth    = wobSavedCur + (f32)wobRad;
+			wobActive                   = true;
+		}
+	}
+	mCamera->update();
+	pc_netplay_camlead_note_sim_update(this);
+	updateVibrationEvent();
+	if (wobActive) {
+		mCamera->mPolarDir.mAzimuth = wobSavedAz;
+		mCamera->mCurrentAzimuth    = wobSavedCur;
+	}
+#else
 	mCamera->control(*mController);
 	mCamera->update();
 	updateVibrationEvent();
+#endif
 }
 
 /**

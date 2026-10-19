@@ -8,6 +8,7 @@
 #include "PSM/ObjCalc.h"
 #include "PSM/CreaturePrm.h"
 #include "PSMath.h"
+#include "pc_p2_captains.h"
 #include "PSGame/SeMgr.h"
 #include "utilityU.h"
 
@@ -1778,8 +1779,99 @@ void Navi::stopWaitVoice()
  * @note Address: 0x80462C94
  * @note Size: 0x108
  */
+// Selector de capitanes: un capitán Pikmin cambia la voz de capitán por la voz
+// de Pikmin más parecida (PLAN_SELECTOR_CAPITANES.md §7.3). 0 = sin cambio.
+// SHUGO/SYUGO y KAISAN no se tocan: son el silbato y la dispersión, no voz.
+static u32 pcPikminCaptainVoice(u32 soundID)
+{
+	switch (soundID) {
+	case PSSE_PL_DAMAGE_ORIMA:
+	case PSSE_PL_DAMAGE_LUI:
+	case PSSE_PL_DAMAGE_SHACHO:
+	case PSSE_PL_ORIMA_DAMAGE:
+		return PSSE_PK_VC_DAMAGED;
+	case PSSE_PL_PUNCH_ORIMA:
+	case PSSE_PL_PUNCH_LUI:
+	case PSSE_PL_PUNCH_SHACHO:
+	case PSSE_PL_ORIMA_PUNCH_SWING:
+		return PSSE_PK_VC_ATTACK;
+	case PSSE_PL_ORIMA_PUNCH_HIT:
+		return PSSE_PK_SE_ATTACKHIT;
+	case PSSE_PL_SLEEP_ORIMA:
+	case PSSE_PL_SLEEP_LUGI:
+	case PSSE_PL_SLEEP_SHACHO:
+		return PSSE_PK_VC_SLEEP;
+	case PSSE_PL_WAKEUP_ORIMA:
+	case PSSE_PL_WAKEUP_LUGI:
+	case PSSE_PL_WAKEUP_SHACHO:
+		return PSSE_PK_VC_NOBI;
+	case PSSE_PL_WAIT_KYORO_ORIMA:
+	case PSSE_PL_WAIT_KYORO_LUGI:
+	case PSSE_PL_WAIT_KYORO_SHACHO:
+	case PSSE_PL_WAIT_LOOKBACK_ORIMA:
+	case PSSE_PL_WAIT_LOOKBACK_LUGI:
+	case PSSE_PL_WAIT_LOOKBACK_SHACHO:
+		return PSSE_PK_VC_FIND;
+	case PSSE_PL_WAIT_JUMP_ORIMA:
+	case PSSE_PL_WAIT_JUMP_LUGI:
+	case PSSE_PL_WAIT_JUMP_SHACHO:
+	case PSSE_PL_WAIT_TAISO_ORIMA:
+	case PSSE_PL_WAIT_TAISO_LUGI:
+	case PSSE_PL_WAIT_TAISO_SHACHO:
+		return PSSE_PK_VC_JUMP1;
+	case PSSE_PL_WAIT_CHAT_ORIMA:
+	case PSSE_PL_WAIT_CHAT_LUGI:
+	case PSSE_PL_WAIT_CHAT_SHACHO:
+	case PSSE_PL_WAIT_NOVI_ORIMA:
+	case PSSE_PL_WAIT_NOVI_LUGI:
+	case PSSE_PL_WAIT_NOVI_SHACHO:
+		return PSSE_PK_VC_AKUBI;
+	case PSSE_PL_WAIT_LAND_ORIMA:
+	case PSSE_PL_WAIT_LAND_LUGI:
+	case PSSE_PL_WAIT_LAND_SHACHO:
+		return PSSE_PK_VC_LAND;
+	case PSSE_PL_BIKU_ORIMA:
+	case PSSE_PL_BIKU_LUGI:
+	case PSSE_PL_BIKU_SHACHO:
+		return PSSE_PK_VC_PANIC;
+	case PSSE_PL_PIKON_ORIMA:
+	case PSSE_PL_PIKON_LUI:
+	case PSSE_PL_PIKON_SHACHO:
+		return PSSE_PK_VC_SAY_PIKMIN;
+	case PSSE_PL_ORIMA_DOWN:
+	case PSSE_PL_DOOM_ORIMA:
+	case PSSE_PL_DOOM_LUGI:
+		return PSSE_PK_VC_DEAD1;
+	case PSSE_PL_ORIMA_FIRED:
+		return PSSE_PK_VC_FIRED;
+	case PSSE_PL_SPLASH_AWAY_ORIMA:
+	case PSSE_PL_SPLASH_AWAY_LUGI:
+		return PSSE_PK_VC_SPLASH_OFF;
+	case PSSE_PL_WATER_IN:
+		return PSSE_PK_VC_WATER_PANIC;
+	case PSSE_PL_DRINK:
+		return PSSE_PK_VC_DRINK;
+	case PSSE_PL_S0B_FALL_ORIMA:
+	case PSSE_PL_S0B_FALL_LUGI:
+		return PSSE_PK_VC_FALL;
+	case PSSE_PL_DEMOS09_JUMP_ORIMA:
+	case PSSE_PL_DEMOS09_JUMP_LUGI:
+		return PSSE_PK_VC_JUMP_INTO_HOLE;
+	}
+	return 0;
+}
+
 JAISound* Navi::startSound(u32 soundID, u32 flag)
 {
+	if (mGameObj && pc_p2_character_is_pikmin(pc_p2_captain_loaded_character(mGameObj->getCreatureID()))) {
+		u32 pikminVoice = pcPikminCaptainVoice(soundID);
+		if (pikminVoice) {
+			stopWaitVoice();
+			PSM::StartSoundArg arg(this, pikminVoice, flag);
+			return startSoundInner(arg);
+		}
+	}
+
 	switch (soundID) {
 	case PSSE_PL_PUNCH_ORIMA:
 	case PSSE_PL_PUNCH_LUI:

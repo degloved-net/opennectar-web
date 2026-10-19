@@ -53,6 +53,7 @@ bool pc_whistle_pluck(Navi* navi, float radius)
     if (pc_vs_active() && nearest->mPcOwner >= 0) piki->mPlayerId = nearest->mPcOwner;
     piki->setFlower(nearest->mFlowerStage);
     piki->resetPosition(nearest->mSRT.t);
+    piki->mPcWhistleNuki = true;
     piki->mFSM->transit(piki, PIKISTATE_AutoNuki);
     nearest->finishWaterEffect();
     nearest->kill(false);

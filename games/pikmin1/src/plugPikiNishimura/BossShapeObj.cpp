@@ -2,6 +2,11 @@
 #include "DebugLog.h"
 #include "Shape.h"
 #include "sysNew.h"
+#if defined(PIKI_PC_PORT)
+#include "Graphics.h"
+#include "netplay/pc_netplay_present.h"
+#include "timing/pc_render_phase.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -36,3 +41,38 @@ BossShapeObject::BossShapeObject(Shape* shape, immut char* bossName)
 
 	mShape->overrideAnim(0, &mAnimContext);
 }
+
+#if defined(PIKI_PC_PORT)
+/**
+ * @brief Keeps the shape's final joint matrices in world space (see BossPresentJoints).
+ */
+void BossPresentJoints::capture(BossShapeObject* shapeObj, Graphics& gfx)
+{
+	if (!pc_netplay_present_two_pass_active() || !pc_render_is_authoritative()) {
+		return;
+	}
+
+	Shape* shape = shapeObj->mShape;
+	Matrix4f invLookAt;
+	gfx.mCamera->mLookAtMtx.inverse(&invLookAt);
+	mWorld.resize(shape->mJointCount);
+	for (int i = 0; i < shape->mJointCount; i++) {
+		invLookAt.multiplyTo(shape->getAnimMatrix(i), mWorld[i]);
+	}
+}
+
+/**
+ * @brief Rebuilds the shape's joint matrices for the presentation camera from the world-space copy.
+ */
+void BossPresentJoints::apply(BossShapeObject* shapeObj, Graphics& gfx)
+{
+	Shape* shape = shapeObj->mShape;
+	if (!pc_netplay_present_two_pass_active() || pc_render_is_authoritative() || int(mWorld.size()) != shape->mJointCount) {
+		return;
+	}
+
+	for (int i = 0; i < shape->mJointCount; i++) {
+		gfx.mCamera->mLookAtMtx.multiplyTo(mWorld[i], shape->getAnimMatrix(i));
+	}
+}
+#endif

@@ -11,6 +11,8 @@ static int uploads, levels;
 static size_t uploadedBytes;
 static uint32_t firstPixel;
 extern "C" {
+int pc_netplay_present_null_active() { return 0; }
+void pc_netplay_present_note_real() {}
 const GLubyte* glGetString(GLenum) { return reinterpret_cast<const GLubyte*>(""); }
 void glGetIntegerv(GLenum, GLint* value) { *value = 8192; }
 GLenum glGetError() { return GL_NO_ERROR; }

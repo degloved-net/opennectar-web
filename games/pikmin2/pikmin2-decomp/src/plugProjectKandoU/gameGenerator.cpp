@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "CNode.h"
 #include "string.h"
 #include "Game/Creature.h"
@@ -655,6 +658,9 @@ void GeneratorMgr::read(Stream& input, bool)
 	mGeneratorCount = input.readInt();
 	mGenerator      = nullptr;
 	for (int i = 0; i < mGeneratorCount; i++) {
+#ifdef PIKI_PC_PORT
+		pc_p2_rnd_gen_index(i);
+#endif
 		if (mGenerator == nullptr) {
 			mGenerator = new Generator();
 			mGenerator->read(input);
@@ -675,6 +681,9 @@ void GeneratorMgr::read(Stream& input, bool)
 			generatorCache->addGenerator(newGenerator);
 		}
 	}
+#ifdef PIKI_PC_PORT
+	pc_p2_rnd_gen_file(nullptr);
+#endif
 }
 
 /**

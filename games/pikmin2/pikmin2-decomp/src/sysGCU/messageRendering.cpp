@@ -8,6 +8,9 @@
 #include "P2Macros.h"
 #include "stl/ctype.h"
 #include "System.h"
+#ifdef PIKI_PC_PORT
+#include <stdio.h>
+#endif
 
 namespace P2JME {
 
@@ -27,6 +30,15 @@ doubleColorStruct cBtnIconColor[11] = {
 	{ { 225, 225, 225, 255 }, { 136, 136, 136, 255 } },
 };
 } // namespace
+
+#ifdef PIKI_PC_PORT
+extern "C" void pc_window_key_prompt_label(char tag, char* buf, unsigned bufSize);
+#if PIKI_PC_TOUCH
+extern "C" bool pc_touch_visible(void);
+extern "C" bool pc_touch_has_icon_for_tag(char tag);
+extern "C" void pc_touch_mark_inline_icon(char tag, float x, float y, float size);
+#endif
+#endif
 
 // Los argumentos de las etiquetas del mensaje van en big-endian (datos de
 // GameCube). Leidos con *(u16*) en PC, un tamano de 100 salia 25600 y la letra
@@ -649,6 +661,73 @@ bool TRenderingProcessor::tagImage(u16 p1, const void* p2, u32 p3)
 		break;
 	}
 
+#ifdef PIKI_PC_PORT
+	// El icono del botón de GameCube se sustituye por lo que hay que pulsar en
+	// el dispositivo en uso (la tecla asignada en F1 o el botón asignado del
+	// mando), escrito con la fuente del mensaje en el color del botón. Pasa
+	// igual al medir (TProcFlag_Unk0) que al dibujar, así que se coloca bien.
+	if (p1 == 0 && firstByte < 11) {
+		static const char kTags[11] = { 'a', 'b', 'c', 'x', 'y', 'z', 'l', 'r', 's', 'p', 't' };
+		static const JUtility::TColor kKeyColor[11] = {
+			JUtility::TColor(90, 215, 90, 255),   JUtility::TColor(240, 80, 70, 255),   JUtility::TColor(245, 215, 40, 255),
+			JUtility::TColor(225, 225, 225, 255), JUtility::TColor(225, 225, 225, 255), JUtility::TColor(140, 140, 255, 255),
+			JUtility::TColor(225, 225, 225, 255), JUtility::TColor(225, 225, 225, 255), JUtility::TColor(225, 225, 225, 255),
+			JUtility::TColor(225, 225, 225, 255), JUtility::TColor(225, 225, 225, 255),
+		};
+		char label[48];
+#if PIKI_PC_TOUCH
+		// Táctil: el botón de la capa táctil que hace eso, en su burbuja (se
+		// puede pulsar), como en Pikmin 1. Mover al grupo: disolver + arrastrar;
+		// zoom: pellizcar. Lo que no tiene botón táctil deja el icono original.
+		bool pcTouchIcon = false;
+		label[0]         = '\0';
+		if (pc_touch_visible()) {
+			const char tag = kTags[firstByte];
+			if (pc_touch_has_icon_for_tag(tag) || tag == 'c') {
+				pcTouchIcon = true;
+				f32 iconX = mLocate.i.x + mXOffset, iconY = mLocate.i.y + mYOffset;
+				if (!mFlags.isSet(TProcFlag_Unk0) && pcInlineIconOrigin(iconX, iconY)) {
+					pc_touch_mark_inline_icon(tag == 'c' ? 'x' : tag, iconX, iconY + mFontHeightAdjusted * f32(mMainFont->getDescent()), width);
+				}
+				mLocate.i.x += width;
+				if (tag == 'c') snprintf(label, sizeof(label), "+drag");
+			} else if (tag == 'r') {
+				snprintf(label, sizeof(label), "pinch");
+			}
+			if (pcTouchIcon && !label[0]) {
+				mInfoIndex++;
+				mMainFont->setGX(mDefaultBlack, mDefaultWhite);
+				return true;
+			}
+		} else {
+			pc_window_key_prompt_label(kTags[firstByte], label, sizeof(label));
+		}
+#else
+		pc_window_key_prompt_label(kTags[firstByte], label, sizeof(label));
+#endif
+		if (label[0]) {
+			const JUtility::TColor keep1 = mColorData1, keep2 = mColorData2;
+			mColorData1   = kKeyColor[firstByte];
+			mColorData2   = kKeyColor[firstByte];
+			mColorData1.a = f32(mColorData1.a) * mBaseAlphaModifier;
+			mColorData2.a = f32(mColorData2.a) * mBaseAlphaModifier;
+			const f32 xScale = mFontWidthAdjusted * (f32)mMainFont->getWidth();
+			const f32 yScale = mFontHeightAdjusted * (f32)mMainFont->getHeight();
+			for (const char* c = label; *c; ++c) {
+				if (mFlags.isSet(TProcFlag_Unk0)) {
+					mLocate.i.x += calcWidth(mMainFont, *c, xScale, true);
+				} else {
+					mLocate.i.x += doDrawLetter(mLocate.i.x + mXOffset, mLocate.i.y + mYOffset, xScale, yScale, *c, true);
+				}
+			}
+			mColorData1 = keep1;
+			mColorData2 = keep2;
+			mInfoIndex++;
+			mMainFont->setGX(mDefaultBlack, mDefaultWhite);
+			return true;
+		}
+	}
+#endif
 	if (gP2JMEMgr) {
 		JUTTexture* img = gP2JMEMgr->getImage(ImageGroup::ID0, firstByte);
 		if (img && !mFlags.isSet(TProcFlag_Unk0)) {

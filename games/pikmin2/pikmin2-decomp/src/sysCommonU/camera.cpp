@@ -8,6 +8,9 @@
 #include "trig.h"
 #include "Quat.h"
 #include "nans.h"
+#ifdef PIKI_PC_PORT
+extern "C" void pc_gfx_get_proj_offset(float* ndcX, float* ndcY);
+#endif
 
 /**
  * @note Address: N/A
@@ -332,6 +335,14 @@ void Camera::setProjection()
 	f32 near      = getNear();
 
 	C_MTXPerspective(*matrix, mViewAngle, mAspectRatio, near, far);
+#ifdef PIKI_PC_PORT
+	// Co-op con cámara fusionada: frustum corrido en NDC (Viewport::setViewport).
+	// x_ndc = -m00*x/z - m02: restar el offset a m02 corre la imagen +offset.
+	f32 offX, offY;
+	pc_gfx_get_proj_offset(&offX, &offY);
+	(*matrix)[0][2] -= offX;
+	(*matrix)[1][2] -= offY;
+#endif
 	GXSetProjection(mProjectionMtx, GX_PERSPECTIVE);
 }
 

@@ -1,3 +1,7 @@
+#ifdef PIKI_PC_PORT
+#include "pc_speedrun.h"
+#include "Game/pcCoop.h"
+#endif
 #include "Game/Entities/ItemOnyon.h"
 #include "Game/GameSystem.h"
 #include "Game/MoviePlayer.h"
@@ -41,6 +45,9 @@ void DayEndState::init(SingleGameSection* game, StateArg* arg)
 	DayEndArg* castedArg = static_cast<DayEndArg*>(arg);
 	P2ASSERTLINE(67, castedArg != nullptr);
 	mDayEndType = castedArg->mEndType;
+#ifdef PIKI_PC_PORT
+	pc_speedrun_on_day_end(game->mCurrentCourseInfo ? (int)game->mCurrentCourseInfo->mCourseIndex : -1);
+#endif
 	mTimer      = 0.0f;
 	gameSystem->setPause(true, "dayend", 3);
 	mStatus = DESTATE_PlayCutscene;
@@ -125,7 +132,11 @@ void DayEndState::exec(SingleGameSection* game)
 				}
 
 				JUT_ASSERTLINE(222, naviMgr->getAliveOrima(ALIVEORIMA_Active), "no alive:s01_dayend");
+#ifdef PIKI_PC_PORT
+				Navi* navi = naviMgr->getMovieNavi(); // co-op: Olimar o, si no, Louie
+#else
 				Navi* navi = naviMgr->getActiveNavi();
+#endif
 				int id     = 0;
 				if (navi) {
 					id = navi->mNaviIndex;

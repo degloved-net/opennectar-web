@@ -5,6 +5,9 @@
 #include "settings/pc_settings.h"
 #include "pc_coop.h"
 #include "Navi.h"
+#include "netplay/pc_netplay_camlead.h"
+#include "netplay/pc_netplay_det.h"
+#include "netplay/pc_input_log.h"
 #endif
 #include "Creature.h"
 #include "DebugLog.h"
@@ -171,6 +174,10 @@ void PcamCamera::makeCurrentPosition(f32 azimuth)
 	viewPt.add(watchPt);
 	inputViewpoint(viewPt);
 	inputWatchpoint(watchPt);
+#if defined(PIKI_PC_PORT)
+	// A snapped sim camera invalidates the netplay lead camera's correction.
+	pc_netplay_camlead_note_snap(this);
+#endif
 }
 
 /**
@@ -283,11 +290,8 @@ void PcamCamera::control(Controller& controller)
 			if (mPcPitch > 1.0f) mPcPitch = 1.0f;
 		}
 	}
-	bool doRotate = !pcFirstPersonFor(mTargetCreature)
-	             && controller.mTriggerL / 170.0f >= getParameterF(PCAMF_RotationButtonThreshold);
 #else
 	bool doRotate = controller.mTriggerL / 170.0f >= getParameterF(PCAMF_RotationButtonThreshold);
-#endif
 	bool isZClick = false;
 	if (controller.keyClick(KBBTN_Z)) {
 		isZClick = true;
@@ -296,20 +300,92 @@ void PcamCamera::control(Controller& controller)
 	if (controller.keyDown(KBBTN_X)) {
 		xSubY = controller.getSubStickY();
 	}
+#endif
+#if defined(PIKI_PC_PORT)
+	// Netplay: the camera is local view state, but the cursor is sim. The
+	// drag rotation of the cursor would move the sim from a local mouse or
+	// touch drag, so deterministic mode sends it through the synced input
+	// instead (the camera still turns at once). The L1 recentre is a synced
+	// pad click on the captain's own Kontroller and moves the cursor from sim
+	// state only, so it stays.
+	const bool detMode = pc_netplay_deterministic();
+	// Cámara libre: L1 la devuelve detrás del capitán, y el cursor (que ha
+	// girado con ella) vuelve también delante de él (issue #74).
+	if (pc_settings_get_free_camera() && controller.keyClick(KBBTN_L) && mTargetCreature
+	    && mTargetCreature->mObjType == OBJTYPE_Navi) {
+		static_cast<Navi*>(mTargetCreature)->pcCursorToFront();
+	}
+	controlPad(controller.mCurrentInput, controller.mInputPressed, controller.mTriggerL, controller.mMainStickX,
+	           controller.mSubStickY);
+#else
 	PcamControlInfo info;
 	info.init(true, doRotate, controller.keyClick(KBBTN_L) != 0, controller.keyClick(KBBTN_R) && !controller.keyDown(KBBTN_X), isZClick,
 	          false, false, controller.getMainStickX(), xSubY, controller.getSubStickY());
 	control(info);
+#endif
 	// Arrastre de cámara: el pellizco táctil, y con el mod "Free Camera" el
 	// ratón y el stick derecho. Mismo acumulador para los tres.
 	const int dragPlayer   = (mTargetCreature && mTargetCreature->mObjType == OBJTYPE_Navi) ? static_cast<Navi*>(mTargetCreature)->mNaviID : 0;
+#if defined(PIKI_PC_PORT)
+	// In a lockstep session every local drag turns this peer's own captain's
+	// camera and the other captain's camera takes none.
+	const int dragRoute = pc_netplay_camlead_drag_route(this);
+	float cameraDrag    = 0.0f;
+	if (dragRoute < 0) {
+		cameraDrag = pc_window_take_camera_drag_player(dragPlayer);
+	} else if (dragRoute == 1) {
+		cameraDrag = pc_window_take_camera_drag_player(0) + pc_window_take_camera_drag_player(1);
+		if (cameraDrag < -1.0f) cameraDrag = -1.0f;
+		if (cameraDrag > 1.0f) cameraDrag = 1.0f;
+	}
+#else
 	const float cameraDrag = pc_window_take_camera_drag_player(dragPlayer);
+#endif
 	if (mIsActive && mControlsEnabled && cameraDrag != 0.0f) {
 		// Aproximadamente media vuelta por una pasada de un ancho de pantalla.
 		mPolarDir.rotateAzimuth(cameraDrag * 3.2f);
 		mPolarDir.roundAzimuth();
+		// El cursor gira con la cámara alrededor del capitán, para seguir en el
+		// mismo sitio de la pantalla: si no, se quedaba fijo en el mundo y,
+		// con la cámara girada, apuntaba a otro lado (issue #74).
+#if defined(PIKI_PC_PORT)
+		if (detMode && dragRoute == 1) {
+			pc_input_log_local_rotate_add(cameraDrag * 3.2f);
+		}
+		if (!detMode && mTargetCreature && mTargetCreature->mObjType == OBJTYPE_Navi) {
+#else
+		if (mTargetCreature && mTargetCreature->mObjType == OBJTYPE_Navi) {
+#endif
+			static_cast<Navi*>(mTargetCreature)->pcRotateCursor(cameraDrag * 3.2f);
+		}
 	}
 }
+
+#if defined(PIKI_PC_PORT)
+/**
+ * The pad-derived half of control(Controller&): L-hold rotation with the main stick, L click attention, R click zoom
+ * (not while X is held), Z click angle. Takes the Controller's keys held and newly pressed and its raw analog bytes;
+ * the netplay lead camera also runs it on its prediction.
+ */
+void PcamCamera::controlPad(u32 keysDown, u32 keysClicked, u8 triggerL, s8 mainStickX, s8 subStickY)
+{
+	bool doRotate = !pcFirstPersonFor(mTargetCreature) && triggerL / 170.0f >= getParameterF(PCAMF_RotationButtonThreshold);
+	bool isZClick = false;
+	if (keysClicked & KBBTN_Z) {
+		isZClick = true;
+	}
+	// Controller::getMainStickX()/getSubStickY(): the raw byte over 74.
+	const f32 subY = subStickY / 74.0f;
+	f32 xSubY      = 0.0f;
+	if (keysDown & KBBTN_X) {
+		xSubY = subY;
+	}
+	PcamControlInfo info;
+	info.init(true, doRotate, (keysClicked & KBBTN_L) != 0, (keysClicked & KBBTN_R) && !(keysDown & KBBTN_X), isZClick, false,
+	          false, mainStickX / 74.0f, xSubY, subY);
+	control(info);
+}
+#endif
 
 /**
  * @todo: Documentation
@@ -372,6 +448,13 @@ void PcamCamera::startAttention()
  */
 void PcamCamera::playCameraSound(int soundID)
 {
+#if defined(PIKI_PC_PORT)
+	// The netplay lead camera replays this camera's update on a snapshot;
+	// the sound plays once, when the sim applies the input.
+	if (pc_netplay_camlead_predicting()) {
+		return;
+	}
+#endif
 	PRINT_NAKATA("playCameraSound:%d\n", soundID);
 	SeSystem::playSysSe(soundID);
 }

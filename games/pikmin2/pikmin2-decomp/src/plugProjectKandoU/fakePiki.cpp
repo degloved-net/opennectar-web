@@ -1,4 +1,5 @@
 #include "Game/FakePiki.h"
+#include "Game/pcCoop.h"
 #include "Game/BaseItem.h"
 #include "Game/gameStat.h"
 #include "Game/Navi.h"
@@ -12,6 +13,11 @@
 #include "Dolphin/rand.h"
 #include "trig.h"
 #include "nans.h"
+#ifdef PIKI_PC_PORT
+#include <cmath>
+#include <deque>
+#include <unordered_map>
+#endif
 
 f32 efx::TCursor::kAngleSpeed = PI / 60.0f;
 
@@ -195,10 +201,58 @@ void FakePiki::clearDoAnimCallback()
  * @note Address: 0x8013D0F8
  * @note Size: 0x3BC
  */
+#ifdef PIKI_PC_PORT
+namespace {
+// The walk/run cycle's playback speed follows how far the character moved. At
+// 30 Hz that is one tick of travel; at 60/120 Hz a single tick is so short
+// that physics and collision noise make the speed, and with it the cycle,
+// lurch from tick to tick. Measure over the last 1/30 s instead: exactly one
+// tick, the original measure, at 30 Hz. (Same fix as Pikmin 1's walk code.)
+struct PcWalkSample {
+	f32 x, z, dt;
+};
+struct PcWalkHistory {
+	std::deque<PcWalkSample> samples;
+	f32 lastX = 0.0f, lastZ = 0.0f;
+};
+
+f32 pcWalkSpeed(const void* owner, const Vector3f& prev, const Vector3f& pos, f32 dt)
+{
+	static std::unordered_map<const void*, PcWalkHistory> sHistory;
+	PcWalkHistory& h = sHistory[owner];
+	// A teleport, or a new owner at a recycled address: start over.
+	if (fabsf(prev.x - h.lastX) > 0.001f || fabsf(prev.z - h.lastZ) > 0.001f) {
+		h.samples.clear();
+	}
+	h.lastX = pos.x;
+	h.lastZ = pos.z;
+	h.samples.push_front({ prev.x, prev.z, dt });
+	f32 time = 0.0f, fromX = prev.x, fromZ = prev.z;
+	size_t used = 0;
+	for (const PcWalkSample& sample : h.samples) {
+		time += sample.dt;
+		fromX = sample.x;
+		fromZ = sample.z;
+		used++;
+		if (time >= 1.0f / 30.0f - 0.0001f) {
+			break;
+		}
+	}
+	h.samples.resize(used);
+	const f32 dx = pos.x - fromX, dz = pos.z - fromZ;
+	return time > 0.0f ? sqrtf(dx * dx + dz * dz) / time : 0.0f;
+}
+} // namespace
+#endif
+
 void FakePiki::updateWalkAnimation()
 {
+#ifdef PIKI_PC_PORT
+	f32 animSpeed = pcWalkSpeed(this, mPreviousPosition, mPosition, sys->getDeltaTime());
+#else
 	Vector3f sep  = Vector3f(mPosition.x - mPreviousPosition.x, 0.0f, mPosition.z - mPreviousPosition.z);
 	f32 animSpeed = sep.length() / sys->getDeltaTime();
+#endif
 
 	int boundIdx = mAnimator.mBoundAnimator.getAnimIndex();
 
@@ -788,7 +842,7 @@ void FakePiki::doEntry()
 		mModel->show();
 
 	} else {
-		if (BaseHIOParms::sEntryOpt && !gameSystem->isMultiplayerMode()) {
+		if (BaseHIOParms::sEntryOpt && !PC_TWO_CAPTAIN_PLAY()) {
 			return;
 		}
 

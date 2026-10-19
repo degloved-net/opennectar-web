@@ -5,6 +5,25 @@
 
 static const char className[] = "ebiScreenFileSelect_Mgr";
 
+#if PIKI_PC_TOUCH
+#include "Dolphin/pad.h"
+extern "C" void pc_touch_claim_game_menu(void);
+extern "C" bool pc_touch_take_game_menu_tap(float* x, float* y);
+extern "C" bool pc_touch_pane_hit(const void* pane, float nx, float ny, float margin);
+extern "C" void pc_touch_queue_game_button(u16 button);
+
+// Táctil: la partida (bola) tocada, o -1. Pregunta por las tres cada frame
+// para que la capa táctil sepa dónde están.
+static int pcTouchTappedBall(ebi::FS::TMgr* mgr, bool tapped, float x, float y)
+{
+	int hit = -1;
+	for (int i = 0; i < 3; i++) {
+		if (pc_touch_pane_hit(mgr->mMainScreen.mPaneND[i], x, y, 0.01f) && tapped && hit < 0) hit = i;
+	}
+	return hit;
+}
+#endif
+
 namespace ebi {
 namespace FS {
 
@@ -70,6 +89,23 @@ void FSMState_SelectYesNo::do_init(TMgr* mgr, Game::StateArg* arg)
  */
 void FSMState_SelectYesNo::do_exec(TMgr* mgr)
 {
+#if PIKI_PC_TOUCH
+	// Táctil: tocar Sí o No lo elige y decide (como mover y pulsar A).
+	pc_touch_claim_game_menu();
+	if (!mIsSelected) {
+		float tx = 0.0f, ty = 0.0f;
+		const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+		const bool yes    = pc_touch_pane_hit(mgr->mMainScreen.mPaneMesgYes, tx, ty, 0.015f) && tapped;
+		const bool no     = pc_touch_pane_hit(mgr->mMainScreen.mPaneMesgNo, tx, ty, 0.015f) && tapped;
+		if (yes || no) {
+			if (mYesNoState != yes) {
+				mgr->mMainScreen.setYesNo(yes);
+				mYesNoState = yes;
+			}
+			pc_touch_queue_game_button(PAD_BUTTON_A);
+		}
+	}
+#endif
 	if (!mIsSelected) {
 		if (mgr->mController->isMoveUp()) {
 			if (!mYesNoState) {
@@ -556,6 +592,23 @@ void FSMState00_SelectData::do_exec(TMgr* mgr)
 		Controller* control = mgr->mController;
 		int prev            = mgr->mCurrSelection;
 		mgr->mCountNumInterface.update();
+#if PIKI_PC_TOUCH
+		// Táctil: tocar una partida la elige; tocar la elegida entra (A).
+		// Copiar y borrar salen como botones de la capa (iconos X/Y del texto).
+		pc_touch_claim_game_menu();
+		{
+			float tx = 0.0f, ty = 0.0f;
+			const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+			const int ball    = pcTouchTappedBall(mgr, tapped, tx, ty);
+			if (ball >= 0) {
+				if (ball != (int)mgr->mCurrSelection) {
+					mgr->mCurrSelection = ball;
+				} else if (!mCounter) {
+					pc_touch_queue_game_button(PAD_BUTTON_A);
+				}
+			}
+		}
+#endif
 
 		// I'M DONE WITH YOUR BULLSHIT, GAME
 		// I'M DOOOOOOOOOOOOOOOOOOOOOOOOOONE
@@ -634,8 +687,16 @@ void FSMState00b_CheckData::do_exec(TMgr* mgr)
 	switch (mStatus) {
 	case CheckDataState_DoLoad:
 		if (sys->mCardMgr->isSaveInvalid()) {
+#ifdef PIKI_PC_PORT
+			// loadPlayer falla si el hilo de la tarjeta tiene el mutex en ese
+			// instante (en un móvil pasa): se reintenta en el siguiente frame.
+			if (sys->mCardMgr->loadPlayer(mgr->mCurrSelection)) {
+				mStatus = CheckDataState_GetStatus;
+			}
+#else
 			P2ASSERTLINE(625, sys->mCardMgr->loadPlayer(mgr->mCurrSelection));
 			mStatus = CheckDataState_GetStatus;
+#endif
 		}
 		break;
 	case CheckDataState_GetStatus:
@@ -736,7 +797,29 @@ void FSMState04_WhichDataDoYouCopyTo::do_exec(TMgr* mgr)
 		// check if need to change current file selection
 		// store value before changes to see if a change happened
 		int prev = mgr->mCopySelection;
+#if PIKI_PC_TOUCH
+		// Táctil: tocar la partida destino mueve ahí el cursor; tocarla otra vez copia.
+		bool pcTouchRight = false, pcTouchLeft = false;
+		pc_touch_claim_game_menu();
+		{
+			float tx = 0.0f, ty = 0.0f;
+			const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+			const int ball    = pcTouchTappedBall(mgr, tapped, tx, ty);
+			if (ball >= 0 && ball != (int)mgr->mCurrSelection) {
+				static const int kRight[3] = { 2, 2, 1 }; // destino de "derecha" según el origen
+				if (ball == (int)mgr->mCopySelection) {
+					pc_touch_queue_game_button(PAD_BUTTON_A);
+				} else if (ball == kRight[mgr->mCurrSelection]) {
+					pcTouchRight = true;
+				} else {
+					pcTouchLeft = true;
+				}
+			}
+		}
+		if (pcTouchRight || mgr->mController->isMoveRight()) {
+#else
 		if (mgr->mController->isMoveRight()) {
+#endif
 			mgr->mMainScreen.moveRightCopyCursor();
 			switch (mgr->mCurrSelection) {
 			case 0:
@@ -749,7 +832,11 @@ void FSMState04_WhichDataDoYouCopyTo::do_exec(TMgr* mgr)
 				mgr->mCopySelection = 1;
 				break;
 			}
+#if PIKI_PC_TOUCH
+		} else if (pcTouchLeft || mgr->mController->isMoveLeft()) {
+#else
 		} else if (mgr->mController->isMoveLeft()) {
+#endif
 			mgr->mMainScreen.moveLeftCopyCursor();
 			switch (mgr->mCurrSelection) {
 			case 0:

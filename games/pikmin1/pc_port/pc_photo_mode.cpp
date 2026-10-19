@@ -74,6 +74,29 @@ void pc_photo_mode_enter(float posX, float posY, float posZ,
 
 void pc_photo_mode_exit(void) { sActive = false; }
 
+void pc_photo_mode_get_pose(float* posX, float* posY, float* posZ,
+                            float* pitch, float* yaw, float* roll)
+{
+	if (posX) *posX = sPosX;
+	if (posY) *posY = sPosY;
+	if (posZ) *posZ = sPosZ;
+	if (pitch) *pitch = sPitch;
+	if (yaw) *yaw = sYaw;
+	if (roll) *roll = sRoll;
+}
+
+void pc_photo_mode_set_pose(float posX, float posY, float posZ,
+                            float pitch, float yaw, float roll)
+{
+	if (!sActive) return;
+	sPosX  = posX;
+	sPosY  = posY;
+	sPosZ  = posZ;
+	sPitch = pitch;
+	sYaw   = yaw;
+	sRoll  = roll;
+}
+
 void pc_photo_mode_forward_vector(float pitch, float yaw,
                                   float* outX, float* outY, float* outZ)
 {

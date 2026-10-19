@@ -1,4 +1,5 @@
 #include "Game/Entities/ShijimiChou.h"
+#include "Game/pcCoop.h"
 #include "Game/EnemyAnimKeyEvent.h"
 #include "Game/MapMgr.h"
 #include "Game/Stickers.h"
@@ -790,7 +791,11 @@ void Obj::leave()
 void Obj::leaveInit()
 {
 	if (mGroupLeader && mGroupLeader == this) {
+#ifdef PIKI_PC_PORT
+		Navi* navi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 		Navi* navi = naviMgr->getActiveNavi();
+#endif
 		if (navi) {
 			// run 'away' from navi
 			Vector3f targetPos = navi->getPosition();

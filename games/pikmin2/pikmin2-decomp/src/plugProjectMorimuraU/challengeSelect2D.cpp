@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "pc_p2_captain_preview.h"
+#endif
 #include "Morimura/challengeSelect2d.h"
 #include "Dolphin/rand.h"
 #include "Game/gameChallenge2D.h"
@@ -1556,6 +1559,12 @@ void TChallengeSelect::doCreate(JKRArchive* arc)
 	}
 
 	mPlayModeScreen->createMetPicture(static_cast<ResTIMG*>(mArchive->getResource("timg/sphere.bti")));
+#ifdef PIKI_PC_PORT
+	// Selector de capitanes: caras de los personajes elegidos.
+	pc_p2_captain_icons_apply(mPlayModeScreen->getScreenObj());
+	pc_p2_captain_icons_apply(mRulesScreen->getScreenObj());
+	pc_p2_captain_icons_apply(mSelectScreen->getScreenObj());
+#endif
 	backup->becomeCurrentHeap();
 }
 

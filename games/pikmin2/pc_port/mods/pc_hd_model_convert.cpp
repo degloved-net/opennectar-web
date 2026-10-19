@@ -90,26 +90,43 @@ struct ZipSource : Source {
 		uint32_t csize, usize, local;
 	};
 	fs::path path;
-	std::vector<char> data;
+	// Se lee del disco por trozos: los packs de texturas pesan varios GB.
+	mutable std::ifstream file;
+	uint64_t fileSize = 0;
 	std::vector<Entry> entries;
+
+	bool readAt(uint64_t offset, char* out, size_t size) const
+	{
+		if (offset + size > fileSize) return false;
+		file.clear();
+		file.seekg((std::streamoff)offset);
+		file.read(out, (std::streamsize)size);
+		return (size_t)file.gcount() == size;
+	}
 
 	bool open(const fs::path& p)
 	{
 		path = p;
-		std::ifstream in(p, std::ios::binary);
-		if (!in) return false;
-		data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-		if (data.size() < 22) return false;
+		file.open(p, std::ios::binary);
+		if (!file) return false;
+		file.seekg(0, std::ios::end);
+		fileSize = (uint64_t)file.tellg();
+		if (fileSize < 22) return false;
 		// End of central directory: scan back over a possible comment.
+		const size_t tailSize = (size_t)std::min<uint64_t>(fileSize, 70000 + 22);
+		std::vector<char> tail(tailSize);
+		if (!readAt(fileSize - tailSize, tail.data(), tailSize)) return false;
 		size_t eocd = std::string::npos;
-		for (size_t i = data.size() - 22; i + 1 > 0; i--) {
-			if (rd32(&data[i]) == 0x06054b50) { eocd = i; break; }
-			if (data.size() - i > 70000) break;
+		for (size_t i = tailSize - 22; i + 1 > 0; i--) {
+			if (rd32(&tail[i]) == 0x06054b50) { eocd = i; break; }
 		}
 		if (eocd == std::string::npos) return false;
-		uint16_t count = rd16(&data[eocd + 10]);
-		uint32_t cdOff = rd32(&data[eocd + 16]);
-		size_t pos = cdOff;
+		uint16_t count = rd16(&tail[eocd + 10]);
+		uint32_t cdSize = rd32(&tail[eocd + 12]);
+		uint32_t cdOff = rd32(&tail[eocd + 16]);
+		std::vector<char> data(cdSize);
+		if (!readAt(cdOff, data.data(), cdSize)) return false;
+		size_t pos = 0;
 		for (uint16_t i = 0; i < count; i++) {
 			if (pos + 46 > data.size() || rd32(&data[pos]) != 0x02014b50) return false;
 			Entry e;
@@ -150,15 +167,15 @@ struct ZipSource : Source {
 	{
 		const Entry* e = &entry;
 		const std::string suffix = e->name;
-		size_t pos = e->local;
-		if (pos + 30 > data.size() || rd32(&data[pos]) != 0x04034b50) fail("Corrupt zip entry " + suffix + ".");
-		uint16_t n = rd16(&data[pos + 26]), x = rd16(&data[pos + 28]);
-		size_t start = pos + 30 + n + x;
-		if (start + e->csize > data.size()) fail("Truncated zip entry " + suffix + ".");
-		if (e->method == 0) return std::vector<char>(&data[start], &data[start] + e->csize);
+		char header[30];
+		if (!readAt(e->local, header, sizeof(header)) || rd32(header) != 0x04034b50) fail("Corrupt zip entry " + suffix + ".");
+		uint16_t n = rd16(&header[26]), x = rd16(&header[28]);
+		std::vector<char> data(e->csize);
+		if (!readAt(e->local + 30 + n + x, data.data(), data.size())) fail("Truncated zip entry " + suffix + ".");
+		if (e->method == 0) return data;
 		if (e->method != 8) fail("Unsupported zip compression for " + suffix + ".");
 		int outLen = 0;
-		char* out = stbi_zlib_decode_noheader_malloc(&data[start], (int)e->csize, &outLen);
+		char* out = stbi_zlib_decode_noheader_malloc(data.data(), (int)e->csize, &outLen);
 		if (!out) fail("Could not inflate " + suffix + ".");
 		std::vector<char> result(out, out + outLen);
 		std::free(out);
@@ -1235,12 +1252,18 @@ int pc_texpack_install_zip(const char* zipPath, char* message, unsigned long mes
 	const std::string stem = fs::path(zipPath).stem().string();
 	std::error_code ec;
 	fs::create_directories(root, ec);
+	// Los packs de Dolphin traen más cosas (el emulador, Config, Shaders):
+	// si el zip tiene Load/Textures, solo se instala eso.
+	bool hasLoadTextures = false;
+	for (const ZipSource::Entry& e : zip.entries)
+		if (e.lowerName.find("load/textures/") != std::string::npos) { hasLoadTextures = true; break; }
 	int written = 0;
 	for (const ZipSource::Entry& e : zip.entries) {
 		if (e.name.empty() || e.name.back() == '/') continue;
 		std::string rel;
 		const size_t idx = e.lowerName.find("load/textures/");
 		if (idx != std::string::npos) rel = e.name.substr(idx + std::strlen("load/textures/"));
+		else if (hasLoadTextures) continue;
 		else rel = stem + "/" + e.name;
 		if (rel.empty() || rel.find("..") != std::string::npos) continue;
 		const fs::path out = root / rel;

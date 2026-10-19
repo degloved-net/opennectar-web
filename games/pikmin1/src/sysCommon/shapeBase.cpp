@@ -23,6 +23,16 @@
 #include <stddef.h>
 #if defined(PIKI_PC_PORT)
 #include "pc_photo_mode.h"
+#include "timing/pc_render_phase.h"
+#include "netplay/pc_netplay_present.h"
+#include "netplay/pc_netplay_det.h"
+#include "pc_speedrun.h"
+#include "timing/pc_anim_timing.h"
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <utility>
+#include <vector>
 #endif
 
 /**
@@ -387,7 +397,11 @@ void Joint::render(Graphics& gfx)
  */
 void AnimContext::animate(f32 animSpeed)
 {
+#if defined(PIKI_PC_PORT)
+	mCurrentFrame += pc_anim_dt(gsys->getFrameTime()) * animSpeed;
+#else
 	mCurrentFrame += gsys->getFrameTime() * animSpeed;
+#endif
 
 	if (static_cast<int>(mCurrentFrame) >= mData->mTotalFrameCount) {
 		mCurrentFrame = 0.0f;
@@ -975,9 +989,21 @@ void SceneData::getAnimInfo(CmdStream* stream)
 /**
  * DCA tracks are baked at one sample per 30 Hz frame. Sampling int(time) held
  * each pose for two ticks in 60/120 FPS mode, so skeletal animation stepped at
- * 30 FPS however fast the game ran. Blend towards the next sample instead;
- * rotations take the short way round so a +-PI wrap does not spin the joint.
+ * 30 FPS however fast the game ran. A straight lerp between samples still kinks
+ * the joint velocity every 33 ms, which reads as 30 FPS motion, so sample a
+ * Catmull-Rom curve through the neighbouring keys instead. Rotations are
+ * unwrapped around the current key so a +-PI wrap does not spin the joint.
  */
+static inline f32 pcWrapAngle(f32 d)
+{
+	if (d > PI) {
+		d -= 2.0f * PI;
+	} else if (d < -PI) {
+		d += 2.0f * PI;
+	}
+	return d;
+}
+
 static inline f32 pcSampleDca(const f32* data, const AnimParam& param, f32 time, bool isAngle)
 {
 	const int last = param.mEntryNum - 1;
@@ -985,16 +1011,23 @@ static inline f32 pcSampleDca(const f32* data, const AnimParam& param, f32 time,
 	if (i0 >= last) {
 		return data[param.mDataOffset + last];
 	}
-	const f32 a = data[param.mDataOffset + i0];
-	f32 d       = data[param.mDataOffset + i0 + 1] - a;
+	const f32* k = data + param.mDataOffset;
+	const f32 p1 = k[i0];
+	f32 d0       = p1 - k[i0 > 0 ? i0 - 1 : i0];
+	f32 d1       = k[i0 + 1] - p1;
+	f32 d2       = k[i0 + 2 <= last ? i0 + 2 : last] - k[i0 + 1];
 	if (isAngle) {
-		if (d > PI) {
-			d -= 2.0f * PI;
-		} else if (d < -PI) {
-			d += 2.0f * PI;
-		}
+		d0 = pcWrapAngle(d0);
+		d1 = pcWrapAngle(d1);
+		d2 = pcWrapAngle(d2);
 	}
-	return a + d * (time - f32(i0));
+	const f32 p0 = p1 - d0;
+	const f32 p2 = p1 + d1;
+	const f32 p3 = p2 + d2;
+	const f32 t  = time - f32(i0);
+	const f32 t2 = t * t;
+	const f32 t3 = t2 * t;
+	return 0.5f * ((2.0f * p1) + (p2 - p0) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 + (3.0f * p1 - p0 - 3.0f * p2 + p3) * t3);
 }
 #endif
 
@@ -3410,12 +3443,224 @@ void AnimFrameCacher::cacheFrameSpace(int numTextures, AnimCacheInfo* info)
 /**
  * @todo: Documentation
  */
+#if defined(PIKI_PC_PORT)
+/*
+ * Render-only animation reconstruction. Gameplay still evaluates the original
+ * pose into the normal matrix pool, so counters, event keys and collision see
+ * exactly the same state as before. Character rendering gets a second pose in
+ * the presentation pool: translations/scales use shape-preserving cubic
+ * interpolation, rotations use shortest-path quaternion slerp, and clip/loop
+ * discontinuities get a very short quaternion-space crossfade.
+ */
+namespace {
+const f32 kAnimBlendTime = 0.08f; // seconds
+
+// Render-only local pose. Rotations deliberately stop being Euler angles at
+// this boundary: interpolating the three angles independently does not follow
+// the shortest rigid-body rotation and is the main source of limb wobble at
+// high refresh rates.
+struct PcVisualPose {
+	Vector3f s;
+	Vector3f t;
+	Quat q;
+};
+
+static PcVisualPose pcIdentityVisualPose()
+{
+	PcVisualPose pose;
+	pose.s.set(1.0f, 1.0f, 1.0f);
+	pose.t.set(0.0f, 0.0f, 0.0f);
+	pose.q.set(0.0f, 0.0f, 0.0f, 1.0f);
+	return pose;
+}
+
+// Matrix4f::makeSRT uses Rz * Ry * Rx. Quat::fromEuler intends to build the
+// same product, but its final multiply writes back into one of its inputs;
+// that alias changes the scalar before the vector components are calculated.
+// Build the equivalent quaternion directly so the visual path is bitwise
+// independent of that legacy aliasing behaviour.
+static Quat pcVisualQuatFromEuler(const Vector3f& angles)
+{
+	const f32 sx = sinf(angles.x * 0.5f);
+	const f32 sy = sinf(angles.y * 0.5f);
+	const f32 sz = sinf(angles.z * 0.5f);
+	const f32 cx = cosf(angles.x * 0.5f);
+	const f32 cy = cosf(angles.y * 0.5f);
+	const f32 cz = cosf(angles.z * 0.5f);
+	Quat q;
+	q.set(cz * cy * sx - sz * sy * cx,
+	      cz * sy * cx + sz * cy * sx,
+	      sz * cy * cx - cz * sy * sx,
+	      cz * cy * cx + sz * sy * sx);
+	q.normalise();
+	return q;
+}
+
+static f32 pcDcaFrameValue(const DataChunk* block, const AnimParam& param, int frame, f32 fallback)
+{
+	if (!block || !block->mData || param.mEntryNum <= 0) return fallback;
+	frame = std::max(0, std::min(frame, param.mEntryNum - 1));
+	return block->mData[param.mDataOffset + frame];
+}
+
+// Shape-preserving cubic interpolation. Unlike ordinary Catmull-Rom it sets a
+// zero tangent at extrema and therefore cannot invent an overshoot between two
+// baked DCA samples. This is used for translation and scale only.
+static f32 pcDcaMonotoneValue(const DataChunk* block, const AnimParam& param, f32 frame, f32 fallback)
+{
+	if (!block || !block->mData || param.mEntryNum <= 0) return fallback;
+	if (param.mEntryNum == 1) return block->mData[param.mDataOffset];
+	const int i1 = std::max(0, std::min(int(std::floor(frame)), param.mEntryNum - 1));
+	const int i2 = std::min(i1 + 1, param.mEntryNum - 1);
+	if (i1 == i2) return pcDcaFrameValue(block, param, i1, fallback);
+	const f32 y0 = pcDcaFrameValue(block, param, i1 - 1, fallback);
+	const f32 y1 = pcDcaFrameValue(block, param, i1, fallback);
+	const f32 y2 = pcDcaFrameValue(block, param, i2, fallback);
+	const f32 y3 = pcDcaFrameValue(block, param, i2 + 1, fallback);
+	const f32 d0 = y1 - y0;
+	const f32 d1 = y2 - y1;
+	const f32 d2 = y3 - y2;
+	const auto tangent = [](f32 a, f32 b) {
+		return a * b <= 0.0f ? 0.0f : (2.0f * a * b) / (a + b);
+	};
+	const f32 m1 = tangent(d0, d1);
+	const f32 m2 = tangent(d1, d2);
+	const f32 u  = std::max(0.0f, std::min(1.0f, frame - f32(i1)));
+	const f32 u2 = u * u;
+	const f32 u3 = u2 * u;
+	return (2.0f * u3 - 3.0f * u2 + 1.0f) * y1 + (u3 - 2.0f * u2 + u) * m1
+	     + (-2.0f * u3 + 3.0f * u2) * y2 + (u3 - u2) * m2;
+}
+
+static PcVisualPose pcSampleVisualPose(AnimData* data, int jointIdx, AnimDataInfo* info, f32 frame)
+{
+	PcVisualPose pose = pcIdentityVisualPose();
+	if (dynamic_cast<AnimDca*>(data)) {
+		f32* scale = reinterpret_cast<f32*>(&pose.s);
+		f32* trans = reinterpret_cast<f32*>(&pose.t);
+		Vector3f r0, r1;
+		f32* rot0 = reinterpret_cast<f32*>(&r0);
+		f32* rot1 = reinterpret_cast<f32*>(&r1);
+		const int base = std::max(0, int(std::floor(frame)));
+		const f32 u = std::max(0.0f, std::min(1.0f, frame - f32(base)));
+		for (int axis = 0; axis < 3; ++axis) {
+			scale[axis] = pcDcaMonotoneValue(data->mScaleDataBlock, info->mScale[axis], frame, 1.0f);
+			trans[axis] = pcDcaMonotoneValue(data->mTranslationDataBlock, info->mTranslation[axis], frame, 0.0f);
+			rot0[axis]  = pcDcaFrameValue(data->mRotateDataBlock, info->mRotation[axis], base, 0.0f);
+			rot1[axis]  = pcDcaFrameValue(data->mRotateDataBlock, info->mRotation[axis], base + 1, 0.0f);
+		}
+		pose.q = pcVisualQuatFromEuler(r0);
+		Quat next = pcVisualQuatFromEuler(r1);
+		pose.q.slerp(next, u, 0);
+		pose.q.normalise();
+	} else {
+		// DCK already owns Hermite curves with fractional time. Convert its
+		// evaluated Euler result once, at the final local-pose boundary.
+		data->extractSRT(info->mSRT, jointIdx, info, frame);
+		pose.s = info->mSRT.s;
+		pose.t = info->mSRT.t;
+		pose.q = pcVisualQuatFromEuler(info->mSRT.r);
+	}
+	return pose;
+}
+
+static PcVisualPose pcBlendVisualPose(const PcVisualPose& a, const PcVisualPose& b, f32 t)
+{
+	PcVisualPose out;
+	out.s.set(a.s.x + (b.s.x - a.s.x) * t, a.s.y + (b.s.y - a.s.y) * t, a.s.z + (b.s.z - a.s.z) * t);
+	out.t.set(a.t.x + (b.t.x - a.t.x) * t, a.t.y + (b.t.y - a.t.y) * t, a.t.z + (b.t.z - a.t.z) * t);
+	out.q = a.q;
+	out.q.slerp(b.q, t, 0);
+	out.q.normalise();
+	return out;
+}
+
+struct PcAnimBlendJoint {
+	AnimData* mData = nullptr;
+	f32 mFrame      = 0.0f;
+	f32 mBlend      = 1.0f; // 1 = fully on the current animation
+	PcVisualPose mShown;
+	PcVisualPose mOutgoing;
+};
+
+struct PcAnimBlendState {
+	std::vector<PcAnimBlendJoint> mJoints;
+	u32 mLastSeen = 0;
+	u32 mLastAdvance = u32(-1);
+};
+
+std::map<std::pair<const void*, const BaseShape*>, PcAnimBlendState> sAnimBlend;
+u32 sAnimBlendLastPrune = 0;
+
+PcAnimBlendState& pcAnimBlendState(const void* owner, const BaseShape* shape, int jointCount)
+{
+	const u32 now = gsys->mTotalFrames;
+	// Owners die without telling us; drop instances not drawn for a while.
+	if (now - sAnimBlendLastPrune > 256) {
+		sAnimBlendLastPrune = now;
+		for (auto it = sAnimBlend.begin(); it != sAnimBlend.end();) {
+			it = (now - it->second.mLastSeen > 30) ? sAnimBlend.erase(it) : std::next(it);
+		}
+	}
+	PcAnimBlendState& state = sAnimBlend[std::make_pair(owner, shape)];
+	if (int(state.mJoints.size()) != jointCount || now - state.mLastSeen > 30) {
+		state.mJoints.assign(jointCount, PcAnimBlendJoint());
+		state.mLastAdvance = u32(-1);
+	}
+	state.mLastSeen = now;
+	return state;
+}
+
+// Samples this joint's animation and returns a render-only local pose. Clip
+// changes and loop discontinuities crossfade in quaternion space; gameplay
+// counters and event keys are never touched.
+PcVisualPose pcAnimVisualJoint(PcAnimBlendJoint& joint, AnimData* data, int jointIdx, AnimDataInfo* info, f32 frame, f32 step)
+{
+	const PcVisualPose target = pcSampleVisualPose(data, jointIdx, info, frame);
+
+	if (joint.mData) {
+		if (data != joint.mData || frame < joint.mFrame - 0.5f) {
+			joint.mOutgoing = joint.mShown;
+			joint.mBlend = 0.0f;
+		}
+	} else {
+		joint.mShown    = target;
+		joint.mOutgoing = target;
+	}
+	joint.mData  = data;
+	joint.mFrame = frame;
+
+	if (joint.mBlend >= 1.0f) {
+		joint.mShown = target;
+		return joint.mShown;
+	}
+	joint.mBlend = std::min(1.0f, joint.mBlend + step);
+	const f32 w = joint.mBlend * joint.mBlend * (3.0f - 2.0f * joint.mBlend);
+	joint.mShown = pcBlendVisualPose(joint.mOutgoing, target, w);
+	return joint.mShown;
+}
+} // namespace
+#endif
+
 void BaseShape::updateAnim(Graphics& gfx, immut Matrix4f& mtx, f32* p3, const void* visualOwner)
 {
 	(void)visualOwner;
 	gsys->mTimer->start("updateAnim", true);
 	gsys->mAnimatedPolygons++;
+#if defined(PIKI_PC_PORT)
+	// Netplay presentation pass: rebuild matrices for the local camera in the
+	// present pool without advancing animation time. The sim pointer is
+	// restored by pc_netplay_present_restore_all_shapes.
+	const bool isPresentation = !pc_render_is_authoritative() && pc_netplay_present_two_pass_active();
+	if (isPresentation) {
+		pc_netplay_present_save_shape_ptr(this, mAnimMatrices);
+		mAnimMatrices = gfx.getPresentMatrices(mAnimMtxCount);
+	} else {
+		mAnimMatrices = gfx.getMatrices(mAnimMtxCount);
+	}
+#else
 	mAnimMatrices = gfx.getMatrices(mAnimMtxCount);
+#endif
 
 	if (mCurrentAnimation->mData) {
 #if defined(PIKI_PC_PORT)
@@ -3428,10 +3673,29 @@ void BaseShape::updateAnim(Graphics& gfx, immut Matrix4f& mtx, f32* p3, const vo
 #else
 		const bool holdAnimation = false;
 #endif
+#if defined(PIKI_PC_PORT)
+		if (!p3 && !holdAnimation && !isPresentation) {
+			mCurrentAnimation->animate(mCurrentAnimation->mAnimSpeed);
+		}
+#else
 		if (!p3 && !holdAnimation) {
 			mCurrentAnimation->animate(mCurrentAnimation->mAnimSpeed);
 		}
+#endif
 
+#if defined(PIKI_PC_PORT)
+		PcAnimBlendState* blend = nullptr;
+		f32 blendStep = 0.0f;
+		if (visualOwner && !isPresentation && !pc_netplay_deterministic() && !pc_speedrun_active()) {
+			blend = &pcAnimBlendState(visualOwner, this, mJointCount);
+			// Some models have more than one draw pass. Advance the transition
+			// once per engine frame, not once per invocation of updateAnim().
+			if (blend->mLastAdvance != gsys->mTotalFrames) {
+				blend->mLastAdvance = gsys->mTotalFrames;
+				blendStep = holdAnimation ? 0.0f : pc_anim_dt(gsys->getFrameTime()) / kAnimBlendTime;
+			}
+		}
+#endif
 		for (int i = 0; i < mJointCount; i++) {
 			AnimData* data = mAnimOverrides[i]->mData;
 			if (!data) {
@@ -3464,6 +3728,37 @@ void BaseShape::updateAnim(Graphics& gfx, immut Matrix4f& mtx, f32* p3, const vo
 		}
 
 		calcWeightedMatrices();
+#if defined(PIKI_PC_PORT)
+		if (blend) {
+			// Preserve the gameplay pose, then build an independent visual pose.
+			// The pointer is restored after renderall(), before the next update.
+			Matrix4f* authoritativeMatrices = mAnimMatrices;
+			pc_netplay_present_save_shape_ptr(this, authoritativeMatrices);
+			mAnimMatrices = gfx.getPresentMatrices(mAnimMtxCount);
+
+			for (int i = 0; i < mJointCount; ++i) {
+				AnimData* data = mAnimOverrides[i]->mData;
+				f32* frame     = p3 ? p3 : &mAnimOverrides[i]->mCurrentFrame;
+				if (data->mTotalFrameCount) {
+					immut Matrix4f* parent = (mJointList[i].mParentIndex != -1)
+					                                ? &mAnimMatrices[mJointList[i].mParentIndex]
+					                                : &mtx;
+					const PcVisualPose pose = pcAnimVisualJoint(blend->mJoints[i], data, data->mAnimJointIndices[i],
+					                                                  &data->mAnimInfo[i], *frame, blendStep);
+					Matrix4f local;
+					local.makeVQS(pose.t, pose.q, pose.s);
+					parent->multiplyTo(local, mAnimMatrices[i]);
+				} else {
+#if defined(WIN32)
+					mtx.multiplyTo(mJointList[i].mAnimMatrix, mAnimMatrices[i]);
+#else
+					MTXConcat(mtx.mMtx, mJointList[i].mAnimMatrix.mMtx, mAnimMatrices[i].mMtx);
+#endif
+				}
+			}
+			calcWeightedMatrices();
+		}
+#endif
 	} else {
 		Joint* joint = &mJointList[0];
 		for (int i = 0; i < mJointCount; i++) {
@@ -3480,6 +3775,22 @@ void BaseShape::updateAnim(Graphics& gfx, immut Matrix4f& mtx, f32* p3, const vo
 
 	gsys->mTimer->stop("updateAnim");
 }
+
+#if defined(PIKI_PC_PORT)
+// Puts back every sim matrix pointer the presentation pass redirected.
+void pc_netplay_present_restore_all_shapes()
+{
+	const size_t n = pc_netplay_present_saved_count();
+	for (size_t i = 0; i < n; ++i) {
+		void* saved      = nullptr;
+		BaseShape* shape = static_cast<BaseShape*>(pc_netplay_present_saved_shape_at(i, &saved));
+		if (shape) {
+			shape->mAnimMatrices = static_cast<Matrix4f*>(saved);
+		}
+	}
+	pc_netplay_present_clear_saved();
+}
+#endif
 
 /**
  * @brief Likely fabricated static inline function useful for DOL-exclusive code in `BaseShape::calcWeightedMatrices`.

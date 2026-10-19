@@ -19,11 +19,50 @@ import org.opennectar.TexturePack;
  * libnectar.so exporta SDL_main, que es el main() de pc_port/pc_main.cpp.
  */
 public class NectarActivity extends SDLActivity {
+    /** Biblioteca del juego: nectar, nectar-pal (Pikmin), nectar2, nectar2-pal (Pikmin 2). */
+    public static final String EXTRA_LIBRARY = "org.opennectar.LIBRARY";
+    /** Carpeta del juego (la que tiene assets/ y pikmin_settings.conf). */
+    public static final String EXTRA_GAME_DIR = "org.opennectar.GAME_DIR";
+    /** Argumentos de línea de órdenes del juego (el menú online los pone al reiniciar). */
+    public static final String EXTRA_ARGS = "org.opennectar.ARGS";
+
+    @Override
+    protected String[] getArguments() {
+        String[] args = getIntent() != null ? getIntent().getStringArrayExtra(EXTRA_ARGS) : null;
+        return args != null ? args : new String[0];
+    }
+
+    /** Lo llama pc_online_android_toast(): un aviso corto sobre el juego
+     *  (p. ej. "código de respuesta copiado" mientras espera al anfitrión). */
+    public void showToast(final String text) {
+        runOnUiThread(() -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show());
+    }
+
+    /** Lo llama pc_online_relaunch() (menú online del título): vuelve a abrir
+     *  el juego con estos argumentos, en un proceso nuevo. */
+    public void restartWithArguments(final String[] args) {
+        runOnUiThread(() -> {
+            android.content.Intent intent = new android.content.Intent(this, NectarActivity.class);
+            if (getIntent() != null && getIntent().getExtras() != null) intent.putExtras(getIntent().getExtras());
+            intent.putExtra(EXTRA_ARGS, args);
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                | android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK);
+            startActivity(intent);
+            android.os.Process.killProcess(android.os.Process.myPid());
+        });
+    }
+
+    /** La que pide el launcher; sin ella, la de siempre de Pikmin 1. */
+    private java.io.File gameDirectory() {
+        String dir = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_DIR) : null;
+        return dir != null ? new java.io.File(dir) : Installer.gameDir(this);
+    }
+
     @Override
     public void loadLibraries() {
         // Antes de cargar el juego: sus inicializadores estáticos leen
         // pikmin_settings.conf del directorio actual (idioma del disco PAL).
-        Installer.nativeChdir(Installer.gameDir(this).getAbsolutePath());
+        Installer.nativeChdir(gameDirectory().getAbsolutePath());
         super.loadLibraries();
     }
 
@@ -35,15 +74,22 @@ public class NectarActivity extends SDLActivity {
     /** "nectar" (USA) o "nectar-pal" (Europa), según el disco instalado: el
      *  instalador lo deja en assets/.pikmin-build. */
     private String gameLibrary() {
-        java.io.File marker = new java.io.File(Installer.gameDir(this), "assets/.pikmin-build");
+        String requested = getIntent() != null ? getIntent().getStringExtra(EXTRA_LIBRARY) : null;
+        if (isGameLibrary(requested)) return requested;
+        java.io.File marker = new java.io.File(gameDirectory(), "assets/.pikmin-build");
         try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.FileReader(marker))) {
             String line = in.readLine();
             if (line != null) {
                 line = line.trim();
-                if (line.equals("nectar") || line.equals("nectar-pal")) return line;
+                if (isGameLibrary(line)) return line;
             }
         } catch (java.io.IOException ignored) {}
         return "nectar";
+    }
+
+    private static boolean isGameLibrary(String name) {
+        return name != null && (name.equals("nectar") || name.equals("nectar-pal")
+                || name.equals("nectar2") || name.equals("nectar2-pal"));
     }
 
     @Override
@@ -53,6 +99,12 @@ public class NectarActivity extends SDLActivity {
         // reiniciar la app; necesita la actividad. Se registra aquí, después
         // de super.onCreate(): SDK libnectar*.so ya está cargada.
         TexturePack.nativeRegisterActivity(this);
+        // Online co-op: the router to ask for a forwarded port.
+        NetGateway.publish(this);
+        // Una partida en red (el menú online relanza con argumentos): sin el
+        // ahorro de energía de la Wi-Fi, que retiene los paquetes entrantes
+        // 100-300 ms y deja el lockstep a cámara lenta.
+        if (getArguments().length > 0) acquireLowLatencyWifi();
         // Dibujar también bajo el recorte de la cámara (notch) en vez de dejar
         // una franja negra.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -137,8 +189,24 @@ public class NectarActivity extends SDLActivity {
         }
     }
 
+    private android.net.wifi.WifiManager.WifiLock wifiLock;
+
+    private void acquireLowLatencyWifi() {
+        try {
+            android.net.wifi.WifiManager wifi =
+                (android.net.wifi.WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+            if (wifi == null) return;
+            wifiLock = wifi.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "OpenNectar:netplay");
+            wifiLock.setReferenceCounted(false);
+            wifiLock.acquire();
+        } catch (RuntimeException e) {
+            wifiLock = null;
+        }
+    }
+
     @Override
     protected void onDestroy() {
+        if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
         TexturePack.nativeUnregisterActivity();
         super.onDestroy();
     }

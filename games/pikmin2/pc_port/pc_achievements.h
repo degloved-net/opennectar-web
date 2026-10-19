@@ -39,7 +39,6 @@ enum PcAchievement {
 struct PcAchievementInfo {
 	const char* title;
 	const char* description;
-	int points;
 };
 
 const PcAchievementInfo& pc_achievement_info(int id);
@@ -50,8 +49,6 @@ const char* pc_achievement_icon(int id);
 void pc_achievements_load(void);
 bool pc_achievement_unlocked(int id);
 int pc_achievements_unlocked_count(void);
-int pc_achievements_points(void);
-int pc_achievements_total_points(void);
 
 /// Desbloquea si se puede (no con trucos) y avisa en pantalla.
 void pc_achievement_unlock(int id);

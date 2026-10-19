@@ -1,12 +1,32 @@
-# Open Nectar — Pikmin Native PC/Android Port
+# Open Nectar — Pikmin and Pikmin 2 Native PC/Android Ports
 
 <img width="2172" height="476" alt="opennectarlogo (1)" src="https://github.com/user-attachments/assets/71283101-1be5-4ca4-9b16-488320343cc8" />
 
-Native, experimental, and open-source port of *Pikmin* (GameCube, 2001) for **Linux, Windows and Android**. Runs the game code directly on the host system and translates GX to OpenGL; does not use Dolphin or any emulator.
+Native, open-source ports of *Pikmin* (GameCube, 2001) and *Pikmin 2* (GameCube, 2004) for **Linux, Windows and Android**, and macOS from source. They run the games' code directly on the host system and translate GX to OpenGL; no Dolphin or any other emulator is involved. One launcher and one Android APK carry both games.
 
-This project builds upon the decompilation by [projectPiki/pikmin](https://github.com/projectPiki/pikmin) and adds a native PC port layer.
+This project builds upon the decompilations by [projectPiki/pikmin](https://github.com/projectPiki/pikmin) and [projectPiki/pikmin2](https://github.com/projectPiki/pikmin2) and adds a native port layer.
 
 ## Project Status
+
+### Pikmin 2
+
+**Playable from start to finish**, natively, on Linux, Windows and Android,
+from the USA (`GPVE01`) and European (`GPVP01`) discs:
+
+- 30, 60 and 120 FPS, or your monitor's refresh rate: gameplay keeps the
+  original timing while animations and cutscenes are interpolated
+- The original audio engine, with the console's DSP levels
+- Console-accurate details: see-through helmet glass with reflections and
+  indirect texture effects (heat haze, geysers, cave holes)
+- F1 settings menu drawn with Pikmin 2's own assets
+- **Randomizer**, **Speedrun mode** with timer and splits, **Hard** and
+  **Permadeath** rules, and a captain selector
+- Optional mods shared with Pikmin 1: swarm at the cursor, Better
+  Pathfinding, Blues Only In Water, Lock-On and Charge, Eternal Night
+- Texture packs, with a one-click HD pack download in the launcher
+- Touch controls, touch menus and button icons on Android
+
+### Pikmin 1
 
 **Functional:**
 - Native builds for Linux x86-64 and Windows x86-64, Android from the same source
@@ -23,7 +43,9 @@ This project builds upon the decompilation by [projectPiki/pikmin](https://githu
   3D view culls to the same shape, so nothing pops in and out at the sides
 - Post-processing: antialiasing, restored fog, bloom, ambient occlusion, depth
   of field, texture filtering and colour grading — every one of them optional
-- Custom texture packs
+- Custom texture packs, with a one-click HD pack download in the launcher
+- **Randomizer**: ship parts, enemies and bosses, with share codes
+- **Nectar Map Maker**: an editor for VS arenas, opened from the launcher
 - **Local co-op**: Olimar and Louie, two controllers, split screen that can
   merge into a single camera; Louie also playable in single player
 - HD character models from Pikmin 3 rips
@@ -31,6 +53,9 @@ This project builds upon the decompilation by [projectPiki/pikmin](https://githu
   both optional
 - **Launcher**: installs, updates itself from GitHub releases, and exposes every
   F1 setting, texture packs and HD models outside the game
+- **Speedrun mode**: pure GameCube rules, a real-time timer, per-day splits
+  against your best run, categories, LiveSplit support and an input display
+- **Skippable cutscenes**: Start skips any cutscene in normal play
 
 **In development:**
 - Some minor graphical differences
@@ -55,9 +80,11 @@ SteamOS. SDL2 and the C++ runtime are built into the executables; the system
 only has to provide an OpenGL driver (any Intel/AMD/NVIDIA one) and, for the
 file pickers, `zenity` or `kdialog`, which GNOME and KDE already have.
 
-Press **Install** under the Pikmin cover, choose your disc image and a folder.
-That folder ends up with the game data, your saves and settings, and two
-programs: `nectar` (the game, for your disc's region) and `nectar-launcher`.
+Press **Install** under a game's cover, choose your disc image and a folder.
+That folder ends up with the game data, your saves and settings, the
+launcher (`nectar-launcher`), Pikmin 1 (`nectar`, for your disc's region),
+the map editor and, in `pikmin2/`, Pikmin 2. Install the other game from the
+same launcher with its own disc.
 Open that launcher to play from then on. `packaging/linux/README.txt` in the
 download covers troubleshooting.
 
@@ -177,13 +204,14 @@ copy the folder). To remove it, delete it.
 1. Download `open_nectar_<version>.apk` from [Releases](../../releases) and
    open it on the device (from the browser's downloads or the Files app).
    Android asks once to allow installs from that app.
-2. Open Nectar. The first screen asks for your disc image: pick it with the
-   system file picker from wherever it is (internal storage, SD card, USB).
-3. It verifies the image, extracts the assets into the app's private storage
-   and starts the game. From then on the app opens straight into the game.
+2. Open Nectar. The launcher shows both games: press **Install** under a
+   cover and pick that game's disc image with the system file picker, from
+   wherever it is (internal storage, SD card, USB).
+3. It verifies the image and extracts the assets into the app's private
+   storage. Tap the cover to play.
 
-One APK carries both the USA Rev. 1 and European builds; the installer picks
-the one your disc needs. Touch controls are drawn on screen (every button
+One APK carries Pikmin 1 and Pikmin 2, each in its USA and European builds;
+the installer picks the one your disc needs. Touch controls are drawn on screen (every button
 the game mentions appears in the layout, and the **layout** button lets you
 move and resize them); Bluetooth and USB controllers work too. The
 **settings** button opens the same menu as F1 on desktop.
@@ -202,6 +230,8 @@ Supported discs:
 |---|---|---|
 | Pikmin USA Rev 1 | `GPIE01`, revision 1 | English |
 | Pikmin Europe | `GPIP01`, revision 0 | English, French, German, Spanish, Italian |
+| Pikmin 2 USA | `GPVE01` | English |
+| Pikmin 2 Europe | `GPVP01` | English, French, German, Spanish, Italian |
 
 Each release needs its own executable — the game's code is compiled here, and it
 differs between releases — so the package carries both and the installer picks
@@ -213,14 +243,17 @@ or in the game's own options, without reinstalling.
 
 After installing, the launcher in the game's folder is the way in:
 
-- **Games** — click the cover to play. The button underneath updates the game.
+- **Games** — click a cover to play. Under each cover: **Install** until the
+  game is installed, then **HD textures** (downloads the community HD texture
+  pack: 4K or 1080p on PC, the mobile pack on Android) and, for Pikmin 1,
+  **Map editor**. A single **Update** below both games updates everything.
 - **Settings** — every option of the in-game F1 menu, plus texture packs, HD
   models and language, saved straight to `pikmin_settings.conf`.
 - **Move Install** — moves the whole installation, saves included, to another
   folder or drive.
 
-When a new release is published, the launcher says so and **Update** downloads
-and installs it by itself: saves, settings, texture packs and the extracted
+When a new release is published, the launcher says so, **What's new** shows that
+release's notes, and **Update** downloads and installs it by itself: saves, settings, texture packs and the extracted
 game data stay as they are. A newly downloaded package can also update an
 existing installation: open its launcher, press **Update** and choose the
 installed folder. The disc image is not needed either way.
@@ -252,27 +285,46 @@ sudo apt install build-essential cmake pkg-config libsdl2-dev libgl1-mesa-dev ze
 # Arch Linux
 sudo pacman -S base-devel cmake sdl2 mesa zenity
 
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-ctest --test-dir build --output-on-failure
+# Both games and the launcher
+scripts/build-fusion.sh
+
+# Or one game at a time
+cmake -S games/pikmin1 -B build/pikmin1 -DCMAKE_BUILD_TYPE=Release
+cmake --build build/pikmin1 -j"$(nproc)"
+cmake -S games/pikmin2 -B build/pikmin2 -DCMAKE_BUILD_TYPE=Release
+cmake --build build/pikmin2 --target pikmin2_pc -j"$(nproc)"
 ```
+
+### macOS
+
+```sh
+brew install cmake sdl2-compat
+cmake -S games/pikmin1 -B build/pikmin1 -DCMAKE_BUILD_TYPE=Release
+cmake --build build/pikmin1 --target pikmin_pc pikmin_launcher -j"$(sysctl -n hw.ncpu)"
+cmake -S games/pikmin2 -B build/pikmin2 -DCMAKE_BUILD_TYPE=Release
+cmake --build build/pikmin2 --target pikmin2_pc -j"$(sysctl -n hw.ncpu)"
+```
+
+There are no ready-made macOS packages: macOS players build from source.
+
+The compiler comes from the Xcode command-line tools (`xcode-select --install`). The port requests an OpenGL 4.1 core context, the newest core profile macOS provides.
 
 ### Choosing which release to build
 
 The game's own code is compiled here, and it is conditional on which retail
 release it came from in some four hundred places, so this is a build-time
-choice rather than a setting. It defaults to USA Rev 1:
+choice rather than a setting. Pikmin 1 defaults to USA Rev 1 and Pikmin 2 to
+Europe:
 
 ```sh
-cmake -S . -B build-pal -DPIKMIN_GAME_VERSION=VERSION_GPIP01_00
-cmake --build build-pal -j"$(nproc)"
+cmake -S games/pikmin1 -B build/pikmin1-pal -DPIKMIN_GAME_VERSION=VERSION_GPIP01_00
+cmake -S games/pikmin2 -B build/pikmin2-usa -DPIKMIN_GAME_VERSION=VERSION_GPVE01
 ```
 
-The release packages carry both, and the launcher installs whichever the disc
-asks for, named `nectar`. `packaging/linux/build-release.sh` and
-`packaging/windows/package-standalone.sh` each build both executables; see
-[docs/COMPILAR_RELEASES.md](docs/COMPILAR_RELEASES.md) for every release
-package (Linux tar.gz and AppImage, Windows zip, Android APK).
+The release packages carry every region, and the launcher installs whichever
+the disc asks for. `scripts/release-linux.sh` (tar.gz and AppImage) and
+`scripts/release-windows.sh` (zip) build them; the Android APK is
+`./gradlew assembleRelease` in `games/pikmin1/android`.
 
 ### Windows (cross-compiled from Linux)
 
@@ -345,20 +397,21 @@ the README that goes with it.
 
 ```
 .
-├── src/           # Decompiled game code from original
-├── include/       # Game headers
-├── pc_port/       # Native port layer (audio, video, input)
-├── cmake/         # Toolchain files
-├── config/        # Build configuration per region
-├── packaging/     # Packaging scripts
-├── third_party/   # Third-party code and its licences
-├── tools/         # Development utilities
-└── CMakeLists.txt
+├── games/
+│   ├── pikmin1/   # Pikmin: decompiled code (src/, include/), port layer
+│   │              # (pc_port/), launcher, Android project, packaging
+│   └── pikmin2/   # Pikmin 2: decompilation (pikmin2-decomp/) and port layer
+│                  # (pc_port/)
+├── libs/          # Code shared by both games
+├── tools/         # Map maker and development utilities
+├── scripts/       # Build and release scripts
+├── tests/
+└── versions.json  # Release version
 ```
 
-- `src/` and `include/` contain the decompiled code from the original game
-- `pc_port/` is the native layer that translates GX→OpenGL, handles audio/input
-- Port modifications go in `pc_port/`, not in `src/`
+- Each game's decompiled code stays as close to the original as possible
+- `pc_port/` is the native layer that translates GX→OpenGL and handles audio
+  and input; port changes go there
 
 ## Technical architecture
 
@@ -390,7 +443,8 @@ This port includes significant improvements over the original GameCube game, des
 | Z — change camera | Z |
 | L — rotate camera left | Q |
 | R — rotate camera right | E |
-| Start — pause | Enter |
+| Start — pause / skip a cutscene | Enter |
+| Bomb (with Bomb Control on) | B |
 | Port settings menu | F1 |
 | Switch control mode | F2 |
 | Photo mode | F3 |
@@ -450,9 +504,12 @@ disc. It takes effect the next time you start the game.
   - `Pikmin Colour`: cycles which colour to throw next, through the colours you actually have with you. With one colour it does nothing, with two it alternates, with three it cycles. If the chosen colour is out of reach, the captain still grabs the nearest Pikmin
   - `Camera Zoom`: pulls the camera between 0.45× and 2.50× of its normal distance
 - **Pikmin limit**: how many Pikmin may be on the field at once, from 50 up to 999. The original is 100. The Onion, the field, the matrix pool and the shape cache are all sized from this number, so it applies when a stage loads rather than mid-day. Tested to 945 Pikmin on screen; high values do cost frame rate, and how much depends on your machine
-- **Day length**: 5 to 30 minutes of play per in-game day, 10 being the original. This stretches the game's own clock, so nothing moves faster or slower — sunset simply arrives sooner or later
+- **Day length**: 5 to 30 minutes of play per in-game day, or Infinite. The original 13.5 minutes is the default. This stretches the game's own clock, so nothing moves faster or slower — sunset simply arrives sooner or later. Infinite never applies to day 1, whose tutorial ends at sunset, or to day 30, whose sunset ends the game
+- **Bomb Control**: a Bomb button (B on the keyboard; assign one in Gamepad Bindings). A Yellow Pikmin with a bomb rock throws it at the cursor, or drops it lit at its feet when the cursor is too close. Ones already thrown and waiting go first
+- **Hide Olimar's Texts**: no text boxes while you play (the first Pikmin, every ship part, tips). The cutscene that goes with each text is skipped too, as if you had closed it at once. The ending texts still show
+- **Enemy health** (Cheats): a share of the original, down to Insta Kill. It applies to bosses as well
 
-**Permadeath** is not in this menu, because it belongs to a save file rather than to the port. You choose it once, when you create the file, and the file screen marks the files that carry it. Lose Olimar and the run ends and that save is erased — through the game's own delete, so the slot ends up exactly as a manually deleted one does. A copy of a permadeath file is a permadeath file.
+**Permadeath** is not in this menu, because it belongs to a save file rather than to the port. You choose it once, when you create the file, and the file screen marks the files that carry it. Lose Olimar and the run ends and that save is erased — through the game's own delete, so the slot ends up exactly as a manually deleted one does — and the file screen tells you so. A copy of a permadeath file is a permadeath file.
 
 **Photo mode** is on **F3**. It freezes the world and hands you the camera:
 
@@ -471,6 +528,31 @@ disc. It takes effect the next time you start the game.
 - **Invert sticks**: Options for main stick and C-stick
 - **Hold to Pluck / Whistle Pluck**: keep the button held, or hold the whistle
   over sprouts, to pluck them one after another (both optional)
+
+### Speedrun mode
+
+**Speedrun** sits on the title screen under Start. It opens its own menu:
+**Start Run**, **Best Times** and **How It Works** (shown by itself the first
+time).
+
+- **Vanilla rules.** For the run, every cheat, mod and port option that changes
+  play returns its original value: day length, health, speeds, Pikmin limit,
+  30 FPS simulation, classic controls (cursor on the stick, no gyro), no Quick
+  Grab, Lock-On, free camera, cutscene skipping and so on. Graphics, texture
+  packs and button mapping stay as they are. Leaving Speedrun brings your own
+  settings back.
+- **Timing as on speedrun.com** (All Parts): real time, loads and cutscenes
+  included, from the new game to the Secret Safe. Start Run goes straight into
+  a new game with Olimar; there is no file select.
+- **Splits**: one per day, named after the area and visit ("Forest of Hope 2"),
+  shown under the timer with the difference to your best run — green ahead,
+  red behind, gold for your best segment ever.
+- **Best Times**: personal best with its splits, Sum of Best and the last five
+  runs. Records are saved when a run finishes.
+- **Input display**: under the timer, the controller in use (Xbox, PlayStation
+  or Switch labels) or a full keyboard and mouse, lighting up what you press.
+- Speedrun has its own memory card and records in `save/speedrun/`, apart from
+  your normal saves.
 
 ### Control modes
 
@@ -502,6 +584,8 @@ The port supports any SDL2-compatible controller:
 - **Mouse control**: Precision impossible on GameCube, including wheel shortcuts
 - **Improved Pikmin AI**: Chain tasks automatically (optional)
 - **Faster plucking**: hold the button or the whistle over sprouts (optional)
+- **Skippable cutscenes**: Start skips any cutscene, including arriving at an area
+- **Speedrun mode**: vanilla rules, timer, splits and best times built in
 - **Superior performance**: TEV specialization generates optimal shaders per material
 - **No emulation**: Native x86-64 code, no Dolphin overhead
 - **Instant saves**: Save files are accessible on disk
@@ -575,9 +659,9 @@ Corrections, documentation, tests, and structural improvements are accepted. Bef
 3. Test in-game for changes that affect gameplay
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-ctest --test-dir build --output-on-failure
+cmake -S games/pikmin1 -B build/pikmin1 -DCMAKE_BUILD_TYPE=Release
+cmake --build build/pikmin1 -j"$(nproc)"
+ctest --test-dir build/pikmin1 --output-on-failure
 ```
 
 ## License
@@ -588,6 +672,7 @@ The code is offered under [CC0 1.0](LICENSE.MD). This license does not grant rig
 
 - Original decompilation: [projectPiki/pikmin](https://github.com/projectPiki/pikmin)
 - Software DSP and sound bank loader: [NextOs-Ports/pikmin-nextos](https://github.com/NextOs-Ports/pikmin-nextos), adapted here from SDL3 to SDL2. Licence and attribution in [third_party/nextos-audio/](third_party/nextos-audio/)
+- Netplay groundwork (not enabled in any build): [GekkoNet](https://github.com/HeatXD/GekkoNet) (BSD-2-Clause) and [libjuice](https://github.com/paullouisageneau/libjuice) (MPL-2.0). Licences and pinned versions in [games/pikmin1/third_party/NETPLAY_VENDOR.md](games/pikmin1/third_party/NETPLAY_VENDOR.md)
 - Native PC port: Open Nectar Community
 
 ## Links

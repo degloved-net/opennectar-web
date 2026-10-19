@@ -335,6 +335,9 @@ public:
 	SpiderGenHalfDeadCallBackJoint* mHalfDeadCallBackJoints; // _680
 	SpiderGenPerishCallBack* mPerishCallBacks;               // _684
 	SpiderGenRippleCallBack* mRippleCallBacks;               // _688
+#if defined(PIKI_PC_PORT)
+	BossPresentJoints mPresentJoints; // world-space joints for the netplay presentation pass
+#endif
 };
 
 /**

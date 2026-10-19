@@ -27,6 +27,11 @@ constexpr const char* kLatestReleaseApi
 // queda como alternativa.
 #ifdef _WIN32
 const char* const kAssetNames[] = { "nectar-windows.zip" };
+#elif defined(__APPLE__)
+const char* const kAssetNames[] = { "nectar-macos.tar.gz" };
+#elif defined(__ANDROID__)
+// Android: el .apk del release, se llame como se llame (open_nectar_0.9.apk).
+const char* const kAssetNames[] = { ".apk" };
 #else
 const char* const kAssetNames[] = { "nectar-linux.tar.gz", "Open_Nectar-x86_64.AppImage" };
 #endif
@@ -87,6 +92,22 @@ bool findPackage(const fs::path& root, const std::string& launcherName, fs::path
 
 const char* currentVersion() { return OPEN_NECTAR_VERSION; }
 
+std::vector<TexturePackDownload> texturePackDownloads(int game)
+{
+#ifdef __ANDROID__
+    // Android: PNG, el formato que el móvil carga sin problemas.
+    if (game == 0) return { { "HD", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1870dA11T9FpuLQDnI3axoCJ_Eh5ptgWP", 925049459ull } };
+    return { { "HD", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1blzsLSFBr617h-gP7lvp_7HqsLRyQWzl", 1072944206ull } };
+#else
+    if (game == 0) return { { "4K", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1leAGZmK1Ay_W3KwtAyyyBWZzyw5Wy3Db", 1240690969ull },
+                             { "1080p", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1eZQmHBen1EuZcIUzfAEZUJl7TeL93ClX", 560393581ull } };
+    return { { "4K", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1hsm2XnnZ0e8U-Ikjuxt5NP8xc-1boIEF", 3068646745ull },
+             { "1080p", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1gcjtuP09gGoFxs41iNqfiMsaZjE4ddqS", 1116177778ull } };
+#endif
+}
+
+const char* texturePackFolder(int game) { return game == 0 ? "GPI" : "GPV"; }
+
 bool isNewerVersion(const std::string& candidate, const std::string& current)
 {
     std::vector<long> a = versionParts(candidate), b = versionParts(current);
@@ -117,8 +138,14 @@ bool fetchLatestRelease(ReleaseInfo& release, std::string& error)
     if (const Json* assets = root.get("assets"); assets && assets->type == Json::Type::Array) {
         for (const char* wanted : kAssetNames) {
             for (const Json& asset : assets->items) {
-                if (release.assetUrl.empty() && asset.str("name") == wanted) {
-                    release.assetName = wanted;
+#ifdef __ANDROID__
+                const std::string name = asset.str("name");
+                const bool match = name.size() > 4 && name.compare(name.size() - 4, 4, wanted) == 0;
+#else
+                const bool match = asset.str("name") == wanted;
+#endif
+                if (release.assetUrl.empty() && match) {
+                    release.assetName = asset.str("name");
                     release.assetUrl = asset.str("browser_download_url");
                 }
             }
@@ -187,6 +214,19 @@ bool downloadRelease(const ReleaseInfo& release, const std::string& launcherName
         return false;
     }
     return true;
+}
+
+bool cachedRelease(const std::string& launcherName, fs::path& packageDirectory)
+{
+    std::error_code ec;
+    const fs::path extracted = platform::cacheDirectory() / "update" / "extracted";
+    return fs::is_directory(extracted, ec) && findPackage(extracted, launcherName, packageDirectory);
+}
+
+void forgetCachedRelease()
+{
+    std::error_code ec;
+    fs::remove_all(platform::cacheDirectory() / "update", ec);
 }
 
 } // namespace launcher

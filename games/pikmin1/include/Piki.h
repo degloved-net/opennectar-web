@@ -121,7 +121,7 @@ public:
 	virtual void offwallCallback(DynCollObject*);              // _B8
 	virtual void stickToCallback(Creature*);                   // _C4
 #if defined(PIKI_PC_PORT)
-	bool pcStepOutOfWater();
+	bool pcStepOutOfWater(int state = -1);
 	void pcChargeAt(Creature* target);
 	Vector3f mPcLastDryPos;
 	bool mPcHasDryPos = false;
@@ -290,6 +290,7 @@ public:
 	int mPlayerId;                        // _43C
 #if defined(PIKI_PC_PORT)
 	bool mPcSieging = false; ///< VS: golpeando el cohete rival (acción suspendida)
+	bool mPcWhistleNuki = false; ///< Whistle Pluck mod: this nuki unlocks its colour when it ends
 #endif
 	Vector3f mLastAnimPosition;           // _440
 	Vector3f mShadowPos;                  // _44C

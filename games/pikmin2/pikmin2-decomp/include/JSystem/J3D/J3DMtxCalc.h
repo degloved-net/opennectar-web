@@ -130,6 +130,9 @@ struct J3DMtxCalcAnimationAdaptorDefault {
 		J3DTransformInfo v1;
 		if (p1->getAnmTransform() != nullptr) {
 			p1->getAnmTransform()->getTransform(J3DMtxCalc::mJoint->getJntNo(), &v1);
+#ifdef PIKI_PC_PORT
+			pcJ3DSmoothTransform(p1->getAnmTransform(), J3DMtxCalc::mJoint->getJntNo(), &v1);
+#endif
 			pInfo = &v1;
 		} else {
 			pInfo = &J3DMtxCalc::mJoint->mTransformInfo;

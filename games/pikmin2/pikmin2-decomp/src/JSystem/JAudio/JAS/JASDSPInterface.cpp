@@ -106,8 +106,10 @@ void syncFrame(u32 p1, u32 p2, u32 p3)
 #endif
 {
 #ifdef PIKI_PC_PORT
-	pc_p2_audio_render(CH_BUF, reinterpret_cast<s16*>((uintptr_t)p2),
-	                    (p3 - p2) / sizeof(s16));
+	// El DSP por software mezcla subframe a subframe, intercalado con las
+	// actualizaciones de la CPU (ver finishDSPFrame): aquí solo se le dice
+	// dónde va el frame.
+	pc_p2_audio_begin_frame(CH_BUF, reinterpret_cast<s16*>((uintptr_t)p2), (p3 - p2) / sizeof(s16), p1);
 #else
 	DsyncFrame2(p1, p2, p3);
 #endif
@@ -274,6 +276,16 @@ bool setFXLine(u8 lineIndex, s16* audioBuffer, FxlineConfig_* config)
 	}
 
 	DCFlushRange(&fx, sizeof(fx));
+#ifdef PIKI_PC_PORT
+	{
+		// El DSP por software lleva su propio buffer circular; solo necesita la
+		// configuración de la línea.
+		const u16 dest[2]   = { fx._08, fx._0C };
+		const s16 volume[2] = { (s16)fx._0A, (s16)fx._0E };
+		pc_p2_audio_set_fx_line(lineIndex, fx.mBufferStatus != 0 && fx.mAudioBuffer != nullptr, fx._02, dest, volume,
+		                        reinterpret_cast<const s16*>(fx._10));
+	}
+#endif
 	OSRestoreInterrupts(enable);
 	return true;
 }

@@ -13,50 +13,50 @@ namespace {
 
 // Títulos: set de RetroAchievements de Pikmin (GameCube), de SlashTangent.
 const PcAchievementInfo kInfo[PC_ACH_COUNT] = {
-	{ "It Has a Strange Allure", "Recover the Nova Blaster.", 5, UFOID_NovaBlaster },
-	{ "Eco-Friendly Exhaust", "Recover the Anti-Dioxin Filter.", 5, UFOID_AntiDioxinFilter },
-	{ "Straighten Up and Fly Right", "Recover the Omega Stabilizer.", 10, UFOID_OmegaStabilizer },
-	{ "Swim Gracefully Through the Sea of Stars... Like a Dolphin", "Recover the Gravity Jumper.", 5, UFOID_GravityJumper },
-	{ "HAL-9000", "Recover the Analog Computer.", 5, UFOID_AnalogComputer },
-	{ "Space Pirate Protection", "Recover the Guard Satellite.", 10, UFOID_GuardSatellite },
-	{ "A Daughter's Gift", "Recover the Libra.", 5, UFOID_Libra },
-	{ "Robot in Disguise", "Recover the Repair-type Bolt.", 5, UFOID_RepairTypeBolt },
-	{ "A Very Expensive Noisemaker", "Recover the Gluon Drive.", 5, UFOID_GluonDrive },
-	{ "I'm 40% Zirconium!", "Recover the Zirconium Rotor.", 5, UFOID_ZirconiumRotor },
-	{ "S.O.S. Signal Emitter", "Recover the Interstellar Radio.", 10, UFOID_InterstellarRadio },
-	{ "A Throne Fit for an Emperor", "Recover the Pilot's Seat.", 5, UFOID_PilotSeat },
-	{ "Easy on the Eyes AND the Budget", "Recover the #2 Ionium Jet.", 5, UFOID_IoniumJet2 },
-	{ "Aerodynamically Designed", "Recover the Bowsprit.", 10, UFOID_Bowsprit },
-	{ "Space-Time Continuum Rubber Band", "Recover the Chronos Reactor.", 5, UFOID_ChronosReactor },
-	{ "Always Be Prepared", "Recover the Space Float.", 5, UFOID_SpaceFloat },
-	{ "Lower Lumbar Support", "Recover the Massage Machine.", 5, UFOID_MassageMachine },
-	{ "Tanning Rays", "Recover the UV Lamp.", 5, UFOID_UVLamp },
-	{ "My Most Prized Possession!", "Recover the Secret Safe.", 10, UFOID_SecretSafe },
-	{ "Its Shape Is Similar to the Pikpik Brand Carrots I Love So Much", "Unlock the Red Pikmin.", 1, 0 },
-	{ "The Color Is Different, but It Seems to Be a Pikmin Nonetheless", "Unlock the Yellow Pikmin.", 5, 0 },
-	{ "Near This One's Cheeks Is What Appears to Be a Set of Gills", "Unlock the Blue Pikmin.", 5, 0 },
-	{ "Fate Has Smiled Upon Me!", "Recover the Main Engine.", 3, UFOID_MainEngine },
-	{ "Those Instant Space Noodles Will Taste Better When Heated Up", "Recover the Positron Generator.", 5, UFOID_PositronGenerator },
-	{ "This Thing Chugs Right Along at Its Own Pace", "Recover the Automatic Gear.", 5, UFOID_AutomaticGear },
-	{ "This Puts Out a Slightly Odoriferous Exhaust", "Recover the #1 Ionium Jet.", 5, UFOID_IoniumJet1 },
-	{ "With This, I'll Be Able to See All Nearby Ship Parts", "Recover the Whimsical Radar.", 5, UFOID_WhimsicalRadar },
-	{ "Exactly What Makes It So Extraordinary Is a Secret", "Recover the Extraordinary Bolt.", 5, UFOID_ExtraordinaryBolt },
-	{ "My Son Gave This to Me as a Present", "Recover the Sagittarius.", 5, UFOID_Sagittarius },
-	{ "I Won't Have to Worry About Saving Electricity Anymore!", "Recover the Eternal Fuel Dynamo.", 5, UFOID_EternalFuelDynamo },
-	{ "It's Smooth Sailing With This in Place... Usually", "Recover the Shock Absorber.", 5, UFOID_ShockAbsorber },
-	{ "I Don't Actually Know What It's For", "Recover the Geiger Counter.", 5, UFOID_GeigerCounter },
-	{ "I'll Sleep Like a Baby Once I Get This Back to the Ship!", "Recover the Radiation Canopy.", 5, UFOID_RadiationCanopy },
-	{ "Pikmar", "Get the bad ending.", 5, 0 },
-	{ "Having a GOOd Time", "Defeat Goolix.", 10, 0 },
-	{ "I Have No Choice but to Try to Blast Off", "Collect all 25 critical ship parts, but not all 30, and get the normal ending.", 10, 0 },
-	{ "Now I Can Return Home to Hocotate!", "Collect all 30 ship parts and get the best ending.", 25, 0 },
-	{ "Allergic to Blue", "Collect all ship parts in the Forest of Hope before unlocking the Blue Pikmin.", 10, 0 },
-	{ "Hocotate Speed Demon", "Collect all 30 ship parts and beat the game in 12 days or less.", 50, 0 },
-	{ "Shipwreck Point", "In Challenge Mode, get a score of 200 or higher in The Impact Site.", 25, 0 },
-	{ "Forest of Hope", "In Challenge Mode, get a score of 400 or higher in The Forest of Hope.", 25, 0 },
-	{ "Navel of the Forest", "In Challenge Mode, get a score of 300 or higher in The Forest Navel.", 25, 0 },
-	{ "Where Boys Become Dandori", "In Challenge Mode, get a score of 450 or higher in The Distant Spring.", 50, 0 },
-	{ "Final Ordeal", "In Challenge Mode, get a score of 200 or higher in The Final Trial.", 25, 0 },
+	{ "It Has a Strange Allure", "Recover the Nova Blaster.", UFOID_NovaBlaster },
+	{ "Eco-Friendly Exhaust", "Recover the Anti-Dioxin Filter.", UFOID_AntiDioxinFilter },
+	{ "Straighten Up and Fly Right", "Recover the Omega Stabilizer.", UFOID_OmegaStabilizer },
+	{ "Swim Gracefully Through the Sea of Stars... Like a Dolphin", "Recover the Gravity Jumper.", UFOID_GravityJumper },
+	{ "HAL-9000", "Recover the Analog Computer.", UFOID_AnalogComputer },
+	{ "Space Pirate Protection", "Recover the Guard Satellite.", UFOID_GuardSatellite },
+	{ "A Daughter's Gift", "Recover the Libra.", UFOID_Libra },
+	{ "Robot in Disguise", "Recover the Repair-type Bolt.", UFOID_RepairTypeBolt },
+	{ "A Very Expensive Noisemaker", "Recover the Gluon Drive.", UFOID_GluonDrive },
+	{ "I'm 40% Zirconium!", "Recover the Zirconium Rotor.", UFOID_ZirconiumRotor },
+	{ "S.O.S. Signal Emitter", "Recover the Interstellar Radio.", UFOID_InterstellarRadio },
+	{ "A Throne Fit for an Emperor", "Recover the Pilot's Seat.", UFOID_PilotSeat },
+	{ "Easy on the Eyes AND the Budget", "Recover the #2 Ionium Jet.", UFOID_IoniumJet2 },
+	{ "Aerodynamically Designed", "Recover the Bowsprit.", UFOID_Bowsprit },
+	{ "Space-Time Continuum Rubber Band", "Recover the Chronos Reactor.", UFOID_ChronosReactor },
+	{ "Always Be Prepared", "Recover the Space Float.", UFOID_SpaceFloat },
+	{ "Lower Lumbar Support", "Recover the Massage Machine.", UFOID_MassageMachine },
+	{ "Tanning Rays", "Recover the UV Lamp.", UFOID_UVLamp },
+	{ "My Most Prized Possession!", "Recover the Secret Safe.", UFOID_SecretSafe },
+	{ "Its Shape Is Similar to the Pikpik Brand Carrots I Love So Much", "Unlock the Red Pikmin.", 0 },
+	{ "The Color Is Different, but It Seems to Be a Pikmin Nonetheless", "Unlock the Yellow Pikmin.", 0 },
+	{ "Near This One's Cheeks Is What Appears to Be a Set of Gills", "Unlock the Blue Pikmin.", 0 },
+	{ "Fate Has Smiled Upon Me!", "Recover the Main Engine.", UFOID_MainEngine },
+	{ "Those Instant Space Noodles Will Taste Better When Heated Up", "Recover the Positron Generator.", UFOID_PositronGenerator },
+	{ "This Thing Chugs Right Along at Its Own Pace", "Recover the Automatic Gear.", UFOID_AutomaticGear },
+	{ "This Puts Out a Slightly Odoriferous Exhaust", "Recover the #1 Ionium Jet.", UFOID_IoniumJet1 },
+	{ "With This, I'll Be Able to See All Nearby Ship Parts", "Recover the Whimsical Radar.", UFOID_WhimsicalRadar },
+	{ "Exactly What Makes It So Extraordinary Is a Secret", "Recover the Extraordinary Bolt.", UFOID_ExtraordinaryBolt },
+	{ "My Son Gave This to Me as a Present", "Recover the Sagittarius.", UFOID_Sagittarius },
+	{ "I Won't Have to Worry About Saving Electricity Anymore!", "Recover the Eternal Fuel Dynamo.", UFOID_EternalFuelDynamo },
+	{ "It's Smooth Sailing With This in Place... Usually", "Recover the Shock Absorber.", UFOID_ShockAbsorber },
+	{ "I Don't Actually Know What It's For", "Recover the Geiger Counter.", UFOID_GeigerCounter },
+	{ "I'll Sleep Like a Baby Once I Get This Back to the Ship!", "Recover the Radiation Canopy.", UFOID_RadiationCanopy },
+	{ "Pikmar", "Get the bad ending.", 0 },
+	{ "Having a GOOd Time", "Defeat Goolix.", 0 },
+	{ "I Have No Choice but to Try to Blast Off", "Collect all 25 critical ship parts, but not all 30, and get the normal ending.", 0 },
+	{ "Now I Can Return Home to Hocotate!", "Collect all 30 ship parts and get the best ending.", 0 },
+	{ "Allergic to Blue", "Collect all ship parts in the Forest of Hope before unlocking the Blue Pikmin.", 0 },
+	{ "Hocotate Speed Demon", "Collect all 30 ship parts and beat the game in 12 days or less.", 0 },
+	{ "Shipwreck Point", "In Challenge Mode, get a score of 200 or higher in The Impact Site.", 0 },
+	{ "Forest of Hope", "In Challenge Mode, get a score of 400 or higher in The Forest of Hope.", 0 },
+	{ "Navel of the Forest", "In Challenge Mode, get a score of 300 or higher in The Forest Navel.", 0 },
+	{ "Where Boys Become Dandori", "In Challenge Mode, get a score of 450 or higher in The Distant Spring.", 0 },
+	{ "Final Ordeal", "In Challenge Mode, get a score of 200 or higher in The Final Trial.", 0 },
 };
 
 constexpr const char* kFilename  = "pikmin_achievements.txt";
@@ -147,23 +147,6 @@ int pc_achievements_unlocked_count(void)
 	pc_achievements_load();
 	int n = 0;
 	for (bool u : sUnlocked) n += u;
-	return n;
-}
-
-int pc_achievements_points(void)
-{
-	pc_achievements_load();
-	int n = 0;
-	for (int i = 0; i < PC_ACH_COUNT; i++) {
-		if (sUnlocked[i]) n += kInfo[i].points;
-	}
-	return n;
-}
-
-int pc_achievements_total_points(void)
-{
-	int n = 0;
-	for (const PcAchievementInfo& a : kInfo) n += a.points;
 	return n;
 }
 

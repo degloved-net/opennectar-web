@@ -1,4 +1,16 @@
+#include "pc_p2_captains.h"
 #include "og/newScreen/Ground.h"
+#ifdef PIKI_PC_PORT
+void pcHudWideBegin(J2DPerspGraph*);
+void pcHudWideEnd(J2DPerspGraph*);
+#include "pc_p2_coop.h"
+extern "C" void pc_gfx_set_view_subrect(float x0, float y0, float x1, float y1);
+extern "C" void pc_gfx_clear_view_subrect(void);
+extern "C" void pc_gfx_set_view_aspect_override(float aspect);
+extern "C" float pc_gfx_get_window_aspect_ratio(void);
+extern "C" void pc_gfx_set_hud_wide(int enabled);
+extern "C" void pc_gfx_set_hud_virtual_size(int w, int h);
+#endif
 #include "og/newScreen/Cave.h"
 #include "og/newScreen/ogUtil.h"
 #include "og/Screen/SunMeter.h"
@@ -9,6 +21,15 @@
 #include "trig.h"
 #include "System.h"
 #include "nans.h"
+#ifdef PIKI_PC_PORT
+namespace og {
+namespace newScreen {
+// HUD de historia con el co-op: vida y contador de cada capitán en su mitad
+// (ogObjGround.cpp). views[v] = { vida, contador } de la vista v.
+void pcDrawHudCoop(Graphics& gfx, og::Screen::BloGroup* group, P2DScreen::Mgr* views[2][2], P2DScreen::Mgr* extra);
+} // namespace newScreen
+} // namespace og
+#endif
 
 namespace og {
 namespace newScreen {
@@ -36,6 +57,9 @@ ObjGround::ObjGround(char const* name)
 	mIsTotalPokoActive = false;
 	mPokos             = 0;
 	mTotalPokoTimer    = 0.0f;
+#ifdef PIKI_PC_PORT
+	mPcPikiCounter2 = nullptr;
+#endif
 }
 
 /**
@@ -70,12 +94,20 @@ void ObjGround::doCreate(JKRArchive* arc)
 	mPikiCounter  = new og::Screen::PikminCounter;
 	mSensorScreen = new P2DScreen::Mgr_tuning;
 
+#ifdef PIKI_PC_PORT
+	mBloGroup = new og::Screen::BloGroup(7);
+#else
 	mBloGroup = new og::Screen::BloGroup(6);
+#endif
 	mBloGroup->addBlo("sun_meter.blo", mSunMeter, 0x1040000, arc);
 	mBloGroup->addBlo("doping.blo", mDoping, 0x1040000, arc);
 	mBloGroup->addBlo("orima.blo", mLifeGauge1, 0x1040000, arc);
 	mBloGroup->addBlo("orima.blo", mLifeGauge2, 0x1040000, arc);
 	mBloGroup->addBlo("gr_pikmin.blo", mPikiCounter, 0x1040000, arc);
+#ifdef PIKI_PC_PORT
+	mPcPikiCounter2 = new og::Screen::PikminCounter;
+	mBloGroup->addBlo("gr_pikmin.blo", mPcPikiCounter2, 0x1040000, arc);
+#endif
 	mBloGroup->addBlo("sensor.blo", mSensorScreen, 0x1040000, arc);
 
 	mSunMeter->setCallBack();
@@ -88,6 +120,9 @@ void ObjGround::doCreate(JKRArchive* arc)
 		mLifeGauge2->setCallBack(&mDisp->mLouieData, og::Screen::CallBack_LifeGauge::LIFEGAUGE_LOUIE);
 	}
 	mPikiCounter->setCallBack(arc);
+#ifdef PIKI_PC_PORT
+	mPcPikiCounter2->setCallBack(arc);
+#endif
 	mPokos          = mDisp->mDataGame.mPokoCount;
 	mTotalPokoTimer = 0.0f;
 
@@ -114,12 +149,17 @@ void ObjGround::commonUpdate()
 			mPikiCounter->setParam(mDisp->mDataGame, mDisp->mLouieData);
 		}
 
-		if (mDisp->mPayDebt) {
-			mLifeGauge2->setType(og::Screen::CallBack_LifeGauge::LIFEGAUGE_PRESIDENT);
-
-		} else {
-			mLifeGauge2->setType(og::Screen::CallBack_LifeGauge::LIFEGAUGE_LOUIE);
+		// Selector de capitanes: retrato del personaje de cada capitán (el
+		// original del capitán 2 ya sigue la deuda en pc_p2_captain_character).
+#ifdef PIKI_PC_PORT
+		// Co-op: el contador de cada capitán, en su mitad (pcDrawHudCoop).
+		if (pc_p2_coop_active() && pc_p2_coop_split()) {
+			mPikiCounter->setParam(mDisp->mDataGame, mDisp->mOlimarData);
+			mPcPikiCounter2->setParam(mDisp->mDataGame, mDisp->mLouieData);
 		}
+#endif
+		mLifeGauge1->pcSetCharacter(pc_p2_captain_loaded_character(0), 0);
+		mLifeGauge2->pcSetCharacter(pc_p2_captain_loaded_character(1), 1);
 	}
 
 	u16 width  = System::getRenderModeObj()->fbWidth;
@@ -180,11 +220,22 @@ void ObjGround::doDraw(Graphics& gfx)
 		mSunMeter->hide();
 	}
 
+#ifdef PIKI_PC_PORT
+	pcHudWideBegin(&gfx.mPerspGraph);
+	if (mBloGroup) {
+		P2DScreen::Mgr* views[2][2] = { { mLifeGauge1, mPikiCounter }, { mLifeGauge2, mPcPikiCounter2 } };
+		pcDrawHudCoop(gfx, mBloGroup, views, mPcPikiCounter2);
+	}
+#else
 	if (mBloGroup)
 		mBloGroup->draw(&gfx.mPerspGraph);
+#endif
 
 	if (mDisp->mHasRadar)
 		mOtakara->draw(gfx.mPerspGraph);
+#ifdef PIKI_PC_PORT
+	pcHudWideEnd(&gfx.mPerspGraph);
+#endif
 }
 
 /**
@@ -270,6 +321,175 @@ void ObjGround::doUpdateFadeoutFinish()
 }
 
 ObjGround::StaticValues ObjGround::msVal;
+
+#ifdef PIKI_PC_PORT
+namespace {
+// Visibilidad de los paneles de una pantalla, para dibujar solo una parte y
+// dejarla como estaba.
+struct PcPaneVis {
+	J2DPane* mPane;
+	bool mVisible;
+};
+const int kPcPaneVisMax = 512;
+PcPaneVis sPcPaneVis[kPcPaneVisMax];
+int sPcPaneVisCount = 0;
+
+void pcSaveAndHide(J2DPane* pane)
+{
+	if (sPcPaneVisCount < kPcPaneVisMax) {
+		sPcPaneVis[sPcPaneVisCount].mPane    = pane;
+		sPcPaneVis[sPcPaneVisCount].mVisible = pane->isVisible();
+		sPcPaneVisCount++;
+	}
+	pane->hide();
+	for (JSUTree<J2DPane>* it = pane->getPaneTree()->getFirstChild(); it; it = it->getNextChild()) {
+		pcSaveAndHide(it->getObject());
+	}
+}
+
+void pcRestoreVis()
+{
+	for (int i = 0; i < sPcPaneVisCount; i++) {
+		if (sPcPaneVis[i].mVisible) {
+			sPcPaneVis[i].mPane->show();
+		} else {
+			sPcPaneVis[i].mPane->hide();
+		}
+	}
+	sPcPaneVisCount = 0;
+}
+
+bool pcSavedVisible(J2DPane* pane)
+{
+	for (int i = 0; i < sPcPaneVisCount; i++) {
+		if (sPcPaneVis[i].mPane == pane) {
+			return sPcPaneVis[i].mVisible;
+		}
+	}
+	return pane->isVisible();
+}
+
+// Vuelve a mostrar lo que estaba visible dentro de una rama.
+void pcShowSaved(J2DPane* pane)
+{
+	if (pcSavedVisible(pane)) {
+		pane->show();
+	}
+	for (JSUTree<J2DPane>* it = pane->getPaneTree()->getFirstChild(); it; it = it->getNextChild()) {
+		pcShowSaved(it->getObject());
+	}
+}
+
+// Dibuja de `screen` solo la rama `part` (con sus padres), a pantalla completa.
+void pcDrawOnly(P2DScreen::Mgr* screen, J2DPane* part, Graphics& gfx, J2DPerspGraph* graf)
+{
+	sPcPaneVisCount = 0;
+	pcSaveAndHide(screen);
+	pcShowSaved(part);
+	part->show();
+	for (JSUTree<J2DPane>* up = part->getPaneTree()->getParent(); up; up = up->getObject()->getPaneTree()->getParent()) {
+		up->getObject()->show();
+	}
+	screen->draw(gfx, *graf);
+	pcRestoreVis();
+}
+} // namespace
+
+/**
+ * HUD de historia (superficie y cueva). Fuera del co-op, el grupo entero salvo
+ * el segundo contador (extra). En co-op (docs/PLAN_COOP.md §6.6), la vida y el
+ * contador de cada capitán dentro de su mitad (arriba o a la izquierda Olimar),
+ * con el HUD ancho de esa mitad, y lo demás (sol, sprays, radar, Pokos) una
+ * vez a pantalla completa.
+ */
+void pcDrawHudCoop(Graphics& gfx, og::Screen::BloGroup* group, P2DScreen::Mgr* views[2][2], P2DScreen::Mgr* extra)
+{
+	J2DPerspGraph* graf = &gfx.mPerspGraph;
+	Graphics drawGfx;
+	const bool coop = pc_p2_coop_active() && pc_p2_coop_split();
+	for (int i = 0; i < group->mScreenNumCurrent; i++) {
+		P2DScreen::Mgr* screen = group->mScreens[i];
+		bool perView           = screen == extra;
+		for (int v = 0; v < 2 && coop; v++) {
+			perView |= screen == views[v][0] || screen == views[v][1];
+		}
+		if (!perView) {
+			screen->draw(drawGfx, *graf);
+		}
+	}
+	if (!coop) {
+		return;
+	}
+	// La burbuja del día (o del subnivel) está en el contador: en las mitades
+	// no, y una sola vez arriba a la derecha de la pantalla, como en 1P.
+	J2DPane* dayIcons[2] = { nullptr, nullptr };
+	bool dayVisible[2]   = { false, false };
+	for (int v = 0; v < 2; v++) {
+		if (views[v][1]) {
+			dayIcons[v] = views[v][1]->search(MC8("Ndayicon"));
+		}
+		if (dayIcons[v]) {
+			dayVisible[v] = dayIcons[v]->isVisible();
+			dayIcons[v]->hide();
+		}
+	}
+	// Cada pieza de un jugador va en su propia caja (aspecto GX, ~4:3) dentro de su mitad
+	// (arriba/abajo o izquierda/derecha, como HorizonalSplitter::split2): la
+	// vida pegada abajo a la izquierda y el contador abajo a la derecha. Con
+	// la caja en 4:3 no se ensancha ni se ancla nada: cada pieza conserva su
+	// sitio dentro de la caja y la caja la lleva al borde de la mitad.
+	const f32 aspect    = pc_gfx_get_window_aspect_ratio(); // ancho/alto de la ventana
+	const bool vertical = pc_p2_coop_vertical() != 0;
+	// La caja tiene el aspecto del espacio GX del juego y se mapea con escala
+	// uniforme (HUD wide de pc_gfx, como el co-op de Pikmin 1); sin esto el
+	// subrectángulo se mapea con el aspecto de la ventana y sale aplastado.
+	const int gxW      = System::getRenderModeObj()->fbWidth;
+	const int gxH      = System::getRenderModeObj()->efbHeight;
+	const f32 boxRatio = f32(gxW) / f32(gxH);
+	pc_gfx_set_hud_wide(1);
+	pc_gfx_set_hud_virtual_size(gxW, gxH);
+	for (int v = 0; v < 2; v++) {
+		// Mitad en coordenadas normalizadas, origen abajo-izquierda (GL). Con la
+		// cámara fusionada, el capitán 1 puede estar a la derecha o abajo.
+		const int side = pc_p2_coop_view_side(v);
+		const f32 hx   = vertical ? (side == 0 ? 0.0f : 0.5f) : 0.0f;
+		const f32 hy   = vertical ? 0.0f : (side == 0 ? 0.5f : 0.0f);
+		const f32 hw = vertical ? 0.5f : 1.0f;
+		const f32 hh = vertical ? 1.0f : 0.5f;
+		// Caja 4:3 lo más grande que quepa (en unidades de altura de ventana).
+		const f32 halfW = hw * aspect, halfH = hh;
+		f32 boxW = halfH * boxRatio, boxH = halfH;
+		if (boxW > halfW) {
+			boxW = halfW;
+			boxH = halfW / boxRatio;
+		}
+		const f32 bw = boxW / aspect; // a fracción del ancho de la ventana
+		for (int j = 0; j < 2; j++) {
+			if (!views[v][j]) {
+				continue;
+			}
+			const f32 bx = j == 0 ? hx : hx + hw - bw;
+			pc_gfx_set_view_subrect(bx, hy, bx + bw, hy + boxH);
+			pc_gfx_set_view_aspect_override(boxRatio);
+			graf->setPort();
+			views[v][j]->draw(drawGfx, *graf);
+		}
+	}
+	pc_gfx_set_hud_virtual_size(0, 0);
+	pc_gfx_set_hud_wide(0);
+	pc_gfx_clear_view_subrect();
+	pc_gfx_set_view_aspect_override(0.0f);
+	graf->setPort();
+	for (int v = 0; v < 2; v++) {
+		if (dayIcons[v] && dayVisible[v]) {
+			dayIcons[v]->show();
+		}
+	}
+	if (dayIcons[0] && dayVisible[0]) {
+		pcDrawOnly(views[0][1], dayIcons[0], drawGfx, graf);
+	}
+}
+#endif
 
 } // namespace newScreen
 } // namespace og

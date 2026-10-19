@@ -21,7 +21,6 @@ int PikiAudioSinkTryOpen(int sampleRate);
 int PikiAudioSinkQueue(const int16_t* samples, size_t frameCount);
 int PikiAudioSinkResume(void);
 int PikiAudioSinkFlush(void);
-void PikiAudioSinkClear(void);
 /* Returns 1 when drained, 0 while draining, and -1 on a device/query error. */
 int PikiAudioSinkDrained(void);
 int PikiAudioSinkGetProgress(uint64_t* submittedFrames, uint64_t* queuedFrames);

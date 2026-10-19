@@ -395,7 +395,7 @@ bool shadow_build() {
     glUniform4f_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uShadowParams"),
                     sPostEffects.shadowStrength, 1.0f / float(sShadowMapSize), 0.0015f, sPostEffects.shadowRange);
     glDrawArrays(GL_TRIANGLES, 0, 3);
-    glBindVertexArray_ptr(0);
+    glBindVertexArray_ptr(sStreamVAO);
     glDepthMask(GL_TRUE);
     glBindBuffer_ptr(GL_ARRAY_BUFFER, sVBO);
     sBoundTextures[0] = 0;

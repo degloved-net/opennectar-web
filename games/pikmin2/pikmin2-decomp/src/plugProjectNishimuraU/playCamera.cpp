@@ -1,4 +1,11 @@
 #include "Game/CameraMgr.h"
+#ifdef PIKI_PC_PORT
+namespace Game {
+struct Navi;
+void pcNaviRotateCursor(Navi* navi, float angle);
+void pcNaviCursorToFront(Navi* navi);
+} // namespace Game
+#endif
 #include "Game/Navi.h"
 #include "Game/Stickers.h"
 #include "Game/MapMgr.h"
@@ -11,30 +18,56 @@ extern "C" int pc_settings_get_mouse_wheel_action(void);
 int pc_window_take_wheel_steps(void);
 // Mod "Mouse Wheel" (zoom): multiplica la distancia de la camara sobre los tres
 // niveles originales de R. Volver a "color" la deja como estaba.
-static f32 sPcZoomMul = 1.0f;
+// Co-op: por jugador (el del mando del capitan de la camara).
+static f32 sPcZoomMul[2] = { 1.0f, 1.0f };
 // Mods "Free Camera" y "First Person": arrastre de camara (raton con B, stick
 // derecho o, en primera persona, el raton siempre) y cabeceo en primera persona.
-extern "C" float pc_window_take_camera_drag(void);
-extern "C" float pc_window_take_camera_pitch(void);
+extern "C" float pc_window_take_camera_drag_for(int player);
+extern "C" float pc_window_take_camera_pitch_for(int player);
+extern "C" int pc_window_get_keyboard_owner(void);
+#if PIKI_PC_TOUCH
+extern "C" bool pc_touch_visible(void);
+extern "C" float pc_window_take_touch_zoom(void);
+#endif
 extern "C" int pc_settings_get_free_camera(void);
-extern "C" int pc_first_person_active(void);
-static f32 sPcPitch = -0.15f; // cabeceo neutro, un poco hacia abajo, como en Pikmin 1
+extern "C" int pc_first_person_active_for(int player);
+static f32 sPcPitch[2] = { -0.15f, -0.15f }; // cabeceo neutro, un poco hacia abajo, como en Pikmin 1
+/// Jugador del mando del capitan: P2 con el mando del puerto 2 (co-op, VS).
+static int pcCamPlayer(Game::Navi* navi)
+{
+	return navi && navi->mController1 && navi->mController1->getPortNum() == 1 ? 1 : 0;
+}
 static bool pcFirstPersonFor(Game::Navi* navi)
 {
-	return navi && navi->mController1 && pc_first_person_active() && (!Game::moviePlayer || Game::moviePlayer->mDemoState == Game::DEMOSTATE_Inactive);
+	return navi && navi->mController1 && pc_first_person_active_for(pcCamPlayer(navi))
+	    && (!Game::moviePlayer || Game::moviePlayer->mDemoState == Game::DEMOSTATE_Inactive);
 }
-static void pcUpdateWheelZoom()
+static void pcUpdateWheelZoom(int player)
 {
+	f32& zoom = sPcZoomMul[player];
+#if PIKI_PC_TOUCH
+	// Pellizco táctil: acerca o aleja como en Pikmin 1, sobre el mismo
+	// multiplicador que la rueda.
+	const float touchZoom = player == 0 ? pc_window_take_touch_zoom() : 0.0f; // la pantalla tactil es de P1
+	if (touchZoom != 0.0f) {
+		zoom += touchZoom;
+		if (zoom < 0.45f) zoom = 0.45f;
+		if (zoom > 2.50f) zoom = 2.50f;
+	}
+	if (pc_settings_get_mouse_wheel_action() != 1) return; // el zoom del pellizco se queda
+#else
 	if (pc_settings_get_mouse_wheel_action() != 1) {
-		sPcZoomMul = 1.0f;
+		zoom = 1.0f;
 		return;
 	}
-	const int steps = pc_window_take_wheel_steps();
+#endif
+	// La rueda es de quien tenga el teclado y el raton.
+	const int steps = player == pc_window_get_keyboard_owner() ? pc_window_take_wheel_steps() : 0;
 	if (steps != 0) {
 		// Alejar la rueda del jugador aleja la camara.
-		sPcZoomMul += 0.08f * static_cast<f32>(steps);
-		if (sPcZoomMul < 0.45f) sPcZoomMul = 0.45f;
-		if (sPcZoomMul > 2.50f) sPcZoomMul = 2.50f;
+		zoom += 0.08f * static_cast<f32>(steps);
+		if (zoom < 0.45f) zoom = 0.45f;
+		if (zoom > 2.50f) zoom = 2.50f;
 	}
 }
 #endif
@@ -265,7 +298,7 @@ void PlayCamera::updateMatrix()
 		eye.y += 25.0f;
 		mCameraAngleCurrent = mCameraAngleTarget; // sin la inercia de tercera persona
 		PSMTXRotRad(mtx2, 'Y', -mCameraAngleCurrent);
-		PSMTXRotRad(mtx3, 'X', -sPcPitch);
+		PSMTXRotRad(mtx3, 'X', -sPcPitch[pcCamPlayer(mTargetObj)]);
 		PSMTXTrans(mtx5, -eye.x, -eye.y, -eye.z);
 		PSMTXConcat(mtx3, mtx2, mLookMatrix.mMatrix.mtxView);
 		PSMTXConcat(mLookMatrix.mMatrix.mtxView, mtx5, mLookMatrix.mMatrix.mtxView);
@@ -453,6 +486,13 @@ u32 PlayCamera::updateCameraMode()
 
 			if (pad->getButtonDown() & Controller::PRESS_L) {
 				flags |= CAMFLAGS_CenterBehind;
+#ifdef PIKI_PC_PORT
+				// Cámara libre: L la pone detrás del capitán, y el cursor (que
+				// gira con ella) vuelve delante de él.
+				if (pc_settings_get_free_camera() && mTargetObj) {
+					pcNaviCursorToFront(mTargetObj);
+				}
+#endif
 			} else {
 				if (pad->mButton.mAnalogL > 0.1f) {
 					flags |= CAMFLAGS_SmoothFollow;
@@ -626,20 +666,35 @@ void PlayCamera::changeTargetTheta()
 	// Solo la camara del capitan con mando consume el arrastre: la del otro
 	// capitan tambien se actualiza y se lo quedaria a medias.
 	if (mTargetObj && mTargetObj->mController1) {
-		const f32 drag  = pc_window_take_camera_drag();
-		const f32 pitch = pc_window_take_camera_pitch();
+		const int player = pcCamPlayer(mTargetObj);
+		const f32 drag   = pc_window_take_camera_drag_for(player);
+		const f32 pitch  = pc_window_take_camera_pitch_for(player);
 		const bool fp   = pcFirstPersonFor(mTargetObj);
-		if (drag != 0.0f && (pc_settings_get_free_camera() || fp)) {
+		// El arrastre táctil (mitad derecha de la pantalla) gira la cámara
+		// siempre, como en Pikmin 1; ratón y stick solo con "Free Camera".
+#if PIKI_PC_TOUCH
+		const bool touchCamera = pc_touch_visible();
+#else
+		const bool touchCamera = false;
+#endif
+		if (drag != 0.0f && (pc_settings_get_free_camera() || fp || touchCamera)) {
 			// Aproximadamente media vuelta por una pasada de un ancho de pantalla.
 			f32 angle = mCameraAngleTarget + drag * 3.2f;
 			clampAngle(angle);
 			mCameraAngleTarget = angle;
 			mSmoothMoveSpeed   = 0.0f;
+			// El cursor gira con la cámara alrededor del capitán para seguir en
+			// el mismo sitio de la pantalla: su desplazamiento va en coordenadas
+			// del mundo y, con la cámara girada, apuntaba a otro lado (#74).
+			if (!fp) {
+				pcNaviRotateCursor(mTargetObj, drag * 3.2f);
+			}
 		}
 		if (fp) {
-			sPcPitch += pitch * 3.2f;
-			if (sPcPitch < -1.2f) sPcPitch = -1.2f;
-			if (sPcPitch > 1.0f) sPcPitch = 1.0f;
+			f32& camPitch = sPcPitch[player];
+			camPitch += pitch * 3.2f;
+			if (camPitch < -1.2f) camPitch = -1.2f;
+			if (camPitch > 1.0f) camPitch = 1.0f;
 		}
 	}
 #endif
@@ -697,8 +752,8 @@ void PlayCamera::updateParms(int flag)
 	f32 rate            = PC_LERP(mCameraParms->mSettingChangeSpeed.mValue); // FPS Mode: suavizado por frame
 	f32 invrate         = 1.0f - rate;
 #ifdef PIKI_PC_PORT
-	pcUpdateWheelZoom();
-	mCurrTargetDistance = (mCurrTargetDistance * invrate) + (mGoalTargetDistance * sPcZoomMul * rate);
+	pcUpdateWheelZoom(pcCamPlayer(mTargetObj));
+	mCurrTargetDistance = (mCurrTargetDistance * invrate) + (mGoalTargetDistance * sPcZoomMul[pcCamPlayer(mTargetObj)] * rate);
 #else
 	mCurrTargetDistance = (mCurrTargetDistance * invrate) + (mGoalTargetDistance * rate);
 #endif
@@ -801,7 +856,7 @@ bool PlayCamera::isModCameraFinished()
 
 		f32 anglediff = anglein - angleout;
 #ifdef PIKI_PC_PORT
-		if (absVal(anglediff) < 0.1f && absVal(mGoalTargetDistance * sPcZoomMul - mCurrTargetDistance) < 10.0f
+		if (absVal(anglediff) < 0.1f && absVal(mGoalTargetDistance * sPcZoomMul[pcCamPlayer(mTargetObj)] - mCurrTargetDistance) < 10.0f
 #else
 		if (absVal(anglediff) < 0.1f && absVal(mGoalTargetDistance - mCurrTargetDistance) < 10.0f
 #endif

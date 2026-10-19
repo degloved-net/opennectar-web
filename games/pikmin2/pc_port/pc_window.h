@@ -12,6 +12,12 @@ bool pc_window_init(const char* title, int width, int height);
 void pc_window_poll_events(PADStatus* pad);
 void pc_window_swap_buffers(void);
 void pc_window_set_swap_interval(int interval);
+// Pikmin 2's host loop presents directly instead of going through
+// pc_window_swap_buffers. Monitor mode therefore controls the real GL swap
+// interval explicitly and exposes whether that swap is currently the clock.
+void pc_window_set_monitor_vsync_mode(bool enabled);
+bool pc_window_monitor_vsync_locked(void);
+void pc_window_monitor_vsync_fallback(void);
 void pc_window_shutdown(void);
 bool pc_window_should_close(void);
 int  pc_window_get_width(void);
@@ -60,6 +66,8 @@ enum {
     PC_KEY_ACT_LOCKON       = 21,
     PC_KEY_ACT_FIRSTPERSON  = 22,
     PC_KEY_ACT_GYRO_RECENTER = 23,
+    // Modo Speedrun: mantener 1 s reinicia la run (pc_speedrun_take_reset).
+    PC_KEY_ACT_SPEEDRUN_RESET = 24,
     PC_KEY_ACT_COUNT
 };
 void pc_window_set_key_binding(int action, SDL_Scancode scancode);
@@ -84,6 +92,9 @@ bool pc_window_swarm_held_p2(void);
 bool pc_window_take_lockon_press(void);
 /// Flanco del botón de swarm: con el Charge activo es el que lanza la carga.
 bool pc_window_take_swarm_press(void);
+/// Co-op: las mismas, por jugador (0 = P1, 1 = P2). Las de arriba son del 1.
+bool pc_window_take_lockon_press_for(int player);
+bool pc_window_take_swarm_press_for(int player);
 /// Inyecta la pulsación desde la capa táctil, que no pasa por los bindings.
 void pc_window_request_lockon_press(void);
 void pc_window_request_firstperson_press(void);
@@ -150,6 +161,12 @@ bool pc_window_last_input_is_gamepad(void);
 // Keyboard vs gamepad follows pc_window_last_input_is_gamepad(). In mouse
 // cursor mode, A/B/Z also list the matching mouse button.
 void pc_window_message_control_label(char tag, char* buf, unsigned bufSize);
+// 1 si los iconos de botón deben mostrar el mando (último dispositivo usado);
+// 0 si teclado y ratón.
+int pc_window_prompt_uses_gamepad(void);
+// Nombre corto de la tecla asignada al botón de GameCube `tag` ('a', 'b', 'c',
+// 'x', 'y', 'z', 'l', 'r', 's' stick, 'p' Start, 't' cruceta); vacío si no hay.
+void pc_window_key_prompt_label(char tag, char* buf, unsigned bufSize);
 // Cooperativo: jugador (0/1) al que van dirigidos los textos de tutorial;
 // con asignación explícita de dispositivos la etiqueta usa el suyo en vez
 // del último dispositivo usado. -1 = sin preferencia.
@@ -196,6 +213,10 @@ extern "C" void pc_window_add_camera_drag(float normalizedDx);
 extern "C" float pc_window_take_camera_drag(void);
 extern "C" void pc_window_add_camera_pitch(float normalizedDy);
 extern "C" float pc_window_take_camera_pitch(void);
+extern "C" float pc_window_take_camera_drag_for(int player);
+extern "C" void pc_window_add_camera_drag_for(int player, float normalizedDx);
+extern "C" float pc_window_take_camera_pitch_for(int player);
+extern "C" float pc_window_free_camera_sub_y_for(int player);
 
 #ifdef __cplusplus
 }

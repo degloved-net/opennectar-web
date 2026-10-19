@@ -2,6 +2,15 @@
 
 #include <cstdint>
 
+// Tick rate used by frame clamp 0 (default 120 Hz; the monitor FPS mode sets
+// the display's refresh rate). Clamped to 30..360 Hz.
+void pc_frame_set_high_rate(double hz);
+double pc_frame_high_rate(void);
+// Monitor FPS mode: with vsync on, run one tick per display refresh instead of
+// pacing ticks off the wall clock (System::run, updateSysClock).
+void pc_frame_set_vsync_lock(bool on);
+bool pc_frame_vsync_lock(void);
+
 struct PcFrameSchedule {
 	int logicalTicks;
 	double fixedDelta;

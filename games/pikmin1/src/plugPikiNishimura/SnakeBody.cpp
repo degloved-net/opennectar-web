@@ -1146,6 +1146,9 @@ void SnakeBody::refresh(BossShapeObject* shapeObj, Graphics& gfx)
 {
 #if defined(PIKI_PC_PORT)
 	if (!pc_render_is_authoritative()) {
+		// Netplay presentation pass: the sim joints came from the
+		// authoritative pass; rebuild them for this pass's camera.
+		mPresentJoints.apply(shapeObj, gfx);
 		return;
 	}
 #endif
@@ -1161,4 +1164,7 @@ void SnakeBody::refresh(BossShapeObject* shapeObj, Graphics& gfx)
 	makeBlending(animMatrices);
 	setDeadScale(animMatrices);
 	returnJoint(shapeObj, gfx, animMatrices);
+#if defined(PIKI_PC_PORT)
+	mPresentJoints.capture(shapeObj, gfx);
+#endif
 }

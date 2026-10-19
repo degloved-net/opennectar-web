@@ -1,6 +1,9 @@
 #include "DebugLog.h"
 #include "sysNew.h"
 #include "zen/DrawCM.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_sim_rng.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -80,7 +83,11 @@ protected:
 		mWaitTime += gsys->getFrameTime();
 		if (mWaitTime > mAppearTime) {
 			mWaitTime -= mAppearTime;
+#if defined(PIKI_PC_PORT)
+			_1C += pc_cosmetic_randf(0.05f) + 0.02f;
+#else
 			_1C += Rand(0.05f) + 0.02f;
+#endif
 		}
 		_1C += (1.0f - mRootPane->getScale().x) * gsys->getFrameTime();
 		_1C *= 0.95f;

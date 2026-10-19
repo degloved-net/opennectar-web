@@ -311,6 +311,28 @@ bool J3DMatPacket::isSame(J3DMatPacket* other) const
  */
 #ifdef PIKI_PC_PORT
 extern "C" int pc_gfx_trace_j3d(void);
+extern "C" void pc_gfx_set_out_tint(float r, float g, float b);
+extern "C" void pc_gfx_clear_out_tint(void);
+bool pc_p2_captain_tint_for_model(const void* j3dModel, float rgb[3]);
+
+// Selector de capitanes: el capitán 2 repetido se tiñe en sus propios paquetes.
+struct PcCaptainTintScope {
+	bool mOn;
+	PcCaptainTintScope(J3DModel* model)
+	{
+		float rgb[3];
+		mOn = pc_p2_captain_tint_for_model(model, rgb);
+		if (mOn) {
+			pc_gfx_set_out_tint(rgb[0], rgb[1], rgb[2]);
+		}
+	}
+	~PcCaptainTintScope()
+	{
+		if (mOn) {
+			pc_gfx_clear_out_tint();
+		}
+	}
+};
 #endif
 void J3DMatPacket::draw()
 {
@@ -319,6 +341,7 @@ void J3DMatPacket::draw()
 		printf("[J3Dtrace] MatPacket %p mat=%p flag=%08X dlobj=%p dl0=%p dl1=%p size=%u shape=%p tex=%p\n", (void*)this, (void*)mMaterial,
 		       mDiffFlag, (void*)mDisplayList, (void*)mDisplayList->mDisplayList[0], (void*)mDisplayList->mDisplayList[1],
 		       mDisplayList->mSize, (void*)getShapePacket()->mShape, (void*)mTexture);
+	PcCaptainTintScope captainTint(getShapePacket()->getModel());
 #endif
 	mMaterial->load();
 	mDisplayList->callDL();
@@ -506,6 +529,9 @@ void J3DShapePacket::prepareDraw() const
 void J3DShapePacket::draw()
 {
 	if (!checkFlag(J3DShape_Hidden) && mShape) {
+#ifdef PIKI_PC_PORT
+		PcCaptainTintScope captainTint(mModel);
+#endif
 		prepareDraw();
 
 		if (mTexMtxObj) {

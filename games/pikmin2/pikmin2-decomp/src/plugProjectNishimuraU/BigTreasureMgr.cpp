@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "Game/Entities/BigTreasure.h"
 #include "LoadResource.h"
 #include "JSystem/JUtility/JUTNameTab.h"
@@ -27,6 +30,10 @@ Mgr::Mgr(int objLimit, u8 modelType)
 
 	for (int i = 0; i < treasureCount; i++) {
 		PelletInitArg initArg;
+#ifdef PIKI_PC_PORT
+		// Randomizer: reserva las armas que lleva de verdad (Louie, fijo).
+		if (i < 4) treasures[i] = const_cast<char*>(pc_p2_rnd_big_treasure_name(i, treasures[i]));
+#endif
 		if (pelletMgr->makePelletInitArg(initArg, treasures[i])) {
 			pelletMgr->setUse(&initArg);
 		}

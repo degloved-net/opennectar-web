@@ -30,6 +30,7 @@
 #include "LoadResource.h"
 #include "Dolphin/__start.h"
 #ifdef PIKI_PC_PORT
+#include "timing/pc_anim_timing.h"
 #include <cstdio>
 #include "pikmin2_backtrace.h"
 #endif
@@ -1326,6 +1327,7 @@ static void pcAdaptDeltaTime()
 extern "C" void pc_orig_tick_begin(void)
 {
 	pcAdaptDeltaTime();
+	pc_p2_anim_clock_tick(sys ? sys->mDeltaTime : 0.0f);
 	// PIKMIN_ORIG_TICK_ALWAYS=1: diagnostico, todo avanza en cada tick.
 	static const bool sAlways = getenv("PIKMIN_ORIG_TICK_ALWAYS") != nullptr;
 	if (sAlways) {
@@ -1356,9 +1358,31 @@ extern "C" void pc_orig_tick_begin(void)
 }
 
 extern "C" float pc_orig_period(void) { return sPcRequestedFrameRate / 60.0f; }
+// Fraccion del periodo original transcurrida desde el ultimo tick (0..1):
+// posicion de un frame intermedio entre dos ticks.
+extern "C" float pc_orig_tick_fraction(void)
+{
+	const f32 f = sPcOrigTickAcc / (sPcRequestedFrameRate / 60.0f);
+	return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+}
 
-// Frecuencia del retrace del host (p2_os_host): 120 solo en el modo de 120 FPS.
-extern "C" int pc_p2_retrace_hz(void) { return pc_settings_get_fps_mode() == 2 ? 120 : 60; }
+extern "C" double pc_window_get_refresh_rate(void);
+extern "C" void pc_window_set_monitor_vsync_mode(bool enabled);
+// FPS Mode 3 ("Monitor"): la frecuencia de la pantalla (30..360 Hz).
+static int pcMonitorHz()
+{
+	const double hz = pc_window_get_refresh_rate();
+	const int rounded = (int)(hz + 0.5);
+	return rounded < 30 ? 30 : (rounded > 360 ? 360 : rounded);
+}
+
+// Frecuencia del retrace del host (p2_os_host): 120 en el modo de 120 FPS, la
+// del monitor en el modo Monitor, si no 60.
+extern "C" int pc_p2_retrace_hz(void)
+{
+	const int fpsMode = pc_settings_get_fps_mode();
+	return fpsMode == 2 ? 120 : (fpsMode == 3 ? pcMonitorHz() : 60);
+}
 
 // Reaplica la frecuencia pedida cuando cambia el ajuste (desde F1).
 extern "C" void pc_p2_frame_rate_refresh(void)
@@ -1378,11 +1402,18 @@ void System::setFrameRate(int newFactor)
 	sPcRequestedFrameRate = newFactor;
 	sPcOrigTickAcc        = 0.0f;
 	const int fpsMode     = pc_settings_get_fps_mode();
-	const int retraceMul  = (fpsMode == 2) ? 2 : 1;
+	pc_window_set_monitor_vsync_mode(fpsMode == 3);
+	// Retraces por frame de 60 Hz: los menus conservan su velocidad. En modo
+	// Monitor es la proporcion entera mas cercana (exacta a 60/120/180/240 Hz).
+	int retraceMul = (fpsMode == 2) ? 2 : 1;
+	if (fpsMode == 3) {
+		retraceMul = (pcMonitorHz() + 30) / 60;
+		if (retraceMul < 1) retraceMul = 1;
+	}
 	f32 deltaTime         = newFactor / 60.0f;
 	sPcAdaptiveDt = false;
 	if (newFactor == 2 && fpsMode >= 1) {
-		deltaTime        = (fpsMode == 2) ? (1.0f / 120.0f) : (1.0f / 60.0f);
+		deltaTime        = (fpsMode == 2) ? (1.0f / 120.0f) : (fpsMode == 3) ? (1.0f / (f32)pcMonitorHz()) : (1.0f / 60.0f);
 		newFactor        = 1;
 		sPcAdaptiveDt    = true;
 		sPcAdaptiveMinDt = deltaTime;
@@ -1403,6 +1434,14 @@ void System::setFrameRate(int newFactor)
 #else
 	mFrameRate = (f32)newFactor;
 	mDeltaTime = mFrameRate / 60.0f;
+#endif
+#ifdef PIKI_PC_PORT
+	// Port: no hay retraces de VI que despierten waitForTick(), así que con
+	// mTickRate = 0 (USA, JP y PAL 60 Hz) el arranque se quedaba esperando
+	// para siempre. Todas las regiones duermen mTickRate por frame, como PAL
+	// estándar; el periodo sale del deltaTime real (1/60, 1/120...).
+	display->setTickRate((u32)(OS_TIMER_CLOCK * deltaTime * (60.0f / 59.94f)) - 100);
+	return;
 #endif
 #if defined(VERSION_PAL)
 	switch (mRenderMode) {

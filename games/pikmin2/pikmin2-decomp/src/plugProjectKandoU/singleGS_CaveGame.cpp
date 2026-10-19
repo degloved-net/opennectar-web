@@ -1,3 +1,13 @@
+#ifdef PIKI_PC_PORT
+extern "C" {
+int pc_p2_permadeath_active(void);
+void pc_p2_rules_erase_current_save(void);
+}
+#include "pc_p2_captains.h"
+#include "Game/pcCoop.h"
+#include "pc_speedrun.h"
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "Game/Entities/BlackMan.h"
 #include "Game/GameConfig.h"
 #include "Game/GameSystem.h"
@@ -157,11 +167,36 @@ void CaveState::exec(SingleGameSection* game)
 			Vector3f naviPos = navi->getPosition();
 			Cave::randMapMgr->radarMapPartsOpen(naviPos);
 		}
+#ifdef PIKI_PC_PORT
+		// Co-op: el mapa del radar se descubre también por donde pasa Louie.
+		Navi* louie = naviMgr->getAt(NAVIID_Louie);
+		if (pc_p2_coop_active() && louie && louie != navi && louie->isAlive()) {
+			Vector3f louiePos = louie->getPosition();
+			Cave::randMapMgr->radarMapPartsOpen(louiePos);
+		}
+#endif
 	}
 
 	if (game->mCurrentState->mId != mId) {
 		return;
 	}
+
+#ifdef PIKI_PC_PORT
+	// Atajo de prueba del modo Speedrun (PIKMIN_SR_DEBUG=1): F7 sale de la
+	// cueva con resultado, como al acabar la cinemática del géiser
+	// (onMovieDone, "s0C_cv_escape"). El split lo pone CaveResultState::init.
+	pc_p2_rnd_debug_exec(1); // atajos de prueba del Randomizer (PIKI_RND_DEBUG)
+	if (pc_speedrun_debug_take_cave_exit()) {
+		gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
+		PSMCancelToPauseOffMainBgm();
+		moviePlayer->clearSuspendedDemo();
+		pikiMgr->caveSaveAllPikmins(true, true);
+		CaveResultArg arg;
+		arg.mGameState = MapEnter_CaveGeyser;
+		transit(game, SGS_CaveResult, &arg);
+		return;
+	}
+#endif
 
 	game->updateCaveScreen();
 
@@ -170,7 +205,11 @@ void CaveState::exec(SingleGameSection* game)
 		if (GameStat::getMapPikmins(AllPikminCalcs) == 0) {
 			gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
 			MoviePlayArg moviearg("s05_pikminzero", nullptr, game->mMovieFinishCallback, 0);
+#ifdef PIKI_PC_PORT
+			Navi* navi = naviMgr->getMovieNavi(); // co-op: Olimar o, si no, Louie
+#else
 			Navi* navi = naviMgr->getActiveNavi();
+#endif
 			if (!navi) {
 				int id = NAVIID_Louie;
 				if (gameSystem->mSection->mPrevNaviIdx == NAVIID_Olimar) {
@@ -228,7 +267,11 @@ void CaveState::draw(SingleGameSection* game, Graphics& gfx)
  */
 void CaveState::check_SMenu(SingleGameSection* game)
 {
+#ifdef PIKI_PC_PORT
+	Screen::gGame2DMgr->setGamePad(game->pcMenuController());
+#else
 	Screen::gGame2DMgr->setGamePad(game->mControllerP1);
+#endif
 	int state = Screen::gGame2DMgr->check_SMenu();
 	switch (state) {
 	case Screen::Game2DMgr::CHECK2D_SMenu_Cancel: { // unpause and resume gameplay
@@ -271,8 +314,13 @@ void CaveState::check_SMenu(SingleGameSection* game)
 		return;
 			}	case Screen::Game2DMgr::CHECK2D_SMenu_Error: {
 		// Conditions to open pause menu
+#ifdef PIKI_PC_PORT
+		if (!(gameSystem->isFlag(GAMESYS_DisablePause)) && moviePlayer->mDemoState == DEMOSTATE_Inactive && !gameSystem->paused()
+		    && game->pcPausePressed()) {
+#else
 		if (!(gameSystem->isFlag(GAMESYS_DisablePause)) && moviePlayer->mDemoState == DEMOSTATE_Inactive && !gameSystem->paused()
 		    && game->mControllerP1->getButtonDown() & Controller::PRESS_START) {
+#endif
 			og::Screen::DispMemberSMenuAll disp;
 			game->setDispMemberSMenu(disp);
 			if (!Screen::gGame2DMgr->open_SMenu(disp)) {
@@ -509,6 +557,10 @@ void CaveState::onMovieStart(SingleGameSection* game, MovieConfig* config, u32, 
 			    = playData->isStoryFlag(STORY_DebtPaid) ? Screen::Game2DMgr::GOTITLE_PresidentDown : Screen::Game2DMgr::GOTITLE_LouieDown;
 			game->setPlayerMode(NAVIID_Louie);
 		}
+#ifdef PIKI_PC_PORT
+		// Selector de capitanes: el título sigue al personaje, no al índice.
+		naviType = (Screen::Game2DMgr::GameOverTitle)pc_p2_captain_down_title(naviID);
+#endif
 		Screen::gGame2DMgr->open_GameOver(naviType);
 	}
 
@@ -637,6 +689,16 @@ void CaveState::onMovieDone(Game::SingleGameSection* game, Game::MovieConfig* co
 				gameSystem->mSection->setPlayerMode(NAVIID_Olimar);
 			}
 		} else {
+#ifdef PIKI_PC_PORT
+			// Permadeath: caen los dos capitanes, se borra la partida y se
+			// vuelve al título sin pasar por el guardado del final del día.
+			if (pc_p2_permadeath_active()) {
+				pc_p2_rules_erase_current_save();
+				gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
+				game->flow_goto_title();
+				return;
+			}
+#endif
 #if defined(VERSION_JP)
 			if (gGameConfig.mParms.mE3version.mData) {
 				sys->forceFinishSection();

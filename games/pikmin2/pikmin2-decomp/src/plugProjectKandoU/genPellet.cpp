@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "Game/gameGenerator.h"
 
 static const char name[] = "genPellet";
@@ -127,6 +130,27 @@ void GenPellet::doRead(Stream& data)
 	ID32 id;
 	id.read(data);
 	mManager->generatorRead(data, mGenParm, id.getID());
+#ifdef PIKI_PC_PORT
+	// Randomizer: identidad del tesoro de este generador. Si cambia de clase
+	// (tesoro <-> objeto del Kit) cambia también de gestor (plan §5.4).
+	{
+		int rndType  = mPelType;
+		int rndIndex = mGenParm->mIndex;
+		pc_p2_rnd_gen_pellet(&rndType, &rndIndex);
+		if (rndType != mPelType) {
+			BasePelletMgr* mgr = pelletMgr->getMgrByID(rndType);
+			if (mgr) {
+				delete mGenParm;
+				mPelType = rndType;
+				mManager = mgr;
+				mGenParm = mManager->generatorNewPelletParm();
+			} else {
+				rndIndex = mGenParm->mIndex;
+			}
+		}
+		mGenParm->mIndex = rndIndex;
+	}
+#endif
 }
 
 /**

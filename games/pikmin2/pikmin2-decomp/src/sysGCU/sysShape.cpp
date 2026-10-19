@@ -10,6 +10,9 @@
 #include "SysShape/MotionListener.h"
 #include "JSystem/J3D/J3DAnmLoader.h"
 #include "nans.h"
+#ifdef PIKI_PC_PORT
+#include "timing/pc_anim_timing.h"
+#endif
 
 static const u32 padding[]    = { 0, 0, 0 };
 static const char className[] = "sysShape";
@@ -136,6 +139,9 @@ void Animator::animate(f32 speed)
 		return;
 	}
 
+#ifdef PIKI_PC_PORT
+	speed = pc_p2_anim_step(speed);
+#endif
 	mTimer += speed;
 
 	bool loopEndFound = false;

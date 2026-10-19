@@ -1,5 +1,9 @@
 #include "settings/pc_settings.h"
 #include "teki.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_policy.h"
+#include "netplay/pc_netplay_present.h"
+#endif
 #include "AIConstant.h"
 #include "AIPerf.h"
 #include "BaseInf.h"
@@ -1945,7 +1949,11 @@ void BTeki::drawDefault(Graphics& gfx)
 	clearTekiOption(TEKIOPT_Drawed);
 
 	f32 rad = getBoundingSphereRadius();
+#if defined(PIKI_PC_PORT)
+	if (!pc_netplay_sim_visible(gfx.mCamera->isPointVisible(getBoundingSphereCentre(), rad))) {
+#else
 	if (!gfx.mCamera->isPointVisible(getBoundingSphereCentre(), rad)) {
+#endif
 		enableAICulling();
 	} else {
 		disableAICulling();
@@ -1958,7 +1966,15 @@ void BTeki::drawDefault(Graphics& gfx)
 	if (getTekiOption(TEKIOPT_Unk6) && !isCreatureFlag(CF_AIAlwaysActive)) {
 		// some debug flag thing
 	} else {
+#if defined(PIKI_PC_PORT)
+		// Netplay presentation pass: skip teki outside the local frustum. The
+		// sim work inside drawTekiShape is gated on the sim side.
+		if (pc_netplay_present_sim_side() || gfx.mCamera->isPointVisible(getBoundingSphereCentre(), rad)) {
+			drawTekiShape(gfx);
+		}
+#else
 		drawTekiShape(gfx);
+#endif
 	}
 
 	if (gsys->mToggleDebugInfo) {

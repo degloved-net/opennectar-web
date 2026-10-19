@@ -1,4 +1,9 @@
 #include "PlantMgr.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_policy.h"
+#include "netplay/pc_netplay_present.h"
+#include "timing/pc_render_phase.h"
+#endif
 #include "Age.h"
 #include "CreatureProp.h"
 #include "DebugLog.h"
@@ -120,11 +125,27 @@ void Plant::refresh(Graphics& gfx)
 			BoundBox box(Vector3f(mSRT.t.x - rad, mSRT.t.y, mSRT.t.z - rad),
 			             Vector3f(mSRT.t.x + rad, mSRT.t.y + 2.0f * rad, mSRT.t.z + rad));
 
+#if defined(PIKI_PC_PORT)
+			// Netplay: the sim side uses the visibility policy; the
+			// presentation pass culls the draw only, without touching AI or
+			// member state.
+			if (!pc_netplay_present_sim_side()) {
+				if (!gfx.mCamera->isBoundVisible(box, 0x8000 | 0x20 | 0x10 | 0x1 | 0x2 | 0x4 | 0x8)) {
+					return;
+				}
+			} else if (!pc_netplay_sim_visible(gfx.mCamera->isBoundVisible(box, 0x8000 | 0x20 | 0x10 | 0x1 | 0x2 | 0x4 | 0x8))
+			           && !_394) {
+				C_SAI(this)->start(this, PlantAI::STATE_Wait);
+				mIsCulled = true;
+				return;
+			}
+#else
 			if (!gfx.mCamera->isBoundVisible(box, 0x8000 | 0x20 | 0x10 | 0x1 | 0x2 | 0x4 | 0x8) && !_394) {
 				C_SAI(this)->start(this, PlantAI::STATE_Wait);
 				mIsCulled = true;
 				return;
 			}
+#endif
 		}
 	}
 

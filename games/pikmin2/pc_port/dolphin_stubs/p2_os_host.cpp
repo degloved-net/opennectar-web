@@ -2,6 +2,9 @@
  * Fase 3: host Dolphin OS / DVD / PAD / VI / CARD / AI / AR / DSP / GBA / MTX.
  * Suficiente para enlazar pikmin2_pc. El renderer GX real es Fase 4.
  */
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 #include "System.h"
 #include "Dolphin/os.h"
 #include "gl/pc_gfx.h"
@@ -23,10 +26,13 @@
 #include "JSystem/JAudio/DSP.h"
 #include "JSystem/JKernel/JKRHeap.h"
 #include "THP/THPPlayer.h"
+#include "audio/pc_dsp_host.h"
+#include "pc_speedrun.h"
 
 RenderModeInfo gPcRenderInfoStore = {};
 
 #include <cstdarg>
+#include <signal.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -57,6 +63,9 @@ RenderModeInfo gPcRenderInfoStore = {};
 #include "pc_window.h"
 #include "settings/pc_settings.h"
 #include "settings/pc_settings_p2_shim.h"
+#if PIKI_PC_TOUCH
+#include "touch/pc_touch.h"
+#endif
 
 OSTime __OSStartTime       = 0;
 u32 __OSFpscrEnableBits    = 0;
@@ -198,7 +207,7 @@ static pthread_mutex_t* pc_native_mutex(OSMutex* key, bool create, bool reinit =
 // Called when memory that may hold OSMutex/OSCond/OSThreadQueue objects is
 // freed (JKRHeap::free / dispose), so slots are reusable and never point at
 // dead objects.
-extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
+static void pc_os_release_range(const void* begin, const void* end, bool mutexesOnly)
 {
 	const uintptr_t lo = (uintptr_t)begin, hi = (uintptr_t)end;
 	pthread_mutex_lock(&sMutexRegistry.registryLock);
@@ -219,6 +228,8 @@ extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
 		}
 	}
 	pthread_mutex_unlock(&sMutexRegistry.registryLock);
+	if (mutexesOnly)
+		return;
 	pthread_mutex_lock(&sCondRegistry.registryLock);
 	for (size_t i = 0; i < 1024; ++i) {
 		const uintptr_t k = (uintptr_t)sCondRegistry.keys[i];
@@ -238,6 +249,19 @@ extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
 		}
 	}
 	pthread_mutex_unlock(&sQueueRegistry.registryLock);
+}
+
+extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
+{
+	pc_os_release_range(begin, end, false);
+}
+
+// JKRHeap::freeAll: solo los mutex (el registro que se agotaba). Una cola o
+// condición de ese montón puede tener aún un hilo esperando (cargador en
+// segundo plano) y pthread_cond_destroy aborta en ese caso.
+extern "C" void pc_os_release_mutex_range(const void* begin, const void* end)
+{
+	pc_os_release_range(begin, end, true);
 }
 
 static pthread_cond_t* pc_native_cond(OSCond* key, bool create)
@@ -337,7 +361,13 @@ void OSInit(void)
 {
 	sStart = std::chrono::steady_clock::now();
 	if (!sArenaLo) {
+#if defined(_WIN32)
+		// MinGW no tiene aligned_alloc. La arena no se libera nunca, así que
+		// no hace falta emparejarla con _aligned_free.
+		sArenaLo = _aligned_malloc(kArenaSize, 32);
+#else
 		sArenaLo = aligned_alloc(32, kArenaSize);
+#endif
 		if (!sArenaLo)
 			sArenaLo = malloc(kArenaSize);
 		sArenaHi = (u8*)sArenaLo + kArenaSize;
@@ -726,7 +756,27 @@ void OSCancelThread(OSThread* thread)
 		pthread_cond_broadcast(&arg->cond);
 		pthread_mutex_unlock(&arg->mutex);
 	}
+#ifdef __ANDROID__
+	// bionic no tiene pthread_cancel: una señal cuyo manejador sale del hilo.
+	// Los hilos del juego esperan en condvars (sin el mutex tomado), que es
+	// donde el original los cancelaba.
+	{
+		static bool installed = false;
+		if (!installed) {
+			struct sigaction sa;
+			memset(&sa, 0, sizeof(sa));
+			sa.sa_handler = [](int) { pthread_exit(nullptr); };
+			sigaction(SIGUSR2, &sa, nullptr);
+			installed = true;
+		}
+		if (pthread_equal(native, pthread_self())) {
+			pthread_exit(nullptr);
+		}
+		pthread_kill(native, SIGUSR2);
+	}
+#else
 	pthread_cancel(native);
+#endif
 	if (!pthread_equal(native, pthread_self())) {
 		// The target may need the interrupt lock to unwind (PcIrqRelease).
 		PcIrqRelease irq;
@@ -971,10 +1021,11 @@ u32 SIProbe(s32) { return 0; }
 
 extern "C" u32 gPcSectionTicks;
 extern "C" int pc_p2_retrace_hz(void); // sysGCU/system.cpp: 120 con FPS Mode 120, si no 60
+extern "C" bool pc_window_monitor_vsync_locked(void);
+extern "C" void pc_window_monitor_vsync_fallback(void);
 u32 gPcSectionTicks = 0;
 void VIInit() { printf("[PC Port] VIInit()\n"); }
 void VIFlush() {}
-u32 VIGetDTVStatus(void) { return 0; }
 
 void VIWaitForRetrace()
 {
@@ -1044,12 +1095,25 @@ void VIWaitForRetrace()
 		pc_settings_request_toggle();
 	// Aviso de Lock-On (Camera > Lock-On) y, encima, el menu F1, sobre el
 	// frame terminado y antes de presentarlo.
-	pc_settings_draw_lock_on();
+	pc_speedrun_frame();
+	pc_settings_p2_begin_frame();
 	pc_settings_draw_idle_counter();
+	pc_speedrun_draw();
+	pc_randomizer_pause_draw();
+	pc_randomizer_debug_draw();
+	pc_newgame_prompt_draw();
+	pc_devassign_prompt_draw();
+	pc_captain_select_draw();
+	pc_speedrun_menu_draw();
+	pc_erased_notice_draw();
 	pc_settings_draw();
 	pc_settings_draw_achievement_toast();
 	pc_settings_p2_flush();
+	pc_captain_select_draw_3d();
 	pc_gfx_present();
+#if PIKI_PC_TOUCH
+	pc_touch_draw(); // controles táctiles encima de todo, como en Pikmin 1
+#endif
 	if (SDL_Window* window = SDL_GL_GetCurrentWindow()) {
 		// FPS Mode 120 en un monitor mas lento: con VSync el swap bloquearia
 		// hasta el refresco y frenaria la logica. Se presenta un frame por
@@ -1070,6 +1134,26 @@ void VIWaitForRetrace()
 		if (sRetraceCount % swapEvery == 0) {
 			SDL_GL_SwapWindow(window);
 		}
+		// Some drivers accept interval 1 but do not actually block. In that
+		// case the game would race far above the monitor and its adaptive delta
+		// would clamp, so detect it over a stable half-second window and return
+		// to software pacing. This mirrors Pikmin 1's monitor-mode watchdog.
+		if (pc_window_monitor_vsync_locked()) {
+			static auto sLockStart = std::chrono::steady_clock::now();
+			static u32 sLockFrames = 0;
+			sLockFrames++;
+			const auto lockNow = std::chrono::steady_clock::now();
+			const double seconds = std::chrono::duration<double>(lockNow - sLockStart).count();
+			if (seconds >= 0.5) {
+				if ((double)sLockFrames > 1.25 * (double)pc_p2_retrace_hz() * seconds) {
+					printf("[PC Port] VSync is not pacing swap (%u frames in %.2fs); using software monitor pacing\n",
+					       (unsigned)sLockFrames, seconds);
+					pc_window_monitor_vsync_fallback();
+				}
+				sLockStart  = lockNow;
+				sLockFrames = 0;
+			}
+		}
 		// PIKMIN_SHOW_FPS=1: en el titulo de la ventana, actualizaciones de la
 		// seccion por segundo (frames nuevos del juego) y presentaciones.
 		static const bool sShowFps = getenv("PIKMIN_SHOW_FPS") != nullptr;
@@ -1081,6 +1165,9 @@ void VIWaitForRetrace()
 				char title[96];
 				snprintf(title, sizeof(title), "Open Nectar 2 - juego %u fps / pantalla %u fps", gPcSectionTicks - sLastTicks, sSwaps);
 				SDL_SetWindowTitle(window, title);
+				// También en la terminal: a pantalla completa el título no se ve.
+				printf("[FPS] juego %u / pantalla %u\n", gPcSectionTicks - sLastTicks, sSwaps);
+				fflush(stdout);
 				sLastTicks = gPcSectionTicks;
 				sSwaps     = 0;
 				sLastMs    = nowMs;
@@ -1106,7 +1193,7 @@ void VIWaitForRetrace()
 	// not guaranteed to hold the loop here (PRIME offload, Wayland), so pace
 	// the retrace ourselves; PIKMIN_FPS overrides the 60 Hz field rate, and
 	// FPS Mode 120 doubles it (System::setFrameRate compensates the menus).
-	{
+	if (!pc_window_monitor_vsync_locked()) {
 		static double sPeriodUs = 0.0;
 		static std::chrono::steady_clock::time_point sNext;
 		static bool sInit = false;
@@ -1162,6 +1249,8 @@ void VISetNextFrameBuffer(void* fb) { sFrameBuffer = fb; }
 void* VIGetCurrentFrameBuffer() { return sFrameBuffer; }
 void VISetBlack(BOOL) {}
 u32 VIGetRetraceCount() { return sRetraceCount; }
+// Versión USA: ¿cable de vídeo por componentes (progresivo)? En PC, no.
+u32 VIGetDTVStatus(void) { return 0; }
 
 BOOL PADInit()
 {
@@ -1336,6 +1425,12 @@ BOOL DVDOpen(char* filename, DVDFileInfo* fileInfo)
 	{
 		std::lock_guard<std::mutex> lock(sDvdMutex);
 		fileInfo->startAddr = pc_dvd_start_addr(pc_dvd_entry_for(path));
+		// Reabrir el mismo DVDFileInfo sin DVDClose perdía el FILE* anterior;
+		// en Windows el CRT solo admite 512 abiertos y al agotarlos fallan
+		// las cargas (sonidos que no suenan).
+		auto prev = sDvdFiles.find(fileInfo);
+		if (prev != sDvdFiles.end() && prev->second != f)
+			fclose(prev->second);
 		sDvdFiles[fileInfo] = f;
 	}
 	return TRUE;
@@ -1358,6 +1453,9 @@ BOOL DVDFastOpen(s32 entryNum, DVDFileInfo* fileInfo)
 	fileInfo->startAddr = pc_dvd_start_addr(entryNum);
 	fseek(f, 0, SEEK_SET);
 	std::lock_guard<std::mutex> lock(sDvdMutex);
+	auto prev = sDvdFiles.find(fileInfo);
+	if (prev != sDvdFiles.end() && prev->second != f)
+		fclose(prev->second);
 	sDvdFiles[fileInfo] = f;
 	return TRUE;
 }
@@ -1835,7 +1933,7 @@ void PSVECCrossProduct(const Vec* a, const Vec* b, Vec* o)
 
 void DSPReleaseHalt2(u32) {}
 void DsetupTable(u32, u32, u32, u32, u32) {}
-void DsetMixerLevel(f32) {}
+void DsetMixerLevel(f32 level) { pc_dsp_host_set_mixer_level(level); }
 void DspBoot(DSPCallback) {}
 void DspFinishWork(u16) {}
 void DsyncFrame2(u32, u32, u32) {}

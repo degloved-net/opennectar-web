@@ -7,6 +7,9 @@
 #include "Vector.h"
 #include "sysMath.h"
 #include "types.h"
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_present.h"
+#endif
 
 class Graphics;
 class Node;
@@ -81,6 +84,12 @@ public:
 
 	int isBoundVisible(immut BoundBox& bound, int planeFlag)
 	{
+#if defined(PIKI_PC_PORT)
+		// Netplay sim pass: always visible, never the local frustum.
+		if (pc_netplay_present_sim_pass()) {
+			return planeFlag;
+		}
+#endif
 		immut f32* boundArray = (immut f32*)&bound;
 		for (int i = 0; i < mActivePlaneCount; i++) {
 			CullingPlane* plane = mPlanePointers[i];

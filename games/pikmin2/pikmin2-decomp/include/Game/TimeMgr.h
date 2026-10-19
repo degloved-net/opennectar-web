@@ -82,6 +82,11 @@ struct TimeMgr : public CNode {
 	void pcUpdateSlotFor();
 	f32 pcGetLightSunRatio();
 	void pcDebugAdvanceHour();
+	/// Atajo de grabación (Ctrl+3/4/5): la luz de una hora del día. Si el reloj
+	/// visual va por su cuenta (Day Length, Infinite Day) solo se mueve la luz.
+	void pcRecordSetLight(f32 hour);
+	f32 pcDayStartTime() const { return mParms.mParms.mDayStartTime.mValue; }
+	f32 pcDayEndTime() const { return mParms.mParms.mDayEndTime.mValue; }
 	static bool pcVisualActive(); ///< Luz siguiendo el reloj visual (Infinite Day, Day Length, Eternal Night).
 #endif
 

@@ -4,6 +4,9 @@
 #include "SoundID.h"
 #include "System.h"
 #include "PSSystem/PSSystemIF.h"
+#ifdef PIKI_PC_PORT
+extern bool gPcAutoAdvanceMovieText; // moviePlayer.cpp
+#endif
 
 namespace P2JME {
 
@@ -143,6 +146,20 @@ bool TSequenceProcessor::do_isReady()
 		return false;
 	}
 
+#ifdef PIKI_PC_PORT
+	if (::gPcAutoAdvanceMovieText) {
+		// Textos de la nave: escritura rápida y pasan de página solos.
+		if (isFlag(SeqProc_IsWaitingPressA)) {
+			mPageFinishWaitTimer -= sys->mDeltaTime;
+			if (mPageFinishWaitTimer <= 0.0f) {
+				resetAbtnWait();
+				resetFlag(SeqProc_IsForceFinish);
+			}
+			return false;
+		}
+		setFlag(SeqProc_IsForceFinish);
+	}
+#endif
 	if (isFlag(SeqProc_IsWaitingPressA)) {
 		mPageFinishWaitTimer -= sys->mDeltaTime;
 		if (mPageFinishWaitTimer <= 0.0f) {

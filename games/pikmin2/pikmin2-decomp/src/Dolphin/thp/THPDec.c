@@ -1,13 +1,5 @@
 #include "THP/THPVideoDecode.h"
 #include "THP/THP.h"
-#ifdef PIKI_PC_PORT
-#include <string.h>
-#include <stdint.h>
-static void __dcbz(void* base, unsigned offset)
-{
-    memset((void*)(((uintptr_t)base + offset) & ~(uintptr_t)31), 0, 32);
-}
-#endif
 
 char* __THPVersion = "<< Dolphin SDK - THP\trelease build: Jan  9 2004 13:06:55 (0x2301) >>";
 
@@ -2038,7 +2030,7 @@ static void __THPHuffDecodeDCTCompY(register THPFileInfo* info, THPCoeff* block)
 #ifdef __MWERKS__ // clang-format off
 			asm { _RECV_END: }
 #else // clang-format on
-		_RECV_END: // Exists just to shut up VSCode
+		_RECV_END:; // Exists just to shut up VSCode (el ; para gcc 10: etiqueta al final de bloque)
 #endif
 		}
 		info->cnt      = cnt;

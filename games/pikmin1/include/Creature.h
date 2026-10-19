@@ -13,6 +13,7 @@
 #include "types.h"
 #if defined(PIKI_PC_PORT)
 #include "timing/pc_render_phase.h"
+#include "netplay/pc_netplay_det.h"
 #endif
 
 class CollEvent;
@@ -283,10 +284,20 @@ public:
 	{
 #if defined(PIKI_PC_PORT)
 		if (!pc_render_is_authoritative()) return;
+		// Netplay: the local frustum must not cull the sim, so deterministic
+		// mode keeps every creature visible to the AI.
+		if (pc_netplay_deterministic()) {
+			resetCreatureFlag(CF_UseAICulling);
+			return;
+		}
 #endif
 		setCreatureFlag(CF_UseAICulling);
 	}
+#if defined(PIKI_PC_PORT)
+	bool aiCullable() { return pc_netplay_deterministic() || !isCreatureFlag(CF_UseAICulling); }
+#else
 	bool aiCullable() { return !isCreatureFlag(CF_UseAICulling); }
+#endif
 
 	bool isAIActive() { return !isCreatureFlag(CF_IsAiDisabled); }
 	void stopAI() { setCreatureFlag(CF_IsAiDisabled); }

@@ -29,6 +29,9 @@ struct HorizonalSplitter : public Splitter {
 	// _00 VTBL
 	Rectf mBounds;       // _04
 	Graphics* mGraphics; // _14
+#ifdef PIKI_PC_PORT
+	bool mPcCoop = false; // reparto del co-op en curso (split2)
+#endif
 };
 
 // Unused struct (vertical splitscreen?)

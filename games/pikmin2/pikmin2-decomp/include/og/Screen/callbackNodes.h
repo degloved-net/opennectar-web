@@ -269,6 +269,7 @@ struct CallBack_LifeGauge : public P2DScreen::CallBackNode {
 	void moveIcon();
 	void setType(LifeGaugeType lifeGaugeType);
 	void setOffset(f32 x, f32 y);
+	void pcSetCharacter(int character, int naviIndex); // selector de capitanes (pc_p2_captains.h)
 
 	static inline void initialiseStaticValues();
 
@@ -305,6 +306,27 @@ struct CallBack_LifeGauge : public P2DScreen::CallBackNode {
 	LifeGaugeType mLifeGaugeType;     // _90
 	u8 mCanNaviChange;                // _94
 	f32 mMoveTimer;                   // _98
+
+	// Selector de capitanes: un retrato (icono y fondo) tal como viene en el .blo.
+	struct PcPortrait {
+		const ResTIMG* mIcon;
+		const ResTIMG* mBorder;
+		JUtility::TColor mIconWhite;
+		JUtility::TColor mIconBlack;
+		JUtility::TColor mWhite;
+		JUtility::TColor mBlack;
+		J2DPicture::TCornerColor mCorner;
+		bool mValid;
+	};
+	PcPortrait mPcOwn;  // el de este pane
+	int mPcCharacter;
+	// Los HUD de 2P y VS tienen un .blo por jugador, sin los panes de Louie y
+	// del Presidente: el retrato de cada capitán se toma del pane del otro.
+	static PcPortrait sPcOriginal[2];
+	// Cara del Presidente en 2P y VS (president.bti del archivo del HUD), que no
+	// la lleva ningún pane: la carga el HUD con el archivo en la mano.
+	static const ResTIMG* sPcPresidentTex;
+	void applyPcPortrait(const PcPortrait& portrait);
 
 	static struct StaticValues {
 		inline StaticValues()

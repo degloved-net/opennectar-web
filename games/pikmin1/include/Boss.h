@@ -10,6 +10,9 @@
 #include "SearchSystem.h"
 #include "Vector.h"
 #include "types.h"
+#if defined(PIKI_PC_PORT)
+#include <vector>
+#endif
 
 class BirthInfo;
 class BossMgr;
@@ -150,6 +153,23 @@ public:
 	AnimContext mAnimContext; // _04
 	AnimMgr* mAnimMgr;        // _14
 };
+
+#if defined(PIKI_PC_PORT)
+/**
+ * @brief Netplay two-pass frame: world-space joint copy for the multi-part bosses.
+ *
+ * Beady Long Legs, Emperor Bulblax, Goolix and Burrowing Snagret write their final joint matrices in their body
+ * controller's refresh, which is sim code and runs only in the authoritative pass. capture() keeps that result in
+ * world space (view matrix undone); apply() puts it back for the presentation camera after the owner's updateAnim
+ * rebuilt the base animation there. Neither touches anything the sim reads.
+ */
+struct BossPresentJoints {
+	void capture(BossShapeObject* shapeObj, Graphics& gfx);
+	void apply(BossShapeObject* shapeObj, Graphics& gfx);
+
+	std::vector<Matrix4f> mWorld;
+};
+#endif
 
 /**
  * @brief TODO

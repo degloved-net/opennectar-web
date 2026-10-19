@@ -19,8 +19,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpulse-dev libasound2-dev libdbus-1-dev libudev-dev libsamplerate0-dev \
     ; rm -rf /var/lib/apt/lists/*
 
+# El online de Pikmin 1 compila con -ftrivial-auto-var-init=zero (GCC 12+).
+# GCC 13 del PPA de toolchain: el runtime de C++ va estático y la glibc sigue
+# siendo la 2.31 del sistema.
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common gpg-agent \
+    && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
+    && apt-get update && apt-get install -y --no-install-recommends gcc-13 g++-13 \
+    ; rm -rf /var/lib/apt/lists/*
+
 # CMake de Ubuntu 20.04 es 3.16; pip trae uno reciente.
 RUN pip3 install --no-cache-dir "cmake>=3.24" ninja
 
-ENV CC=gcc-10 CXX=g++-10
+ENV CC=gcc-13 CXX=g++-13
 WORKDIR /src

@@ -78,6 +78,7 @@ int pc_settings_get_navi_health_pct(void);
 int pc_settings_get_teki_health_pct(void);
 int pc_settings_get_infinite_day(void);
 int pc_settings_get_eternal_night(void);
+int pc_settings_get_fireflies(void);
 int pc_settings_get_free_camera(void);
 float pc_settings_get_free_camera_pad_scale(void); ///< issue #66, 1 = default
 /// Radio máximo del silbato, % del original (100 = sin cambio).
@@ -94,6 +95,8 @@ int pc_settings_get_no_trip(void);
 int pc_settings_get_onion_step10(void);
 /// Los Pikmin silbados se unen al grupo al instante, sin la reacción de LookAt.
 int pc_settings_get_instant_whistle(void);
+int pc_settings_get_whistle_pluck(void);
+int pc_settings_get_hide_olimar_text(void);   ///< P2: textos de la Drake
 /// Cheats. Todos vuelven al original con el modo Hard activo.
 int pc_settings_get_piki_invincible(void);
 int pc_settings_get_all_flowers(void);
@@ -142,9 +145,6 @@ bool pc_vs_end_screen_active(void);
 /// GameStat::freePikis conserva su valor al salir de la fase.
 void pc_settings_note_gameplay_frame(void);
 int pc_settings_in_gameplay(void);
-/// Estado del Lock-On para el HUD: lo fija Navi cada frame.
-void pc_settings_note_lock_on(int hasTarget);
-void pc_settings_draw_lock_on(void);
 
 // Returns 1 while hold-to-continue-plucking is enabled, 0 otherwise.
 //
@@ -173,12 +173,55 @@ int pc_settings_get_day_minutes(void);
    640x480 space the game's BLO screens use. */
 void pc_permadeath_draw_slot_badge(int vx, int vy, int vw);
 
+/* Aviso "Expedition Lost": se pone en cola al borrar una partida Permadeath y
+   se abre en el siguiente selector de ficheros, que espera debajo. */
+void pc_erased_notice_queue(void);
+bool pc_erased_notice_open_if_queued(void);
+bool pc_erased_notice_active(void);
+void pc_erased_notice_draw(void);
+
 void pc_newgame_prompt_open(void);
 bool pc_newgame_prompt_active(void);
 void pc_newgame_prompt_draw(void);
+/// Randomizer: código RND2 de la partida mientras el juego está en pausa.
+void pc_randomizer_pause_draw(void);
+/// Randomizer: línea de los atajos de prueba (PIKI_RND_DEBUG=1).
+void pc_randomizer_debug_draw(void);
 int  pc_newgame_prompt_result(void);
 /// True after accept on the second prompt if Hard was chosen.
 bool pc_newgame_prompt_chose_hard(void);
+
+/* Menú del modo Speedrun (P2): lo abre la selección de partida cuando se
+   entra por la opción Speedrun del título. Start Run / Category / How It
+   Works / Settings; la explicación se abre sola la primera vez. */
+#define PC_SPEEDRUN_MENU_PENDING (-1)
+#define PC_SPEEDRUN_MENU_BACK    (0)
+#define PC_SPEEDRUN_MENU_START   (1)
+void pc_speedrun_menu_open(void);
+bool pc_speedrun_menu_active(void);
+int  pc_speedrun_menu_result(void);
+void pc_speedrun_menu_draw(void);
+
+// Pikmin 2: selector de capitanes (docs/PLAN_SELECTOR_CAPITANES.md §6). Se abre
+// antes de la selección de partida y antes de cargar un nivel de Desafío o VS.
+// Start guarda la elección (pikmin_settings.conf, pc_p2_captains.h); B vuelve.
+#define PC_CAPSEL_PENDING (-1)
+#define PC_CAPSEL_BACK    (0)
+#define PC_CAPSEL_START   (1)
+void pc_captain_select_open(void);
+bool pc_captain_select_active(void);
+int  pc_captain_select_result(void);
+void pc_captain_select_draw(void);
+// Modelos de las tarjetas: después de pc_settings_p2_flush, antes de presentar.
+void pc_captain_select_draw_3d(void);
+int  pc_settings_get_speedrun_category(void);
+int  pc_settings_get_speedrun_splits_shown(void);
+// LiveSplit Server (pc_livesplit.cpp): encendido, ocultar el reloj propio con
+// LiveSplit conectado, y dirección (speedrunLsHost/Port en el .conf).
+int  pc_settings_get_speedrun_livesplit(void);
+int  pc_settings_get_speedrun_ls_hide_clock(void);
+const char* pc_settings_get_speedrun_ls_host(void);
+int  pc_settings_get_speedrun_ls_port(void);
 
 /* Selector 1 jugador / 2 jugadores (PLAN_COOP fase 0b). Lo abre la sección de
    selección de slot justo al entrar desde "Empezar". Si se eligen 2 jugadores
@@ -213,6 +256,10 @@ int  pc_devassign_prompt_result(void);
 
 /// Debug shortcuts F5 and F6, off by default.
 int pc_settings_get_debug_keys(void);
+/// Atajo de grabación (Ctrl+2): 1 = aspecto del juego original (sin sombras,
+/// AO, bloom, desenfoque, FXAA, luz por píxel, anisotrópico, gradación ni
+/// modelos HD); 0 = vuelve a lo que había. En vivo y sin guardar el .conf.
+void pc_settings_record_original_look(int original);
 /// Modelo HD de esa fila del selector (0 Olimar, 1 Louie, 2 Louie HD,
 /// 3 Pikmin, 4 Bulborb, 5 Dwarf Bulborb): 0 = apagado, se usa el original.
 int pc_settings_get_hd_model_enabled(int row);

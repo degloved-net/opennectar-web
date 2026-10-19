@@ -1,4 +1,5 @@
 #include "pc_tick_profiler.h"
+#include "netplay/pc_netplay_det.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -84,7 +85,12 @@ bool pc_tick_profiler_enabled()
 	// per frame and became the cost it was measuring.
 	static const bool enabled = [] {
 		const char* value = getenv("PIKMIN_TICK_STATS");
-		return (value != nullptr && value[0] == '1') || pc_tick_profiler_hud_enabled();
+		if ((value != nullptr && value[0] == '1') || pc_tick_profiler_hud_enabled()) return true;
+		// PIKMIN_NETPLAY_PROFILE_LOG implies sampling in deterministic mode,
+		// so its report has data. First called after main() ran
+		// pc_netplay_det_init().
+		const char* log = getenv("PIKMIN_NETPLAY_PROFILE_LOG");
+		return log != nullptr && *log != '\0' && pc_netplay_deterministic();
 	}();
 	return enabled;
 }

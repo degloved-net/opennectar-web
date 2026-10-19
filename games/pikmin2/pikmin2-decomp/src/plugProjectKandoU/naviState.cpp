@@ -1,3 +1,5 @@
+#include "pc_p2_captains.h"
+#include "Game/pcCoop.h"
 #include "IDelegate.h"
 #ifdef PIKI_PC_PORT
 extern "C" float pc_settings_get_throw_speed_scale(void);
@@ -6,6 +8,11 @@ extern "C" int pc_settings_get_throw_cancel_b(void);
 extern "C" int pc_settings_get_mouse_wheel_action(void);
 extern "C" int pc_settings_get_quick_grab(void);
 int pc_window_take_wheel_steps(void);
+extern "C" int pc_window_get_keyboard_owner(void);
+namespace Game {
+struct Navi;
+}
+static bool pcWheelIsMine(Game::Navi* navi);
 // Mod "Throw Speed": velocidad de las animaciones de coger y lanzar.
 #define PC_THROW_ANIM_SPEED (30.0f * pc_settings_get_throw_speed_scale())
 #else
@@ -55,6 +62,10 @@ SoundID se_jumps[3]     = { PSSE_PL_WAIT_JUMP_ORIMA, PSSE_PL_WAIT_JUMP_LUGI, PSS
 SoundID se_kyoros[3]    = { PSSE_PL_WAIT_KYORO_ORIMA, PSSE_PL_WAIT_KYORO_LUGI, PSSE_PL_WAIT_KYORO_SHACHO };
 } // namespace
 
+// Selector de capitanes: la voz sigue al personaje (mRappa, fijado en
+// NaviMgr::birth), no al índice ni a la deuda: 0 Olimar, 1 Louie, 2 Presidente.
+static inline int pcNaviVoice(Game::Navi* navi) { return navi->mSoundObj->getManType(); }
+
 namespace Game {
 
 /**
@@ -89,20 +100,27 @@ void NaviState::draw2d(J2DGrafContext& graf, int& a2)
  */
 void NaviState::playChangeVoice(Navi* navi)
 {
-	if (navi->mNaviIndex == NAVIID_Olimar) { // OLIMAR
+	// Selector de capitanes: el capitán Pikmin solo dice "¡Pikmin!" (PIKON
+	// traducido), sin el grito de sistema del capitán original.
+	if (pc_p2_character_is_pikmin(pc_p2_captain_loaded_character(navi->mNaviIndex))) {
+		navi->mSoundObj->startSound(PSSE_PL_PIKON_ORIMA, 0);
+		return;
+	}
+
+	if (pcNaviVoice(navi) == PSM::Navi::ManType_Olimar) { // OLIMAR
 		PSSystem::spSysIF->playSystemSe(PSSE_SY_CHANGE_ORIMA, 0);
 
-	} else if (playData->isStoryFlag(STORY_DebtPaid)) { // PRESIDENT
+	} else if (pcNaviVoice(navi) == PSM::Navi::ManType_President) { // PRESIDENT
 		PSSystem::spSysIF->playSystemSe(PSSE_SY_CHANGE_SHACHO, 0);
 
 	} else { // LOUIE
 		PSSystem::spSysIF->playSystemSe(PSSE_SY_CHANGE_LUI, 0);
 	}
 
-	if (navi->mNaviIndex == NAVIID_Olimar) { // OLIMAR
+	if (pcNaviVoice(navi) == PSM::Navi::ManType_Olimar) { // OLIMAR
 		navi->mSoundObj->startSound(PSSE_PL_PIKON_ORIMA, 0);
 
-	} else if (playData->isStoryFlag(STORY_DebtPaid)) { // PRESIDENT
+	} else if (pcNaviVoice(navi) == PSM::Navi::ManType_President) { // PRESIDENT
 		navi->mSoundObj->startSound(PSSE_PL_PIKON_SHACHO, 0);
 
 	} else { // LOUIE
@@ -495,7 +513,7 @@ void NaviWalkState::exec(Navi* navi)
 				mDismissTimer = 0;
 			}
 
-			if (!gameSystem->paused_soft() && moviePlayer->mDemoState == DEMOSTATE_Inactive && !gameSystem->isMultiplayerMode()
+			if (!gameSystem->paused_soft() && moviePlayer->mDemoState == DEMOSTATE_Inactive && !PC_TWO_CAPTAIN_PLAY()
 			    && navi->mController1->isButtonDown(JUTGamePad::PRESS_Y) && playData->isDemoFlag(DEMO_Unlock_Captain_Switch)) {
 
 				Navi* otherNavi = naviMgr->getAt(GET_OTHER_NAVI(navi));
@@ -665,10 +683,10 @@ void NaviWalkState::onKeyEvent(Navi* navi, SysShape::KeyEvent const& event)
 	}
 
 	if (event.mAnimIdx == IPikiAnims::JUMP && event.mType == KEYEVENT_200) {
-		if (navi->mNaviIndex == NAVIID_Olimar) { // olimar
+		if (pcNaviVoice(navi) == PSM::Navi::ManType_Olimar) { // olimar
 			navi->mSoundObj->startSound(PSSE_PL_WAIT_LAND_ORIMA, 0);
 
-		} else if (playData->isStoryFlag(STORY_DebtPaid)) { // president
+		} else if (pcNaviVoice(navi) == PSM::Navi::ManType_President) { // president
 			navi->mSoundObj->startSound(PSSE_PL_WAIT_LAND_SHACHO, 0);
 
 		} else { // louie
@@ -759,14 +777,7 @@ void NaviWalkState::initAI_animation(Navi* navi)
 		return;
 	}
 
-	int naviIdx = navi->mNaviIndex;
-#if defined(VERSION_JP)
-	if (gameSystem->isStoryMode() && playData->isStoryFlag(STORY_DebtPaid)) {
-#else
-	if (naviIdx == NAVIID_Louie && gameSystem->isStoryMode() && playData->isStoryFlag(STORY_DebtPaid)) {
-#endif
-		naviIdx++; // president!
-	}
+	int naviIdx = pcNaviVoice(navi);
 
 	switch (animIdx) {
 	case IPikiAnims::FURIMUKU:
@@ -980,10 +991,10 @@ void NaviFollowState::init(Navi* navi, StateArg* stateArg)
 		navi->startMotion(IPikiAnims::KIZUKU, IPikiAnims::KIZUKU, navi, nullptr);
 		mFollowState = FOLLOW_AlertJump;
 
-		if (navi->mNaviIndex == NAVIID_Olimar) {
+		if (pcNaviVoice(navi) == PSM::Navi::ManType_Olimar) {
 			navi->mSoundObj->startSound(PSSE_PL_BIKU_ORIMA, 0);
 
-		} else if (playData->isStoryFlag(STORY_DebtPaid)) {
+		} else if (pcNaviVoice(navi) == PSM::Navi::ManType_President) {
 			navi->mSoundObj->startSound(PSSE_PL_BIKU_SHACHO, 0);
 
 		} else {
@@ -1027,10 +1038,10 @@ void NaviFollowState::onKeyEvent(Navi* navi, SysShape::KeyEvent const& event)
 	}
 
 	if (event.mAnimIdx == IPikiAnims::JUMP && event.mType == KEYEVENT_200) {
-		if (navi->mNaviIndex == NAVIID_Olimar) { // OLIMAR
+		if (pcNaviVoice(navi) == PSM::Navi::ManType_Olimar) { // OLIMAR
 			navi->mSoundObj->startSound(PSSE_PL_WAIT_LAND_ORIMA, 0);
 
-		} else if (playData->isStoryFlag(STORY_DebtPaid)) { // PRESIDENT
+		} else if (pcNaviVoice(navi) == PSM::Navi::ManType_President) { // PRESIDENT
 			navi->mSoundObj->startSound(PSSE_PL_WAIT_LAND_SHACHO, 0);
 
 		} else { // LOUIE
@@ -1165,28 +1176,21 @@ void NaviFollowState::exec(Navi* navi)
 		if (gameSystem && !gameSystem->mIsFrozen) {
 			// get right id for each navi for sounds
 			// 0 for olimar, 1 for louie, or 2 for president
-			int naviID = navi->mNaviIndex;
-#if defined(VERSION_JP)
-			if (gameSystem->isStoryMode() && playData->isStoryFlag(STORY_DebtPaid)) {
-#else
-			if (naviID == NAVIID_Louie && gameSystem->isStoryMode() && playData->isStoryFlag(STORY_DebtPaid)) {
-#endif
-				naviID++;
-			}
+			int naviID = pcNaviVoice(navi);
 
 			// make appropriate sound
 			switch (animIdx) {
 			case IPikiAnims::CHATTING:
-				navi->mSoundObj->startSound(se_chats[naviID], nullptr);
+				navi->mSoundObj->startSound(se_chats[naviID], 0);
 				break;
 			case IPikiAnims::AKUBI:
-				navi->mSoundObj->startSound(se_novis[naviID], nullptr);
+				navi->mSoundObj->startSound(se_novis[naviID], 0);
 				break;
 			case IPikiAnims::JUMP:
-				navi->mSoundObj->startSound(se_jumps[naviID], nullptr);
+				navi->mSoundObj->startSound(se_jumps[naviID], 0);
 				break;
 			case IPikiAnims::SAGASU2:
-				navi->mSoundObj->startSound(se_kyoros[naviID], nullptr);
+				navi->mSoundObj->startSound(se_kyoros[naviID], 0);
 				break;
 			}
 		}
@@ -2508,7 +2512,7 @@ void NaviSaraiState::exec(Navi* navi)
 		}
 	}
 
-	if (!gameSystem->paused_soft() && !gameSystem->isMultiplayerMode() && navi->mController1
+	if (!gameSystem->paused_soft() && !PC_TWO_CAPTAIN_PLAY() && navi->mController1
 	    && navi->mController1->isButtonDown(JUTGamePad::PRESS_Y)) {
 
 		Navi* currNavi = naviMgr->getAt(GET_OTHER_NAVI(navi));
@@ -2599,6 +2603,9 @@ void NaviContainerState::init(Navi* navi, StateArg* stateArg)
 	mOnyon = static_cast<NaviContainerArg*>(stateArg)->mOnyon;
 
 	Screen::gGame2DMgr->setGamePad(navi->mController1);
+#ifdef PIKI_PC_PORT
+	pc_p2_coop_set_menu_player(navi->mNaviIndex); // co-op: la partida no le quita el mando cada frame
+#endif
 	int type      = mOnyon->mOnyonType;
 	mIsScreenOpen = false;
 
@@ -2698,6 +2705,9 @@ void NaviContainerState::exec(Navi* navi)
 				} else {
 					mShipPikiType = Purple;
 				}
+#ifdef PIKI_PC_PORT
+				mOnyon->mPcExitNavi = navi;
+#endif
 				mOnyon->exitPikis(-pikiNum, mShipPikiType);
 			} else if (pikiNum > 0) {
 				if (isWhite) {
@@ -2723,8 +2733,14 @@ void NaviContainerState::exec(Navi* navi)
 			if (res < 0) {
 				Onyon* onyon = mOnyon;
 				if (onyon->mOnyonType == ONYON_TYPE_SHIP) {
+#ifdef PIKI_PC_PORT
+					onyon->mPcExitNavi = navi;
+#endif
 					onyon->exitPikis(-res, mShipPikiType);
 				} else {
+#ifdef PIKI_PC_PORT
+					onyon->mPcExitNavi = navi;
+#endif
 					onyon->exitPikis(-res, onyon->mOnyonType);
 				}
 			} else if (res > 0) {
@@ -3107,6 +3123,17 @@ void NaviThrowWaitState::restart(Navi* navi)
 	transit(navi, NSID_Walk, nullptr);
 }
 
+#ifdef PIKI_PC_PORT
+} // namespace Game
+// La rueda del raton es del jugador que tiene el teclado (co-op: puede ser P2).
+static bool pcWheelIsMine(Game::Navi* navi)
+{
+	const int player = navi && navi->mController1 && navi->mController1->getPortNum() == 1 ? 1 : 0;
+	return player == pc_window_get_keyboard_owner();
+}
+namespace Game {
+#endif
+
 /**
  * @note Address: 0x80185CB8
  * @note Size: 0x558
@@ -3115,7 +3142,8 @@ void NaviThrowWaitState::init(Navi* navi, StateArg* stateArg)
 {
 #ifdef PIKI_PC_PORT
 	// Las muescas acumuladas fuera de este estado no deben cambiar el color al coger.
-	if (pc_settings_get_mouse_wheel_action() == 0) {
+	// Co-op: la rueda es de quien tenga el raton (el del puerto de este capitan).
+	if (pc_settings_get_mouse_wheel_action() == 0 && pcWheelIsMine(navi)) {
 		pc_window_take_wheel_steps();
 	}
 #endif
@@ -3313,7 +3341,7 @@ void NaviThrowWaitState::exec(Navi* navi)
 	}
 	// Mod "Mouse Wheel" (color): cada muesca equivale a la cruceta izquierda/derecha.
 	int pcWheel = 0;
-	if (pc_settings_get_mouse_wheel_action() == 0) {
+	if (pc_settings_get_mouse_wheel_action() == 0 && pcWheelIsMine(navi)) {
 		pcWheel = pc_window_take_wheel_steps();
 	}
 	if ((navi->mController1->getButtonDown() & Controller::PRESS_DPAD_RIGHT) || pcWheel < 0) {
@@ -3609,9 +3637,9 @@ void NaviPelletState::init(Navi* navi, StateArg* stateArg)
 	mDoForceWakeup = false;
 	navi->startMotion(IPikiAnims::JKOKE, IPikiAnims::JKOKE, navi, nullptr);
 
-	if (navi->mNaviIndex == NAVIID_Olimar) {
+	if (pcNaviVoice(navi) == PSM::Navi::ManType_Olimar) {
 		navi->mSoundObj->startSound(PSSE_PL_SLEEP_ORIMA, 0);
-	} else if (playData->isStoryFlag(STORY_DebtPaid)) {
+	} else if (pcNaviVoice(navi) == PSM::Navi::ManType_President) {
 		navi->mSoundObj->startSound(PSSE_PL_SLEEP_SHACHO, 0);
 	} else {
 		navi->mSoundObj->startSound(PSSE_PL_SLEEP_LUGI, 0);
@@ -3625,11 +3653,7 @@ void NaviPelletState::init(Navi* navi, StateArg* stateArg)
 	arg.mPosition  = pos;
 	arg.mEnemy     = navi;
 	arg.mMatrix    = &navi->mBaseTrMatrix;
-	if (navi->mNaviIndex == NAVIID_Olimar) {
-		arg.mScale = OLIMAR_SCALE;
-	} else {
-		arg.mScale = LOUIE_SCALE;
-	}
+	arg.mScale     = pc_p2_captain_scale(navi->mNaviIndex);
 	navi->becomePellet(&arg);
 	navi->setAtari(false);
 	mSubState = PELLET_LayDown;
@@ -3647,7 +3671,7 @@ void NaviPelletState::exec(Navi* navi)
 	}
 
 	if (navi->mController1 && moviePlayer->mDemoState == DEMOSTATE_Inactive) {
-		if (!gameSystem->paused_soft() && !gameSystem->isMultiplayerMode() && navi->mController1
+		if (!gameSystem->paused_soft() && !PC_TWO_CAPTAIN_PLAY() && navi->mController1
 		    && navi->mController1->isButtonDown(JUTGamePad::PRESS_Y) && playData->isDemoFlag(DEMO_Unlock_Captain_Switch)) {
 
 			Navi* currNavi = naviMgr->getAt(GET_OTHER_NAVI(navi));
@@ -3671,9 +3695,9 @@ void NaviPelletState::exec(Navi* navi)
 					navi->finishMotion();
 				} else {
 					navi->startMotion(IPikiAnims::GETUP, IPikiAnims::GETUP, navi, nullptr);
-					if (navi->mNaviIndex == NAVIID_Olimar) {
+					if (pcNaviVoice(navi) == PSM::Navi::ManType_Olimar) {
 						navi->mSoundObj->startSound(PSSE_PL_WAKEUP_ORIMA, 0);
-					} else if (playData->isStoryFlag(STORY_DebtPaid)) {
+					} else if (pcNaviVoice(navi) == PSM::Navi::ManType_President) {
 						navi->mSoundObj->startSound(PSSE_PL_WAKEUP_SHACHO, 0);
 					} else {
 						navi->mSoundObj->startSound(PSSE_PL_WAKEUP_LUGI, 0);
@@ -3710,7 +3734,9 @@ void NaviPelletState::onKeyEvent(Navi* navi, SysShape::KeyEvent const& key)
 	if (mDoForceWakeup) {
 		if (key.mType == KEYEVENT_LOOP_END) {
 			if (navi->mAnimator.mSelfAnimator.isFlag(SysShape::Animator::AnimFinishMotion)) {
-				if (playData->isStoryFlag(STORY_DebtPaid)) {
+				if (pcNaviVoice(navi) == PSM::Navi::ManType_Olimar) {
+					navi->mSoundObj->startSound(PSSE_PL_WAKEUP_ORIMA, 0);
+				} else if (pcNaviVoice(navi) == PSM::Navi::ManType_President) {
 					navi->mSoundObj->startSound(PSSE_PL_WAKEUP_SHACHO, 0);
 				} else {
 					navi->mSoundObj->startSound(PSSE_PL_WAKEUP_LUGI, 0);

@@ -24,6 +24,7 @@
 #include "WeedsItem.h"
 #include "WorkObject.h"
 #include "settings/pc_settings.h"
+#include "timing/pc_anim_timing.h"
 #include "pc_coop.h"
 #include "bugprint.h"
 #include "gameflow.h"
@@ -1798,7 +1799,10 @@ bool Piki::mayIstick()
  * golpeado dentro (Flick, Flown) se sigue ahogando, así que el agua no deja
  * de ser un peligro. Devuelve true si lo ha reubicado.
  */
-bool Piki::pcStepOutOfWater()
+static const f32 kPcShoreMargin     = 40.0f; ///< distancia a la orilla al sacarlo del agua
+static const int kPcShoreHoldFrames = 20;   ///< frames en seco antes de soltar el ancla
+
+bool Piki::pcStepOutOfWater(int state)
 {
 	if (!pc_settings_get_blues_only_water()) {
 		return false;
@@ -1812,7 +1816,8 @@ bool Piki::pcStepOutOfWater()
 	// demás -- andar, venir al silbato (LookAt), seguir en formación -- es el
 	// Pikmin moviéndose por su cuenta, y ahí es donde el mod actúa. Antes solo
 	// cubría PIKISTATE_Normal, así que al silbarlos se ahogaban igual.
-	switch (getState()) {
+	// `state` permite pasar el de antes de un rebote (ver bounceCallback).
+	switch (state >= 0 ? state : getState()) {
 	case PIKISTATE_Flying:
 	case PIKISTATE_Flown:
 	case PIKISTATE_Flick:
@@ -1833,11 +1838,28 @@ bool Piki::pcStepOutOfWater()
 	// al otro lado del agua, y el Pikmin aparecía lejos y volvía corriendo.
 	// Issue #69: si el sitio guardado lo devuelve al agua una y otra vez (orilla
 	// junto a una pendiente), se descarta y se usa el waypoint más cercano.
-	mPcDryFrames = 0;
-	if (++mPcRescueStreak >= 5) {
+	// Siguiendo a un capitán que nada, el Pikmin vuelve a pisar el agua cada
+	// pocos frames: eso no es el caso de la pendiente, y contarlo como racha
+	// lo teletransportaba al waypoint, detrás del grupo.
+	bool followingSwimmer = mMode == PikiMode::FormationMode && mNavi && mNavi->mGroundTriangle
+	                     && MapCode::getAttribute(mNavi->mGroundTriangle) == ATTR_Water;
+	if (!followingSwimmer && ++mPcRescueStreak >= 5) {
 		mPcHasDryPos    = false;
 		mPcRescueStreak = 0;
 	}
+	// Entrada nueva al agua: el sitio seco guardado es el borde mismo. Se
+	// retrasa un poco, alejándolo del agua, y se queda fijo como ancla hasta
+	// que el Pikmin pase un rato en seco (ver kPcShoreHoldFrames), para que no
+	// retroceda un poco más en cada intento.
+	if (mPcHasDryPos && mPcDryFrames > kPcShoreHoldFrames) {
+		Vector3f away = mPcLastDryPos - mSRT.t;
+		away.y        = 0.0f;
+		f32 len       = away.length();
+		if (len > 0.001f) {
+			mPcLastDryPos = mPcLastDryPos + away * (kPcShoreMargin / len);
+		}
+	}
+	mPcDryFrames = 0;
 	if (mPcHasDryPos) {
 		mSRT.t = mPcLastDryPos;
 	} else {
@@ -1848,9 +1870,10 @@ bool Piki::pcStepOutOfWater()
 		mSRT.t = dryWP->mPosition;
 	}
 
-	mVelocity     = Vector3f(0.0f, 0.0f, 0.0f);
-	mInWaterTimer = 0;
-	mIsPanicked   = false;
+	mVelocity       = Vector3f(0.0f, 0.0f, 0.0f);
+	mTargetVelocity = Vector3f(0.0f, 0.0f, 0.0f);
+	mInWaterTimer   = 0;
+	mIsPanicked     = false;
 
 	// No se le cambia el modo. Echarlo del escuadrón aquí creaba un bucle:
 	// al silbarlo volvía a entrar, tocaba el agua en el mismo frame y salía
@@ -1875,6 +1898,12 @@ void Piki::stickToCallback(Creature*)
  */
 void Piki::bounceCallback()
 {
+#if defined(PIKI_PC_PORT)
+	// MsgBounce saca al lanzado del estado Flying antes de mirar el agua: sin
+	// este estado previo el rescate lo trataba como si hubiera entrado andando
+	// y lo teletransportaba lejos, perdido del grupo (issue #125).
+	const int stateBeforeBounce = getState();
+#endif
 	MsgBounce msg(Vector3f(0.0f, 1.0f, 0.0f));
 	sendMsg(&msg);
 
@@ -1901,7 +1930,7 @@ void Piki::bounceCallback()
 	}
 
 #if defined(PIKI_PC_PORT)
-	if (isDrownSurface && pcStepOutOfWater()) {
+	if (isDrownSurface && pcStepOutOfWater(stateBeforeBounce)) {
 		return;
 	}
 #endif
@@ -2261,8 +2290,17 @@ void Piki::collisionCallback(immut CollEvent& event)
 		return;
 	}
 
+#if defined(PIKI_PC_PORT)
+	// Mod "Better Pathfinding": en el original la hierba de néctar es lo único
+	// que no mira distCheck, y un Pikmin que solo seguía al capitán se ponía a
+	// arrancarla con rozarla. Como pellets, bombas y palos, solo al mover el
+	// grupo hacia ella.
+	if ((distCheck || !pc_settings_get_better_pathfinding()) && collider->isAlive() && collider->mObjType == OBJTYPE_GrassGen && mMode == PikiMode::FormationMode
+	    && !isHolding()) {
+#else
 	if (collider->isAlive() && collider->mObjType == OBJTYPE_GrassGen && collider->isAlive() && mMode == PikiMode::FormationMode
 	    && !isHolding()) {
+#endif
 		GrassGen* grass = static_cast<GrassGen*>(collider);
 		if (grass->workable()) {
 			ActCrowd* crowd = static_cast<ActCrowd*>(mActiveAction->getCurrAction());
@@ -2637,9 +2675,17 @@ void Piki::updateWalkAnimation()
 			enableMotionBlend();
 		}
 
+#if defined(PIKI_PC_PORT)
+		// Speed over the last 1/30 s and the motion cooldown in 30 Hz ticks, as
+		// for Olimar (pc_anim_timing.h): the original measures at 30 Hz.
+		f32 speed               = pc_anim_walk_speed(this, mLastAnimPosition.x, mLastAnimPosition.z, mSRT.t.x, mSRT.t.z, gsys->getFrameTime());
+		const int pcMotionCooldown = 4 * pc_anim_ticks_per_30hz(gsys->getFrameTime());
+#else
 		Vector3f sep = mSRT.t - mLastAnimPosition;
 		sep.y        = 0.0f;
 		f32 speed    = sep.length() / gsys->getFrameTime();
+		const int pcMotionCooldown = 4;
+#endif
 
 		int lowerMotionID = mPikiAnimMgr.getLowerAnimator().getCurrentMotionIndex();
 		if (lowerMotionID != PIKIANIM_Wait && lowerMotionID != PIKIANIM_Walk && lowerMotionID != PIKIANIM_Asibumi
@@ -2688,11 +2734,11 @@ void Piki::updateWalkAnimation()
 
 		if (newMotionID != lowerMotionID) {
 			if (lowerMotionID == PIKIANIM_Wait && newMotionID != PIKIANIM_Asibumi) {
-				_480 = 4;
+				_480 = pcMotionCooldown;
 			}
 
 			if (lowerMotionID != PIKIANIM_Asibumi && newMotionID == PIKIANIM_Wait) {
-				_480 = 4;
+				_480 = pcMotionCooldown;
 			}
 
 			if (newMotionID != _484) {
@@ -2702,7 +2748,7 @@ void Piki::updateWalkAnimation()
 				_480++;
 			}
 
-			if (_480 < 4) {
+			if (_480 < pcMotionCooldown) {
 				return;
 			}
 		}
@@ -2832,8 +2878,9 @@ void Piki::realAI()
 
 		if (state != PIKISTATE_Swallowed && state != PIKISTATE_Dead && state != PIKISTATE_Dying && state != PIKISTATE_Pressed
 		    && state != PIKISTATE_Drown && state != PIKISTATE_Flying && mColor != Blue && isAlive() && !pc_settings_get_piki_invincible()) {
-			if (mInWaterTimer >= int(gsys->getRand(1.0f) * pikiMgr->mPikiParms->mPikiParms.mRandStartDrownFrames())
-			                         + pikiMgr->mPikiParms->mPikiParms.mMinStartDrownFrames()) {
+			if (mInWaterTimer >= (int(gsys->getRand(1.0f) * pikiMgr->mPikiParms->mPikiParms.mRandStartDrownFrames())
+			                      + pikiMgr->mPikiParms->mPikiParms.mMinStartDrownFrames())
+			                         * PC_TICKS30) {
 				startMotion(PaniMotionInfo(PIKIANIM_TYakusui, this), PaniMotionInfo(PIKIANIM_TYakusui));
 				mFSM->transit(this, PIKISTATE_Drown);
 			}
@@ -2843,9 +2890,13 @@ void Piki::realAI()
 		// Suelo seco: lo recordamos por si hay que devolverlo aquí.
 		// Solo suelo llano: desde una pendiente fuerte el Pikmin resbala de
 		// vuelta al agua y se quedaba atrapado para siempre (issue #69).
+		// Recién rescatado se conserva el ancla de la orilla (ver
+		// pcStepOutOfWater) en vez de pisarla con la posición actual.
 		if (mGroundTriangle && mGroundTriangle->mTriangle.mNormal.y >= 0.7f) {
-			mPcLastDryPos = mSRT.t;
-			mPcHasDryPos  = true;
+			if (!mPcHasDryPos || mPcDryFrames >= kPcShoreHoldFrames) {
+				mPcLastDryPos = mSRT.t;
+				mPcHasDryPos  = true;
+			}
 			if (++mPcDryFrames > 60) {
 				mPcRescueStreak = 0;
 			}

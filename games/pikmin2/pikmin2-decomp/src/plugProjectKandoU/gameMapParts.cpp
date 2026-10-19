@@ -1,4 +1,5 @@
 #include "Game/mapParts.h"
+#include "Game/pcCoop.h"
 #include "types.h"
 #include "Vector3.h"
 #include "Game/Entities/Item.h"
@@ -728,7 +729,7 @@ void MapRoom::doEntry()
 
 			mModel->show();
 		} else {
-			if (BaseHIOParms::sEntryOptMapRoom && !gameSystem->isMultiplayerMode()) {
+			if (BaseHIOParms::sEntryOptMapRoom && !PC_TWO_CAPTAIN_PLAY()) {
 				return;
 			}
 

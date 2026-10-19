@@ -1,4 +1,5 @@
 #include "Game/Entities/PelletOtakara.h"
+#include "Game/pcCoop.h"
 #include "IDelegate.h"
 #include "MonoObjectMgr.h"
 #include "Game/GameConfig.h"
@@ -1658,7 +1659,7 @@ void Pellet::doEntry()
 			if (mLod.isFlag(AILOD_IsVisible)) {
 				mModel->show();
 				changeMaterial();
-			} else if (BaseHIOParms::sEntryOpt && !gameSystem->isMultiplayerMode()) {
+			} else if (BaseHIOParms::sEntryOpt && !PC_TWO_CAPTAIN_PLAY()) {
 				return;
 			} else {
 				mModel->hide();
@@ -1696,7 +1697,7 @@ void Pellet::theEntry()
 	if (mModel) {
 		if (mLod.isFlag(AILOD_IsVisible)) {
 			mModel->show();
-		} else if (BaseHIOParms::sEntryOpt && !gameSystem->isMultiplayerMode()) {
+		} else if (BaseHIOParms::sEntryOpt && !PC_TWO_CAPTAIN_PLAY()) {
 			return;
 		} else {
 			mModel->hide();

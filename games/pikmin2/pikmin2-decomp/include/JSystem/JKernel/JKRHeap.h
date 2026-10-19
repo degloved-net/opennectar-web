@@ -387,6 +387,7 @@ bool pc_host_alloc_active();
 void pc_host_alloc_set(bool active);
 // Drops host sync objects (OSMutex/OSCond/OSThreadQueue) living in [begin,end).
 extern "C" void pc_os_release_sync_range(const void* begin, const void* end);
+extern "C" void pc_os_release_mutex_range(const void* begin, const void* end);
 
 // The allocation functions must take std::size_t on the host (GCC only
 // accepted `u32` here because of -fpermissive; Clang rejects it outright).

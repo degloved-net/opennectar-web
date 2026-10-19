@@ -1,4 +1,5 @@
 #include "Game/Entities/ItemCave.h"
+#include "Game/pcCoop.h"
 #include "Game/Entities/ItemBarrel.h"
 #include "Game/gamePlayData.h"
 #include "Game/Navi.h"
@@ -216,7 +217,11 @@ void Item::initDependency()
  */
 bool Item::sound_culling()
 {
+#ifdef PIKI_PC_PORT
+	Navi* navi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 	Navi* navi = naviMgr->getActiveNavi();
+#endif
 	if (navi) {
 		Vector3f pos = navi->getPosition();
 		if (pos.sqrDistance2D(mPosition) >= SQUARE(700.0f)) {
@@ -283,7 +288,11 @@ void Item::doAI()
 	}
 
 	if (!complete()) {
+#ifdef PIKI_PC_PORT
+		Navi* navi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 		Navi* navi = naviMgr->getActiveNavi();
+#endif
 		if (navi) {
 			PSPlayCaveHoleSound(mSoundObj);
 			Vector3f sep = navi->getPosition();

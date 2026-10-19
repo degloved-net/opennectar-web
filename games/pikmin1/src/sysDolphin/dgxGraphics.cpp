@@ -8,6 +8,7 @@
 #if defined(PIKI_PC_PORT)
 #include "pc_window.h"
 #include "pc_gfx.h"
+#include "netplay/pc_netplay_present.h"
 #endif
 
 /**
@@ -785,6 +786,13 @@ void DGXGraphics::setLight(Light* light, int idx)
 void DGXGraphics::setPerspective(Mtx44 mtx, f32 fovY, f32 aspect, f32 zNear, f32 zFar, f32 scale)
 {
 #if defined(PIKI_PC_PORT)
+	// Netplay sim pass: keep the SimCamera's fixed projection, no GL.
+	if (pc_netplay_present_null_active()) {
+		pc_netplay_present_note_attempt();
+		return;
+	}
+#endif
+#if defined(PIKI_PC_PORT)
 	// Field 3D uses the window aspect (hor+). A 4:3 pillarbox pass (title
 	// cine, menu path A) must keep the caller's aspect: the title set is
 	// built for 640/480, and stretching its frustum to 16:9 looks past it.
@@ -838,6 +846,12 @@ void DGXGraphics::setOrthogonal(Mtx44 orthoMtx, immut RectArea& bounds)
  */
 void DGXGraphics::setScissor(immut RectArea& bounds)
 {
+#if defined(PIKI_PC_PORT)
+	if (pc_netplay_present_null_active()) {
+		pc_netplay_present_note_attempt();
+		return;
+	}
+#endif
 	GXSetScissor(bounds.mMinX, bounds.mMinY, bounds.width(), bounds.height());
 }
 
@@ -846,6 +860,12 @@ void DGXGraphics::setScissor(immut RectArea& bounds)
  */
 void DGXGraphics::setViewport(immut RectArea& bounds)
 {
+#if defined(PIKI_PC_PORT)
+	if (pc_netplay_present_null_active()) {
+		pc_netplay_present_note_attempt();
+		return;
+	}
+#endif
 	GXSetViewport(bounds.mMinX, bounds.mMinY, bounds.width(), bounds.height(), 0.0f, 1.0f);
 }
 
@@ -1477,6 +1497,12 @@ void DGXGraphics::setClearColour(immut Colour& color)
  */
 void DGXGraphics::clearBuffer(int bufferFlags, bool mode)
 {
+#if defined(PIKI_PC_PORT)
+	if (pc_netplay_present_null_active()) {
+		pc_netplay_present_note_attempt();
+		return;
+	}
+#endif
 	GXSetCopyClear(reinterpret_cast<GXColor&>(mBufferClearColour), 0xFFFFFF); // max clear_z value
 }
 

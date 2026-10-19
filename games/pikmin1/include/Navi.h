@@ -221,12 +221,23 @@ public:
 	void pcUpdateBombCommand();
 	void pcPinCursorToLock();
 	void pcDrawLockRing(Graphics& gfx);
+	void pcDrawSwarmArrows(Graphics& gfx); ///< Flechas del swarm hacia el cursor, como en la versión de Wii.
 	void pcDrawNightAmbience(Graphics& gfx);
 	void pcPinCursorFirstPerson();
+	void pcRotateCursor(f32 angle); ///< Gira el cursor alrededor del capitán (cámara libre).
+	void pcCursorToFront(); ///< Cursor delante del capitán, a la distancia que tenía.
 	Creature* mPcLockTarget = nullptr; ///< Mod "Lock-On": enemigo u objeto fijado.
 	Creature* mPcLockIgnore = nullptr; ///< Automático: soltado a mano, no se recoge hasta salir de él.
+	f32 mPcChargeTime       = 0.0f;    ///< Mod "Charge": segundos que el grupo sigue corriendo hacia el objetivo.
+	u32 mPcSwarmMs          = 0;       ///< Reloj (ms) del último frame en que el swarm llevó el grupo a mPcSwarmGoal.
+	Vector3f mPcSwarmGoal;             ///< Destino del swarm: el cursor o el objetivo de la carga.
 	Vector3f mPcAimOffset;             ///< Cursor libre (lo que apunta el jugador) mientras el visible está clavado.
 	Vector3f mPcPinnedOffset;          ///< Último desplazamiento con el que se clavó el cursor.
+	/// Matriz del aro del cursor. El juego la deja en mWorldMtx (la del propio
+	/// capitán) y la usa al momento; en netplay la calcula la pasada de
+	/// simulación y la dibuja la de presentación, y entre medias mWorldMtx ya
+	/// vuelve a ser la del capitán: el aro salía a sus pies.
+	Matrix4f mPcCursorMtx;
 	Texture* mPcGlowTex = nullptr;     ///< Eternal Night: halo de luciérnagas y pellets (va con el heap del nivel).
 #endif
 	int mPendingLowerMotionId;            // _6FC
@@ -275,7 +286,11 @@ public:
 	int mPreBlendLowerMotionID;           // _7E0
 	bool mIsPlucking;                     // _7E4
 	u8 mFastPluckKeyTaps;                 // _7E5, number of times A has been pressed to continue (fast) plucking
+#if defined(PIKI_PC_PORT)
+	u16 mNoPluckTimer; ///< u8 en el original: a 120 FPS el umbral escalado (PC_TICKS30) pasa de 255
+#else
 	u8 mNoPluckTimer;                     // _7E6, count after plucking stops to zoom out camera/stop fast pluck
+#endif
 	u8 _7E7[0x7F0 - 0x7E7];               // _7E7, TODO: work out members
 	int mLociCount;                       // _7F0
 	Locus* mLoci;                         // _7F4

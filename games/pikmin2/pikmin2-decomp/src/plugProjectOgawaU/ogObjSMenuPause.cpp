@@ -8,6 +8,10 @@
 #include "System.h"
 #include "Controller.h"
 #include "trig.h"
+#if PIKI_PC_TOUCH
+extern "C" void pc_touch_claim_game_menu(void);
+extern "C" bool pc_touch_take_game_menu_tap(float* x, float* y);
+#endif
 
 /**
  * @note Address: N/A
@@ -528,6 +532,25 @@ bool ObjSMenuPause::menu_pause()
 	mMenuPause->update();
 
 	u32 input = pad->getButtonDown();
+#if PIKI_PC_TOUCH
+	// Táctil: tocar una opción la elige; tocar la elegida es A.
+	pc_touch_claim_game_menu();
+	{
+		float tx = 0.0f, ty = 0.0f;
+		const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+		const int opt     = mMenuPause->pcTouchTappedOption(tapped, tx, ty);
+		if (opt >= 0 && opt <= SELPAUSE_GoToSunset) {
+			if (opt == (int)mCurrSelPause) {
+				input |= Controller::PRESS_A;
+			} else {
+				mCurrSelPause = opt;
+				mMenuPause->select(mCurrSelPause);
+				blink_TopMenu(mCurrSelPause);
+				input = 0;
+			}
+		}
+	}
+#endif
 	if (input & Controller::PRESS_UP) {
 		if (mCurrSelPause > SELPAUSE_Min) {
 			mCurrSelPause--;
@@ -599,6 +622,25 @@ bool ObjSMenuPause::menu_yuugata()
 	mMenuSunset->update();
 
 	u32 input = pad->getButtonDown();
+#if PIKI_PC_TOUCH
+	// Táctil: tocar una opción la elige; tocar la elegida es A.
+	pc_touch_claim_game_menu();
+	{
+		float tx = 0.0f, ty = 0.0f;
+		const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+		const int opt     = mMenuSunset->pcTouchTappedOption(tapped, tx, ty);
+		if (opt >= 0 && opt <= SELSUNSET_Max) {
+			if (opt == (int)mCurrSelSunset) {
+				input |= Controller::PRESS_A;
+			} else {
+				mCurrSelSunset = opt;
+				mMenuSunset->select(mCurrSelSunset);
+				blink_Yuugata(mCurrSelSunset);
+				input = 0;
+			}
+		}
+	}
+#endif
 	if (input & Controller::PRESS_UP) {
 		if (mCurrSelSunset > SELSUNSET_Min) {
 			mCurrSelSunset--;
@@ -656,6 +698,25 @@ bool ObjSMenuPause::menu_zenkai()
 	mMenuReturn->update();
 
 	u32 input = pad->getButtonDown();
+#if PIKI_PC_TOUCH
+	// Táctil: tocar una opción la elige; tocar la elegida es A.
+	pc_touch_claim_game_menu();
+	{
+		float tx = 0.0f, ty = 0.0f;
+		const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+		const int opt     = mMenuReturn->pcTouchTappedOption(tapped, tx, ty);
+		if (opt >= 0 && opt <= 1) {
+			if (opt == (int)mCurrSelReturn) {
+				input |= Controller::PRESS_A;
+			} else {
+				mCurrSelReturn = opt;
+				mMenuReturn->select(mCurrSelReturn);
+				blink_Zenkai(mCurrSelReturn);
+				input = 0;
+			}
+		}
+	}
+#endif
 	if (input & Controller::PRESS_UP) {
 		if (mCurrSelReturn > 0) {
 			mCurrSelReturn--;

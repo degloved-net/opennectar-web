@@ -10,6 +10,10 @@
 #include "sysNew.h"
 #include "system.h"
 #if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#endif
+#if defined(PIKI_PC_PORT)
+#include "netplay/pc_netplay_present.h"
 #include "timing/pc_render_phase.h"
 #include "GlobalGameOptions.h"
 #endif
@@ -265,6 +269,11 @@ void LifeGaugeMgr::update()
  */
 void LifeGaugeMgr::refresh(Graphics& gfx)
 {
+#if defined(PIKI_PC_PORT)
+	// Números de carga y barras de vida son interfaz: no proyectan sombra.
+	pc_gfx_shadow_exclude(1);
+	struct Restore { ~Restore() { pc_gfx_shadow_exclude(0); } } restore;
+#endif
 	if (!gameflow.mMoviePlayer->mIsActive) {
 		FOREACH_NODE(GaugeInfo, mActiveGaugeList.mChild, gauge)
 		{
@@ -383,6 +392,11 @@ void LifeGauge::adjustValue()
  */
 void LifeGauge::refresh(Graphics& gfx)
 {
+#if defined(PIKI_PC_PORT)
+	// Números de carga y barras de vida son interfaz: no proyectan sombra.
+	pc_gfx_shadow_exclude(1);
+	struct Restore { ~Restore() { pc_gfx_shadow_exclude(0); } } restore;
+#endif
 	// don't draw life gauges during cutscenes
 	if (gameflow.mMoviePlayer->mIsActive) {
 		return;
@@ -429,6 +443,11 @@ void LifeGauge::refresh(Graphics& gfx)
 		}
 		}
 #if defined(PIKI_PC_PORT)
+	}
+	// Netplay two-pass frame: the gauges are drawn in the presentation pass
+	// only (their geometry depends on the local camera).
+	if (pc_netplay_present_sim_pass()) {
+		return;
 	}
 #endif
 

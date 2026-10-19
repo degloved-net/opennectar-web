@@ -9,7 +9,8 @@
 # con SDL2 y el runtime de C++ dentro (solo dependen de glibc, libGL y libX11).
 set -euo pipefail
 
-src=/src
+# /src es la raíz del monorepo; el proyecto de juego está en games/pikmin1.
+src=/src/games/pikmin1
 out="${src}/build-linux-release"
 version="${OPEN_NECTAR_VERSION:?falta OPEN_NECTAR_VERSION}"
 jobs="$(nproc)"

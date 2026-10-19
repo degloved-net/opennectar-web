@@ -6,8 +6,27 @@
 #include "efx2d/T2DCursor.h"
 #include "System.h"
 
+#if PIKI_PC_TOUCH
+extern "C" bool pc_touch_pane_hit(const void* pane, float nx, float ny, float margin);
+#endif
+
 namespace og {
 namespace Screen {
+
+#if PIKI_PC_TOUCH
+int MenuMgr::pcTouchTappedOption(bool tapped, f32 x, f32 y) const
+{
+	int hit = -1;
+	for (int i = 0; i < mElementCount; i++) {
+		// El texto de la opción es lo que se ve; el pane principal, por si no hay.
+		J2DPane* pane = mTextBoxPanes && mTextBoxPanes[i] ? mTextBoxPanes[i]
+		              : mTextBoxTakuPanes && mTextBoxTakuPanes[i] ? mTextBoxTakuPanes[i]
+		                                                         : (mMainPanes ? mMainPanes[i] : nullptr);
+		if (pc_touch_pane_hit(pane, x, y, 0.012f) && tapped && hit < 0) hit = i;
+	}
+	return hit;
+}
+#endif
 
 /**
  * @note Address: 0x80309E28

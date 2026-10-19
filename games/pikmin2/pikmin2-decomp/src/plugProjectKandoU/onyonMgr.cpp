@@ -1,4 +1,5 @@
 #include "Game/Entities/Item.h"
+#include "Game/pcCoop.h"
 #include "Game/Piki.h"
 #include "Game/Navi.h"
 #include "Game/PikiMgr.h"
@@ -1663,6 +1664,12 @@ Creature* Onyon::exitPiki()
 				piki->mFaceDir = mFaceDir;
 
 				Navi* navi = piki->mBrain->searchOrima();
+#ifdef PIKI_PC_PORT
+				// Co-op: al capitán que los ha sacado, no al más cercano.
+				if (pc_p2_coop_active() && mPcExitNavi && mPcExitNavi->isAlive() && mPcExitNavi->mController1) {
+					navi = mPcExitNavi;
+				}
+#endif
 				if (navi) {
 					piki->mNavi = navi;
 					PikiAI::ActFormationInitArg arg(navi);
@@ -1680,6 +1687,14 @@ Creature* Onyon::exitPiki()
 				}
 
 			} else {
+#ifdef PIKI_PC_PORT
+				// Co-op: el Pikmin baja por la pata ya con el capitán que lo ha
+				// sacado; al acabar de bajar vuelve con él (Brain::searchOrima),
+				// no con el que esté más cerca.
+				if (pc_p2_coop_active() && mPcExitNavi && mPcExitNavi->isAlive() && mPcExitNavi->mController1) {
+					piki->mNavi = mPcExitNavi;
+				}
+#endif
 				PikiAI::CreatureActionArg arg(this);
 				piki->mBrain->start(PikiAI::ACT_Exit, &arg);
 			}

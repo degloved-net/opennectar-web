@@ -1,6 +1,84 @@
 #include "types.h"
 #ifdef PIKI_PC_PORT
 extern "C" void pc_gfx_set_post_allowed(int allowed);
+#include "pc_speedrun.h"
+#ifdef PIKI_PC_PORT
+#include "settings/pc_settings.h"
+
+// Selector de capitanes antes de la selección de nivel (Desafío) o de arena
+// (VS), para que sus iconos ya muestren a los personajes elegidos. Start
+// sigue; B vuelve al título como la cancelación de la selección.
+enum PcCaptainStep { PCCAP_None, PCCAP_Open, PCCAP_Done, PCCAP_Cancelled };
+static PcCaptainStep sPcCaptainStep = PCCAP_None;
+
+// PCCAP_Open mientras el selector tiene la pantalla; PCCAP_Cancelled si se
+// cerró con B (vuelta al título); PCCAP_Done para seguir.
+static PcCaptainStep pcCaptainGate()
+{
+	if (sPcCaptainStep == PCCAP_None) {
+		sPcCaptainStep = PCCAP_Open;
+		pc_captain_select_open();
+		return PCCAP_Open;
+	}
+	if (sPcCaptainStep == PCCAP_Open) {
+		if (pc_captain_select_active()) {
+			return PCCAP_Open;
+		}
+		sPcCaptainStep = pc_captain_select_result() == PC_CAPSEL_START ? PCCAP_Done : PCCAP_Cancelled;
+	}
+	return sPcCaptainStep;
+}
+#endif
+#include "Game/Data.h"
+#include "System.h"
+#include "stream.h"
+#include <cstdlib>
+#include <cstring>
+
+// Progreso del Desafío del jugador (niveles abiertos, superados, flores y
+// récords: PlayChallengeGameData, en los datos comunes). Una run del Desafío
+// empieza como una partida nueva, solo con los cinco primeros niveles, y al
+// volver al título se devuelve lo del jugador. La copia va en malloc: dura
+// más que las secciones. El título vuelve a leer además las opciones de la
+// tarjeta, y la run no guarda (ebi::Save::TMgr::start).
+namespace {
+const int kPcChallengeBackupSize = 0x4000; // de sobra: las opciones enteras ocupan 0x2000
+u8* sPcChallengeBackup           = nullptr;
+bool sPcChallengeBackupValid     = false;
+} // namespace
+
+extern "C" void pc_speedrun_challenge_progress_reset(void)
+{
+	Game::PlayChallengeGameData& data = sys->getPlayCommonData()->mChallengeData;
+	if (!sPcChallengeBackupValid) {
+		if (!sPcChallengeBackup) {
+			sPcChallengeBackup = static_cast<u8*>(std::malloc(kPcChallengeBackupSize));
+		}
+		if (sPcChallengeBackup) {
+			std::memset(sPcChallengeBackup, 0, kPcChallengeBackupSize);
+			RamStream stream(sPcChallengeBackup, kPcChallengeBackupSize);
+			data.write(stream);
+			sPcChallengeBackupValid = true;
+		}
+	}
+	// Las marcas globales (Desafío desbloqueado, ya jugado, Louie) se quedan:
+	// no son progreso de la run y evitan el aviso de la primera vez.
+	BitFlag<u8> flags = data.mGlobalFlags;
+	data.reset();
+	// Una run del Desafío no exige tenerlo desbloqueado en la partida del jugador.
+	flags.set(Game::PlayChallengeGameData::PCGDF_IsPlayable);
+	data.mGlobalFlags = flags;
+}
+
+extern "C" void pc_speedrun_challenge_progress_restore(void)
+{
+	if (!sPcChallengeBackupValid) {
+		return;
+	}
+	RamStream stream(sPcChallengeBackup, kPcChallengeBackupSize);
+	sys->getPlayCommonData()->mChallengeData.read(stream);
+	sPcChallengeBackupValid = false;
+}
 #endif
 #include "Game/VsGame.h"
 #include "Game/SingleGame.h"
@@ -37,7 +115,7 @@ TitleState::TitleState()
     : State(VGS_Title)
 {
 	mPlayer1Controller = new Controller(JUTGamePad::PORT_0);
-	mDelegate          = new Delegate<Game::VsGame::TitleState>(this, &Game::VsGame::TitleState::dvdload);
+	mDelegate          = new Delegate<Game::VsGame::TitleState>(this, &TitleState::dvdload);
 	mPlayer2Controller = new Controller(JUTGamePad::PORT_1);
 }
 
@@ -71,6 +149,9 @@ void TitleState::init(VsGameSection* section, StateArg* arg)
 
 	mTitleStage = VSTITLE_PrepareInfo;
 	_2C         = 0;
+#ifdef PIKI_PC_PORT
+	sPcCaptainStep = PCCAP_None;
+#endif
 
 	mCaveInfoType = VSCAVEINFO_Default;
 	strcpy(section->mCaveInfoFilename, cMaps[mCaveInfoType]);
@@ -84,6 +165,13 @@ void TitleState::init(VsGameSection* section, StateArg* arg)
 
 	section->mChallengeStageData = nullptr;
 	section->mVsStageData        = nullptr;
+#ifdef PIKI_PC_PORT
+	// Speedrun del Desafío: la selección de niveles empieza como en una partida
+	// nueva (también tras un reset rápido).
+	if (pc_speedrun_challenge_awaiting()) {
+		pc_speedrun_challenge_progress_reset();
+	}
+#endif
 }
 
 static const char unusedVsTitleString[] = "コンクリート"; // 'concrete'
@@ -196,6 +284,15 @@ void TitleState::execChallenge(VsGameSection* section)
 
 	case VSTITLE_PrepareDisp:
 		if (section->mDvdThreadCommand.mMode == DvdThreadCommand::CM_Completed) {
+#ifdef PIKI_PC_PORT
+			const PcCaptainStep captainStep = pcCaptainGate();
+			if (captainStep != PCCAP_Done) {
+				if (captainStep == PCCAP_Cancelled) {
+					section->mIsMenuRunning = true; // B: al título, como cancelar la selección
+				}
+				return;
+			}
+#endif
 			mTitleStage = VSTITLE_Display;
 
 			Morimura::DispMemberChallengeSelect select;
@@ -235,6 +332,11 @@ void TitleState::execChallenge(VsGameSection* section)
 			P2ASSERTLINE(323, data);
 			section->mChallengeStageData = data;
 			section->mChallengeStageNum  = stageNumber;
+#ifdef PIKI_PC_PORT
+			if (!section->mIsVersusMode) {
+				pc_speedrun_on_challenge_start(stageNumber);
+			}
+#endif
 
 			strcpy(section->mCaveInfoFilename, data->mCaveInfoFilename);
 
@@ -279,6 +381,15 @@ void TitleState::execVs(VsGameSection* section)
 
 	case VSTITLE_PrepareDisp:
 		if (section->mDvdThreadCommand.mMode == DvdThreadCommand::CM_Completed) {
+#ifdef PIKI_PC_PORT
+			const PcCaptainStep captainStep = pcCaptainGate();
+			if (captainStep != PCCAP_Done) {
+				if (captainStep == PCCAP_Cancelled) {
+					section->mIsMenuRunning = true; // B: al título, como cancelar la selección
+				}
+				return;
+			}
+#endif
 			mTitleStage = VSTITLE_Display;
 
 			Morimura::DispMemberVsSelect select;

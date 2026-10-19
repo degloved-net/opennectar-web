@@ -7,6 +7,10 @@
 #include "System.h"
 #include "Controller.h"
 #include "trig.h"
+#if PIKI_PC_TOUCH
+extern "C" void pc_touch_claim_game_menu(void);
+extern "C" bool pc_touch_take_game_menu_tap(float* x, float* y);
+#endif
 
 /**
  * @note Address: N/A
@@ -286,6 +290,25 @@ bool ObjSMenuPauseDoukutu::menu_pause()
 	mMenuPause->update();
 
 	u32 input = pad->getButtonDown();
+#if PIKI_PC_TOUCH
+	// Táctil: tocar una opción la elige; tocar la elegida es A.
+	pc_touch_claim_game_menu();
+	{
+		float tx = 0.0f, ty = 0.0f;
+		const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+		const int opt     = mMenuPause->pcTouchTappedOption(tapped, tx, ty);
+		if (opt >= 0 && opt <= 1) {
+			if (opt == (int)mCurrPauseSel) {
+				input |= Controller::PRESS_A;
+			} else {
+				mCurrPauseSel = opt;
+				mMenuPause->select(mCurrPauseSel);
+				set_Blink_Normal();
+				input = 0;
+			}
+		}
+	}
+#endif
 	if (input & Controller::PRESS_UP) {
 		if (mCurrPauseSel > 0) {
 			mCurrPauseSel--;
@@ -379,6 +402,25 @@ bool ObjSMenuPauseDoukutu::menu_giveup()
 	mMenuGiveup->update();
 
 	u32 input = pad->getButtonDown();
+#if PIKI_PC_TOUCH
+	// Táctil: tocar una opción la elige; tocar la elegida es A.
+	pc_touch_claim_game_menu();
+	{
+		float tx = 0.0f, ty = 0.0f;
+		const bool tapped = pc_touch_take_game_menu_tap(&tx, &ty);
+		const int opt     = mMenuGiveup->pcTouchTappedOption(tapped, tx, ty);
+		if (opt >= 0 && opt <= 1) {
+			if (opt == (int)mCurrGiveupSel) {
+				input |= Controller::PRESS_A;
+			} else {
+				mCurrGiveupSel = opt;
+				mMenuGiveup->select(mCurrGiveupSel);
+				set_Blink_YesNo();
+				input = 0;
+			}
+		}
+	}
+#endif
 	if (input & Controller::PRESS_UP) {
 		if (mCurrGiveupSel > 0) {
 			mCurrGiveupSel--;

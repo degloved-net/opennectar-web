@@ -17,6 +17,11 @@
 //     cada píxel desde el depth buffer, la lleva al espacio de la luz y
 //     compara (PCF 3x3). La máscara resultante la multiplica el compuesto
 //     como hace con la oclusión.
+//
+// Pantalla partida (co-op, VS): cada vista tiene su cámara, así que su
+// espacio de vista, su proyección y su sol son otros. Cada draw anotado lleva
+// su vista (el viewport GL en el que se dibujó) y el mapa y la máscara se
+// hacen vista a vista, cada uno dentro de su rectángulo.
 
 namespace {
 
@@ -39,7 +44,34 @@ struct ShadowDraw {
     bool alphaTest = false;
     float alphaRef = 0.0f;
     GXCullMode cull = GX_CULL_BACK;
+    int view = 0;            // índice en sShadowViews
 };
+
+// Una vista de la pantalla partida: su rectángulo GL, la proyección con la que
+// se dibujó (la que más draws anotó en ella: algunas pantallas ponen otra
+// delante del mundo) y su sol, en su espacio de vista.
+struct ShadowView {
+    GLint x = 0, y = 0;
+    GLsizei w = 0, h = 0;
+    GLint sx = 0, sy = 0;   // recorte (la máscara solo se escribe dentro)
+    GLsizei sw = 0, sh = 0;
+    float projOffX = 0.0f, projOffY = 0.0f;
+    float invP00 = 1.0f, invP11 = 1.0f, nearZ = 1.0f, farZ = 15000.0f;
+    int bestDraws = 0;
+    // Proyección en curso dentro de la vista y sus draws.
+    float curInvP00 = 1.0f, curInvP11 = 1.0f, curNear = 1.0f, curFar = 15000.0f;
+    int curDraws = 0;
+    bool haveLight = false;
+    float lightDir[3] = { 0.0f, 1.0f, 0.0f };
+};
+constexpr int kShadowMaxViews = 8;
+ShadowView sShadowViews[kShadowMaxViews];
+int sShadowViewCount = 0;
+// Con dos vistas o más (pantalla partida), cada mapa se dibuja en un cuarto de
+// la textura (mitad de lado): cada vista ocupa media pantalla, así que la
+// nitidez por píxel apenas cambia y los mapas cuestan la mitad que en 1P en
+// vez del doble. 1 = la textura entera.
+float sShadowMapScale = 1.0f;
 
 PcGfxHostVector<ShadowVertex> sShadowStream;   // copia compacta de los draws en streaming
 PcGfxHostVector<float> sShadowPalettes;        // paletas de los draws con skinning
@@ -48,19 +80,58 @@ bool sShadowHaveLight = false;
 float sShadowLightDir[3] = { 0.0f, 1.0f, 0.0f }; // hacia la luz, espacio de vista
 float sSunColour[3] = { 1.0f, 0.95f, 0.8f };
 
+// Vista del viewport actual (la crea si es nueva). -1 si ya no caben.
+int shadow_current_view() {
+    for (int i = 0; i < sShadowViewCount; i++) {
+        const ShadowView& v = sShadowViews[i];
+        if (v.x == sLastViewportX && v.y == sLastViewportY && v.w == sLastViewportW && v.h == sLastViewportH
+            && v.sx == sLastScissorX && v.sy == sLastScissorY && v.sw == sLastScissorW && v.sh == sLastScissorH
+            && v.projOffX == sProjOffX && v.projOffY == sProjOffY) {
+            return i;
+        }
+    }
+    if (sShadowViewCount >= kShadowMaxViews) return -1;
+    ShadowView& v = sShadowViews[sShadowViewCount];
+    v = ShadowView();
+    v.x = sLastViewportX; v.y = sLastViewportY; v.w = sLastViewportW; v.h = sLastViewportH;
+    v.sx = sLastScissorX; v.sy = sLastScissorY; v.sw = sLastScissorW; v.sh = sLastScissorH;
+    v.projOffX = sProjOffX; v.projOffY = sProjOffY;
+    return sShadowViewCount++;
+}
+
+// Cuenta un draw anotado para la proyección en curso de la vista; la que más
+// tenga es la que reconstruye la profundidad.
+void shadow_view_count_draw(ShadowView& v) {
+    if (v.curInvP00 != sCurInvP00 || v.curInvP11 != sCurInvP11 || v.curNear != sCurNear || v.curFar != sCurFar) {
+        v.curInvP00 = sCurInvP00; v.curInvP11 = sCurInvP11; v.curNear = sCurNear; v.curFar = sCurFar;
+        v.curDraws = 0;
+    }
+    if (++v.curDraws > v.bestDraws) {
+        v.bestDraws = v.curDraws;
+        v.invP00 = v.curInvP00; v.invP11 = v.curInvP11; v.nearZ = v.curNear; v.farZ = v.curFar;
+    }
+}
+
 // El sol: primera luz del canal 0 de un draw iluminado. Lo llama también la
-// subida de luces del draw.
+// subida de luces del draw. Uno por vista (cada cámara lo ve en otro sitio).
 void sun_capture_from_channel0() {
-    if (sShadowHaveLight || !sChannels[0].enabled) return;
+    if (!sChannels[0].enabled) return;
+    const int view = shadow_current_view();
+    if (view < 0 || sShadowViews[view].haveLight) return;
     const u32 mask = sChannels[0].lightMask;
     for (int i = 0; i < 8; i++) {
         if (!(mask & (1u << i))) continue;
         const float* p = sLights[i].pos;
         const float len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
         if (len > 1.0f) {
-            sShadowLightDir[0] = p[0] / len; sShadowLightDir[1] = p[1] / len; sShadowLightDir[2] = p[2] / len;
-            sSunColour[0] = sLights[i].color[0]; sSunColour[1] = sLights[i].color[1]; sSunColour[2] = sLights[i].color[2];
-            sShadowHaveLight = true;
+            ShadowView& v = sShadowViews[view];
+            v.lightDir[0] = p[0] / len; v.lightDir[1] = p[1] / len; v.lightDir[2] = p[2] / len;
+            v.haveLight = true;
+            if (!sShadowHaveLight) {
+                sShadowLightDir[0] = v.lightDir[0]; sShadowLightDir[1] = v.lightDir[1]; sShadowLightDir[2] = v.lightDir[2];
+                sSunColour[0] = sLights[i].color[0]; sSunColour[1] = sLights[i].color[1]; sSunColour[2] = sLights[i].color[2];
+                sShadowHaveLight = true;
+            }
         }
         break;
     }
@@ -76,7 +147,7 @@ bool sShadowExclude = false;
 
 bool shadow_recording_wanted() {
     return pc_post_shadows_active(sPostEffects) && sNativeFramebufferReady && !sPostRanThisFrame
-        && sShadowProjPerspective && sProjOffX == 0.0f && sProjOffY == 0.0f; // sin pantalla partida
+        && sShadowProjPerspective && sCurPerspValid;
 }
 
 void shadow_frame_reset() {
@@ -85,11 +156,14 @@ void shadow_frame_reset() {
     sShadowDraws.clear();
     sShadowHaveLight = false;
     sShadowMaskReady = false;
+    sShadowViewCount = 0;
 }
 
 // Anota el estado común de un draw; devuelve false si no proyecta sombra.
 bool shadow_record_state(ShadowDraw& d) {
     if (sShadowExclude) return false;          // cursor, marcadores (pc_gfx_shadow_exclude)
+    const int view = shadow_current_view();
+    if (view < 0) return false;
     if (!sPipelineState.zUpdate) return false; // partículas, efectos: sin profundidad
     if (!sPipelineState.zCompare) return false; // cursor, anillos, marcadores: se pintan por encima
     if (sPipelineState.blendType == GX_BM_BLEND && sPipelineState.blendDst == GX_BL_ONE) return false; // aditivo
@@ -122,6 +196,8 @@ bool shadow_record_state(ShadowDraw& d) {
         const float* m = sVerticesPretransformed ? nullptr : sPosMatrix[sCurrentPosMtxId];
         for (int i = 0; i < 16; i++) d.mtx[i] = m ? m[i] : ((i % 5 == 0) ? 1.0f : 0.0f);
     }
+    d.view = view;
+    shadow_view_count_draw(sShadowViews[view]);
     sun_capture_from_channel0();
     return true;
 }
@@ -253,11 +329,11 @@ bool shadow_ensure_resources() {
 
 // Matriz ortográfica de la luz (espacio de vista -> clip de la luz) que
 // abarca el tramo cercano del frustum de la cámara.
-void shadow_light_matrix(float out[16]) {
+void shadow_light_matrix(const ShadowView& view, float out[16]) {
     const float range = sPostEffects.shadowRange;
-    const float n = sViewNear, f = std::min(sViewFar, range);
+    const float n = view.nearZ, f = std::min(view.farZ, range);
     // Base de la luz: Z hacia la luz (la cámara de sombra mira -Z = hacia la escena).
-    float lz[3] = { sShadowLightDir[0], sShadowLightDir[1], sShadowLightDir[2] };
+    float lz[3] = { view.lightDir[0], view.lightDir[1], view.lightDir[2] };
     float up[3] = { 0.0f, 1.0f, 0.0f };
     if (std::fabs(lz[1]) > 0.9f) { up[0] = 1.0f; up[1] = 0.0f; }
     float lx[3] = { up[1] * lz[2] - up[2] * lz[1], up[2] * lz[0] - up[0] * lz[2], up[0] * lz[1] - up[1] * lz[0] };
@@ -269,7 +345,10 @@ void shadow_light_matrix(float out[16]) {
     for (int i = 0; i < 8; i++) {
         const float z = (i < 4) ? n : f;
         const float sx = (i & 1) ? 1.0f : -1.0f, sy = (i & 2) ? 1.0f : -1.0f;
-        const float p[3] = { sx * z * sViewInvP00, sy * z * sViewInvP11, -z };
+        // Con la proyección corrida (cámara fusionada), el tramo visible de la
+        // vista es el del frustum desplazado: x = (ndc - off) * invP * z.
+        const float ndcX = sx - view.projOffX, ndcY = sy - view.projOffY;
+        const float p[3] = { ndcX * z * view.invP00, ndcY * z * view.invP11, -z };
         const float px = p[0] * lx[0] + p[1] * lx[1] + p[2] * lx[2];
         const float py = p[0] * ly[0] + p[1] * ly[1] + p[2] * ly[2];
         const float pz = p[0] * lz[0] + p[1] * lz[1] + p[2] * lz[2];
@@ -283,7 +362,7 @@ void shadow_light_matrix(float out[16]) {
     maxZ += pad;
     minZ -= 200.0f;
     // Ajuste a texel: evita que el borde de la sombra tiemble al mover la cámara.
-    const float texel = (maxX - minX) / float(std::max(1, sShadowMapSize));
+    const float texel = (maxX - minX) / float(std::max(1, int(sShadowMapSize * sShadowMapScale)));
     minX = std::floor(minX / texel) * texel; maxX = std::floor(maxX / texel) * texel;
     minY = std::floor(minY / texel) * texel; maxY = std::floor(maxY / texel) * texel;
     // Ortográfica sobre la base: x' = dot(lx,p), y' = dot(ly,p), z' = -dot(lz,p) (mira hacia -lz).
@@ -296,20 +375,16 @@ void shadow_light_matrix(float out[16]) {
     out[3] = 0.0f; out[7] = 0.0f; out[11] = 0.0f; out[15] = 1.0f;
 }
 
-// Dibuja el mapa y la máscara. Se llama desde post_apply con el mundo ya
-// terminado y su profundidad en sNativeDepthTexture.
-bool shadow_build() {
-    sShadowMaskReady = false;
-    if (!pc_post_shadows_active(sPostEffects) || sShadowDraws.empty() || !sShadowHaveLight) return false;
-    if (!sDepthIsTexture || !sNativeDepthTexture) return false;
-    if (!shadow_ensure_resources()) return false;
-
+// Mapa y máscara de una vista: el mapa desde su sol con sus draws, y la
+// máscara dentro de su rectángulo con su proyección.
+void shadow_build_view(int viewIndex, const ShadowView& view) {
     float lightVP[16];
-    shadow_light_matrix(lightVP);
+    shadow_light_matrix(view, lightVP);
 
     // 1) Mapa de profundidad desde la luz.
     glBindFramebuffer_ptr(GL_FRAMEBUFFER, sShadowFbo);
-    glViewport(0, 0, sShadowMapSize, sShadowMapSize);
+    const GLsizei mapSize = GLsizei(sShadowMapSize * sShadowMapScale);
+    glViewport(0, 0, mapSize, mapSize);
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
@@ -335,19 +410,17 @@ bool shadow_build() {
     glUniformMatrix4fv_ptr(locVP, 1, GL_FALSE, lightVP);
     glUniform1i_ptr(locTex, 0);
     if (glActiveTexture_ptr) glActiveTexture_ptr(GL_TEXTURE0);
-    // Subida de la copia en streaming.
-    if (!sShadowStream.empty()) {
-        glBindBuffer_ptr(GL_ARRAY_BUFFER, sShadowStreamVBO);
-        glBufferData_ptr(GL_ARRAY_BUFFER, GLsizeiptr(sShadowStream.size() * sizeof(ShadowVertex)), sShadowStream.data(), GL_STREAM_DRAW);
-    }
     bool residentBound = false;
     GLuint lastTex = ~0u;
     int lastAT = -1;
     GXCullMode lastCull = GX_CULL_NONE;
     bool cullValid = false;
+    bool vaoBound = false;
     for (const ShadowDraw& d : sShadowDraws) {
+        if (d.view != viewIndex) continue;
         if (d.resident && !sShadowArenaVAO) continue;
-        if (d.resident != residentBound || (!residentBound && &d == &sShadowDraws.front())) {
+        if (!vaoBound || d.resident != residentBound) {
+            vaoBound = true;
             glBindVertexArray_ptr(d.resident ? sShadowArenaVAO : sShadowStreamVAO);
             residentBound = d.resident;
         }
@@ -377,7 +450,13 @@ bool shadow_build() {
 
     // 2) Máscara en pantalla.
     glBindFramebuffer_ptr(GL_FRAMEBUFFER, sShadowMaskFbo);
-    glViewport(0, 0, sShadowMaskW, sShadowMaskH);
+    glViewport(view.x, view.y, view.w, view.h);
+    // Solo dentro de su recorte: con la cámara fusionada, las dos vistas
+    // ocupan el mismo viewport y cada una es su mitad.
+    if (view.sw > 0 && view.sh > 0) {
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(view.sx, view.sy, view.sw, view.sh);
+    }
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
     glBindVertexArray_ptr(sPostVAO);
@@ -391,17 +470,62 @@ bool shadow_build() {
         glUniform1i_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uShadowMap"), 1);
         glActiveTexture_ptr(GL_TEXTURE0);
     }
-    glUniform4f_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uProjInfo"), sViewInvP00, sViewInvP11, sViewNear, sViewFar);
+    glUniform4f_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uProjInfo"), view.invP00, view.invP11, view.nearZ, view.farZ);
+    glUniform4f_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uViewRect"), float(view.x) / float(sShadowMaskW),
+                    float(view.y) / float(sShadowMaskH), float(view.w) / float(sShadowMaskW), float(view.h) / float(sShadowMaskH));
+    glUniform2f_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uProjOff"), view.projOffX, view.projOffY);
     glUniformMatrix4fv_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uLightVP"), 1, GL_FALSE, lightVP);
     glUniform4f_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uShadowParams"),
                     sPostEffects.shadowStrength, 1.0f / float(sShadowMapSize), 0.0015f, sPostEffects.shadowRange);
+    glUniform1f_ptr(glGetUniformLocation_ptr(sShadowMaskProgram, "uMapScale"), sShadowMapScale);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_SCISSOR_TEST);
+}
+
+// Dibuja el mapa y la máscara. Se llama desde post_apply con el mundo ya
+// terminado y su profundidad en sNativeDepthTexture. Una pasada por vista
+// (pantalla partida); fuera de las vistas la máscara queda en blanco.
+bool shadow_build() {
+    sShadowMaskReady = false;
+    if (!pc_post_shadows_active(sPostEffects) || sShadowDraws.empty() || !sShadowHaveLight) return false;
+    if (!sDepthIsTexture || !sNativeDepthTexture) return false;
+    if (!shadow_ensure_resources()) return false;
+
+    // Sin sombra donde no haya vista (y en las vistas sin sol).
+    GLfloat clear[4];
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sShadowMaskFbo);
+    glViewport(0, 0, sShadowMaskW, sShadowMaskH);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glClearColor(clear[0], clear[1], clear[2], clear[3]);
+
+    // Subida de la copia en streaming (una vez para todas las vistas).
+    if (!sShadowStream.empty()) {
+        glBindBuffer_ptr(GL_ARRAY_BUFFER, sShadowStreamVBO);
+        glBufferData_ptr(GL_ARRAY_BUFFER, GLsizeiptr(sShadowStream.size() * sizeof(ShadowVertex)), sShadowStream.data(), GL_STREAM_DRAW);
+    }
+    int active = 0;
+    for (int i = 0; i < sShadowViewCount; i++) {
+        const ShadowView& view = sShadowViews[i];
+        if (view.haveLight && view.bestDraws > 0 && view.w > 0 && view.h > 0) active++;
+    }
+    sShadowMapScale = active >= 2 ? 0.5f : 1.0f;
+    bool any = false;
+    for (int i = 0; i < sShadowViewCount; i++) {
+        const ShadowView& view = sShadowViews[i];
+        if (!view.haveLight || view.bestDraws <= 0 || view.w <= 0 || view.h <= 0) continue;
+        shadow_build_view(i, view);
+        any = true;
+    }
     glBindVertexArray_ptr(0);
     glDepthMask(GL_TRUE);
     glBindBuffer_ptr(GL_ARRAY_BUFFER, sVBO);
     sBoundTextures[0] = 0;
-    sShadowMaskReady = true;
-    return true;
+    sShadowMaskReady = any;
+    return any;
 }
 
 // Rayos de sol. Devuelve false (y el compuesto usa negro) si el sol queda

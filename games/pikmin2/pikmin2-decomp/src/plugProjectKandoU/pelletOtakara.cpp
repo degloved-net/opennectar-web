@@ -1,4 +1,5 @@
 #include "Game/Entities/PelletOtakara.h"
+#include "Game/pcCoop.h"
 #include "Game/Entities/ItemOnyon.h"
 #include "JSystem/J3D/J3DTexMtx.h"
 #include "Game/MapMgr.h"
@@ -220,7 +221,7 @@ void Object::theEntry()
  */
 void Object::changeMaterial()
 {
-	if (mFbMaterial && !gameSystem->isMultiplayerMode()) {
+	if (mFbMaterial && !PC_TWO_CAPTAIN_PLAY()) {
 		Mtx44 copyMatrix;
 		PSMTX44Copy(sys->mGfx->mCurrentViewport->mCamera->mProjectionMtx, copyMatrix);
 

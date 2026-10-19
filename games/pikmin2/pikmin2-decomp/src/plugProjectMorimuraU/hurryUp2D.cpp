@@ -1,4 +1,5 @@
 #include "Morimura/HurryUp.h"
+#include "Game/pcCoop.h"
 #include "Morimura/mrUtil.h"
 #include "PSSystem/PSSystemIF.h"
 #include "Game/GameSystem.h"
@@ -499,7 +500,11 @@ void THurryUp2D::scaleUp2()
 		    && !Game::playData->isDemoFlag(Game::DEMO_First_Sunset_Warning)) {
 #endif
 			Game::MoviePlayArg arg("g09_first_sunset", nullptr, nullptr, 0);
+#ifdef PIKI_PC_PORT
+			Game::Navi* navi = Game::naviMgr->getMovieNavi(); // co-op: Olimar o, si no, Louie
+#else
 			Game::Navi* navi = Game::naviMgr->getActiveNavi();
+#endif
 			if (navi && navi->mCamera) {
 				Game::playData->setDemoFlag(Game::DEMO_First_Sunset_Warning);
 				Game::moviePlayer->mTargetNavi   = navi;

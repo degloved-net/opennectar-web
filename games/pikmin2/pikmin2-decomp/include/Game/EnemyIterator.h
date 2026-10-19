@@ -60,7 +60,8 @@ struct EnemyIterator {
 		return *this;
 	}
 
-	inline bool satisfy() { return mCondition->satisfy(static_cast<T*>(mContainer->getObject(mIndex))); }
+	// mContainer es siempre un Container<T> (GenericContainer no tiene get).
+	inline bool satisfy() { return mCondition->satisfy(static_cast<Container<T>*>(mContainer)->get(mIndex)); }
 
 	// VTBL _00
 	void* mIndex;                 // _04

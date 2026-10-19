@@ -16,6 +16,8 @@
 #include "sysNew.h"
 #if defined(PIKI_PC_PORT)
 #include "settings/pc_settings.h"
+#include "netplay/pc_netplay_policy.h"
+#include "netplay/pc_netplay_present.h"
 #endif
 
 /**
@@ -557,7 +559,16 @@ void Boss::refreshViewCulling(Graphics& gfx)
 {
 	Vector3f point(mSRT.t);
 	point.y += BOSS_PARM(mRenderSphereHeight);
+#if defined(PIKI_PC_PORT)
+	// Netplay: AI culling is sim; BossMgr::refresh culls the presentation
+	// pass's draw on the local frustum.
+	if (!pc_netplay_present_sim_side()) {
+		return;
+	}
+	if (!pc_netplay_sim_visible(gfx.mCamera->isPointVisible(point, BOSS_PARM(mRenderSphereRadius)))) {
+#else
 	if (!gfx.mCamera->isPointVisible(point, BOSS_PARM(mRenderSphereRadius))) {
+#endif
 		enableAICulling();
 	} else {
 		disableAICulling();

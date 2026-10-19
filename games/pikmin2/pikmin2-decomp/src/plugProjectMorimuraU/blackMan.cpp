@@ -1,4 +1,8 @@
+#ifdef PIKI_PC_PORT
+extern "C" int pc_gfx_efb_copy_info(const void* addr, unsigned* hits);
+#endif
 #include "types.h"
+#include "Game/pcCoop.h"
 #include "Game/Entities/BlackMan.h"
 #include "Game/generalEnemyMgr.h"
 #include "efx/TKage.h"
@@ -358,7 +362,11 @@ void Obj::doUpdate()
 					mTyre->mIsShadowActive = true;
 				}
 
+#ifdef PIKI_PC_PORT
+				Navi* activeNavi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 				Navi* activeNavi = naviMgr->getActiveNavi();
+#endif
 				if (!mIsFallStart && activeNavi && activeNavi->isAlive()) {
 
 					Vector3f pos;
@@ -780,6 +788,41 @@ void Obj::changeMaterial()
 	modelData->getMaterialNodePointer(0)->getTexGenBlock()->getTexMtx(0)->getTexMtxInfo().setMtx(copyMatrix);
 
 	modelData->getTexture()->changeImage(gameSystem->getXfbTexture()->getTexInfo(), 0);
+#ifdef PIKI_PC_PORT
+	// Diagnóstico (PIKMIN_WRAITH_DEBUG=1): ¿llega la captura de pantalla al cuerpo?
+	{
+		static const bool sDbg = getenv("PIKMIN_WRAITH_DEBUG") != nullptr;
+		static int sFrames     = 0;
+		if (sDbg && (sFrames++ % 60) == 0) {
+			JUTTexture* xfb     = gameSystem->getXfbTexture();
+			ResTIMG* res0       = modelData->getTexture()->getResTIMG(0);
+			const u8* res0Image = (const u8*)res0 + (intptr_t)(s32)res0->mImageDataOffset;
+			unsigned hits       = 0;
+			const int hasCopy   = pc_gfx_efb_copy_info(xfb->mTexData, &hits);
+			printf("[WRAITH] xfb=%p data=%p %ux%u fmt=%u | tex0 image=%p %ux%u fmt=%u same=%d | efbCopy=%d hits=%u | "
+			       "diff=%d flag=%08X\n",
+			       (void*)xfb->mTexInfo, (void*)xfb->mTexData, xfb->mTexInfo->mSizeX, xfb->mTexInfo->mSizeY,
+			       xfb->mTexInfo->mTextureFormat, (const void*)res0Image, res0->mSizeX, res0->mSizeY, res0->mTextureFormat,
+			       res0Image == xfb->mTexData, hasCopy, hits, (int)j3dModel->getMatPacket(0)->isEnabled_Diff(),
+			       j3dModel->getMatPacket(0)->getShapePacket()->mDiffFlag);
+			J3DMaterial* mat0 = modelData->getMaterialNodePointer(0);
+			J3DTexGenBlock* tg = mat0->getTexGenBlock();
+			for (u32 c = 0; c < tg->getTexGenNum(); c++) {
+				J3DTexCoord* tc = tg->getTexCoord(c);
+				printf("[WRAITH]   texgen%u type=%u src=%u mtx=%u\n", c, tc->getTexGenType(), tc->getTexGenSrc(), tc->getTexGenMtx());
+			}
+			for (u32 m = 0; m < 2; m++) {
+				J3DTexMtx* tm = tg->getTexMtx(m);
+				if (!tm) continue;
+				Mtx& mm = tm->getMtx();
+				printf("[WRAITH]   texmtx%u proj=%u info=%02X | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f\n", m,
+				       tm->getTexMtxInfo().mProjection, tm->getTexMtxInfo().mInfo, mm[0][0], mm[0][1], mm[0][2], mm[0][3], mm[1][0],
+				       mm[1][1], mm[1][2], mm[1][3], mm[2][0], mm[2][1], mm[2][2], mm[2][3]);
+			}
+			printf("[WRAITH]   mat0=%s tevStages=%u\n", modelData->getMaterialName()->getName((u16)0), mat0->getTevBlock()->getTevStageNum());
+		}
+	}
+#endif
 
 	for (u16 i = 0; i < modelData->getMaterialNum(); i++) {
 		j3dSys.setMatPacket(j3dModel->getMatPacket(i));
@@ -870,7 +913,11 @@ void Obj::walkFunc()
 	}
 
 	if (mEscapePhase == 2) {
+#ifdef PIKI_PC_PORT
+		Navi* targetNavi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 		Navi* targetNavi = naviMgr->getActiveNavi();
+#endif
 		f32 escapeSpeed  = C_PROPERPARMS.mEscapeSpeed();
 		if (targetNavi) {
 			Vector3f naviPosition = targetNavi->getPosition();
@@ -1182,7 +1229,11 @@ void Obj::findNextRoutePoint()
 					}
 				}
 
+#ifdef PIKI_PC_PORT
+				Navi* activeNavi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 				Navi* activeNavi = naviMgr->getActiveNavi();
+#endif
 				if (activeNavi && activeNavi->isAlive()) {
 					f32 sqrDist
 					    = sqrDistance2D(activeNavi->getPosition().x, activeNavi->getPosition().z, wp->getPosition().x, wp->getPosition().z);
@@ -1209,7 +1260,11 @@ void Obj::findNextRoutePoint()
 				s16 idx = indices[i];
 				if (mPreviousWaypointIndex != idx) {
 					WayPoint* wp     = routeMgr->getWayPoint(idx);
+#ifdef PIKI_PC_PORT
+					Navi* activeNavi = naviMgr->getNearestNavi(mPosition); // co-op: el más cercano
+#else
 					Navi* activeNavi = naviMgr->getActiveNavi();
+#endif
 					if (activeNavi) {
 						f32 dist = sqrDistance(activeNavi->getPosition().x, activeNavi->getPosition().y, activeNavi->getPosition().z,
 						                       wp->getPosition().x, wp->getPosition().y, wp->getPosition().z);

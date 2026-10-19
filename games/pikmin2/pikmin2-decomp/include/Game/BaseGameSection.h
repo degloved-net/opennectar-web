@@ -189,6 +189,18 @@ struct BaseGameSection : public BaseHIOSection {
 	void onCameraBlendFinished(Game::CameraArg*);
 	void setFixNearFar(bool, f32, f32);
 	void setCamController();
+#ifdef PIKI_PC_PORT
+	// Co-op (docs/PLAN_COOP.md §6.5): Start de cualquiera de los dos abre la
+	// pausa, y los menús los lleva el mando de quien los abrió.
+	bool pcPausePressed();
+	// Co-op, cámara fusionada (docs/PLAN_COOP.md §6.7): tras actualizar las
+	// cámaras, rehace la vista de cada una entre la unificada y la propia.
+	void pcUpdateCoopMerge();
+	// Co-op: P2 entra en cuanto el co-op se activa (llega Louie), aunque
+	// ninguna cinemática ni el cambio con Y (desactivado) partan la pantalla.
+	void pcCoopJoinCheck();
+	Controller* pcMenuController();
+#endif
 	void setDefaultPSSceneInfo(PSGame::SceneInfo&);
 	void prepareHoleIn(Vector3f&, bool);
 	void prepareFountainOn(Vector3f&);

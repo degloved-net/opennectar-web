@@ -1,7 +1,11 @@
 // SDL2 adapter for the NextOS JAudio host renderer. Native S16 stereo PCM.
+#include "audio/pc_audio_drops.h"
 #include "port/audio_sink.h"
 #include "audio/pc_ast_stream.h"
+
+extern "C" void pc_thp_mix(int16_t* out, size_t frames, int rate);
 #include <SDL.h>
+#include <algorithm>
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
@@ -116,6 +120,19 @@ int PikiAudioSinkQueue(const int16_t* pcm, size_t frames)
     }
     std::memcpy(mixed, pcm, frames * 4);
     pc_ast_mix(mixed, frames, outRate);
+    pc_thp_mix(mixed, frames, outRate); // vídeo sin dispositivo propio (Android)
+    if (pc_audio_levels_enabled()) {
+        double sum = 0.0;
+        int peak = 0;
+        unsigned clipped = 0;
+        for (size_t i = 0; i < frames * 2; ++i) {
+            const int v = mixed[i];
+            sum += 0.5 * double(v) * v;
+            peak = std::max(peak, std::abs(v));
+            clipped += (v >= 32767 || v <= -32768) ? 1u : 0u;
+        }
+        pc_audio_level_block(PCAL_Final, sum, peak, static_cast<unsigned>(frames), clipped);
+    }
     if (SDL_QueueAudio(device, mixed, static_cast<Uint32>(frames * 4)) != 0) return 0;
     submitted += frames;
     return 1;
@@ -137,13 +154,7 @@ void PikiAudioSinkPause() {
     if (device) SDL_PauseAudioDevice(device, 1);
 }
 int PikiAudioSinkFlush() { SinkLock lock(sSinkMutex); return device != 0; }
-void PikiAudioSinkClear() {
-#if defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__)
-    if (!emscripten_is_main_runtime_thread()) return onBrowserAudioThread([=] { return PikiAudioSinkClear(); });
-#endif
-    SinkLock lock(sSinkMutex);
-    if (device) SDL_ClearQueuedAudio(device);
-}
+
 uint64_t PikiAudioSinkSubmittedFrames() { SinkLock lock(sSinkMutex); return submitted; }
 uint64_t PikiAudioSinkQueuedFrames() {
 #if defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__)

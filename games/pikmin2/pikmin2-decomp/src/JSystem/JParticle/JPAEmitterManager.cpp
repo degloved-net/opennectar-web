@@ -2,6 +2,9 @@
 #include "JSystem/JParticle/JPAEmitter.h"
 #include "JSystem/JParticle/JPANode.h"
 #include "JSystem/JMath.h"
+#ifdef PIKI_PC_PORT
+#include "System.h"
+#endif
 
 /**
  * @note Address: 0x80090538
@@ -119,6 +122,32 @@ void JPAEmitterManager::calc(u8)
  * @note Address: 0x80090998
  * @note Size: 0xB0
  */
+#ifdef PIKI_PC_PORT
+// Fraccion de paso de 30 Hz con la que dibuja el gestor en curso: 0 justo
+// tras simular, 0.5 en el frame intermedio a 60 FPS. Cada gestor guarda la
+// suya: si su dueno no lo actualiza (pausa), se dibuja quieto.
+f32 gPcJpaSub = 0.0f;
+extern "C" float pc_orig_tick_fraction(void);
+
+void JPAEmitterManager::pcUpdate()
+{
+	if (PC_ORIG_TICK()) {
+		calc();
+		mPcSub = 0.0f;
+		return;
+	}
+	mPcSub = pc_orig_tick_fraction();
+	for (u8 i = 0; i < mGrpMax; i++) {
+		for (JSUPtrLink* link = mGrpEmtr[i].getFirst(); link; link = link->getNext()) {
+			JPABaseEmitter* emit = (JPABaseEmitter*)link->getObjectPtr();
+			if (emit->mEmitterCallback) {
+				emit->mEmitterCallback->pcSubframeSync(emit);
+			}
+		}
+	}
+}
+#endif
+
 void JPAEmitterManager::calc()
 {
 	JSUPtrLink* link;
@@ -142,6 +171,12 @@ void JPAEmitterManager::calc()
  */
 void JPAEmitterManager::draw(const JPADrawInfo* info, u8 id)
 {
+#ifdef PIKI_PC_PORT
+	gPcJpaSub = mPcSub;
+	struct PcSubReset {
+		~PcSubReset() { gPcJpaSub = 0.0f; }
+	} pcSubReset;
+#endif
 	PSMTXCopy(info->mtx1, mWorkData->mPosCamMtx);
 	PSMTXCopy(info->mtx2, mWorkData->mPrjMtx);
 	calcYBBCam();

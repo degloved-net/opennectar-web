@@ -812,6 +812,12 @@ bool pc_window_init(const char* title, int width, int height) {
     // can drop the vendor and try again.
     XSetErrorHandler([](Display*, XErrorEvent*) -> int { return 0; });
 #endif
+#if defined(_WIN32) && defined(SDL_HINT_WINDOWS_DPI_AWARENESS)
+    // Sin declarar DPI, Windows con escalado (125 %, 150 %...) da al juego
+    // una ventana sin bordes más pequeña y la estira: bordes y sombras
+    // pixelados hasta que un cambio de monitor recalculaba el DPI.
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#endif
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) < 0) {
         printf("[PC Port Error] SDL_Init failed: %s\n", SDL_GetError());

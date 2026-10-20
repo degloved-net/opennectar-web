@@ -1,4 +1,7 @@
 #include "Dolphin/gx.h"
+#ifdef PIKI_PC_PORT
+extern f32 gPcJpaSub;
+#endif
 #include "Dolphin/mtx.h"
 #include "Dolphin/os.h"
 #include "JSystem/JParticle/JPAEmitter.h"
@@ -476,6 +479,9 @@ void JPAGenCalcTexCrdMtxAnm(JPAEmitterWorkData* workData)
 
 	// Get the current tick count from the emitter
 	f32 tickCount = workData->mEmitter->mCurrentFrame;
+#ifdef PIKI_PC_PORT
+	tickCount += gPcJpaSub; // FPS Mode: desplazamiento continuo entre ticks
+#endif
 
 	// Calculate half of the tiling for S and T
 	f32 halfTilingS = 0.5f * (1.0f + baseShape->getTilingS());
@@ -533,6 +539,9 @@ void JPALoadCalcTexCrdMtxAnm(JPAEmitterWorkData* workData, JPABaseParticle* part
 
 	// Get the age of the particle
 	f32 particleAge = particle->mAge;
+#ifdef PIKI_PC_PORT
+	particleAge += gPcJpaSub; // FPS Mode: desplazamiento continuo entre ticks
+#endif
 
 	// Calculate half of the tiling for S and T
 	f32 halfTilingS = 0.5f * (1.0f + baseShape->getTilingS());

@@ -13,6 +13,13 @@
 #include "PSSystem/PSSystemIF.h"
 #include "efx2d/T2DChangesmoke.h"
 #include "Controller.h"
+#if PIKI_PC_TOUCH
+extern "C" void pc_touch_claim_game_menu(void);
+extern "C" bool pc_touch_take_game_menu_tap(float* x, float* y);
+extern "C" bool pc_touch_pane_hit(const void* pane, float nx, float ny, float margin);
+// Zona tocada en el mapa: getTarget la devuelve en vez de leer la cruceta.
+static int sPcTouchTarget = -1;
+#endif
 
 static void _Print(char* format, ...)
 {
@@ -1353,6 +1360,35 @@ bool WorldMap::changeState()
 {
 	bool isStateChange = false;
 
+#if PIKI_PC_TOUCH
+	// Tactil, como el mapa de Pikmin 1: tocar la zona seleccionada es A, otra
+	// zona abierta lleva alli el cohete y L/R abren Piklopedia/Tesoros. Los
+	// paneles se consultan cada frame para que el toque los siga.
+	bool pcTapA = false, pcTapL = false, pcTapR = false;
+	{
+		pc_touch_claim_game_menu();
+		float nx = 0.0f, ny = 0.0f;
+		const bool tapped = pc_touch_take_game_menu_tap(&nx, &ny);
+		for (int i = 0; i < mOpenCourses && i < 4; i++) {
+			J2DPane* point = mScreenKitagawa->search(getSerialTagName(MC8("Npoint0"), i));
+			if (point && pc_touch_pane_hit(point, nx, ny, 0.04f) && tapped) {
+				if (i == mCurrentCourseIndex) pcTapA = true;
+				else sPcTouchTarget = i;
+			}
+		}
+		if (pc_touch_pane_hit(mScreenInfo->search(MC8("Nlbtn")), nx, ny, 0.02f) && tapped) pcTapL = true;
+		if (pc_touch_pane_hit(mScreenInfo->search(MC8("Nrbtn")), nx, ny, 0.02f) && tapped) pcTapR = true;
+	}
+	if (sPcTouchTarget >= 0) {
+		isStateChange   = true;
+		mLockoutCounter = msVal.mInputLockoutFrames;
+		mCurrentState   = WMAP_InputTarget;
+		return isStateChange;
+	}
+#else
+	const bool pcTapA = false, pcTapL = false, pcTapR = false;
+#endif
+
 	if (mInitArg.mController->isButtonDown(Controller::PRESS_START)) {
 		// Bring up "Return to Title Screen" popup
 
@@ -1367,7 +1403,7 @@ bool WorldMap::changeState()
 			setFlag(WMAPFLAG_IsBackdropActive | WMAPFLAG_IsBackdropBehindInfo);
 		}
 
-	} else if (mInitArg.mController->isButtonDown(Controller::PRESS_A)) {
+	} else if (mInitArg.mController->isButtonDown(Controller::PRESS_A) || pcTapA) {
 		// Bring up "Land in this area?" popup
 
 		::Screen::gGame2DMgr->mScreenMgr->reset();
@@ -1380,14 +1416,14 @@ bool WorldMap::changeState()
 			setFlag(WMAPFLAG_IsBackdropActive | WMAPFLAG_IsBackdropBehindInfo);
 		}
 
-	} else if (mInitArg.mController->isButtonDown(Controller::PRESS_L)) {
+	} else if (mInitArg.mController->isButtonDown(Controller::PRESS_L) || pcTapL) {
 		// Go to enemy piklopedia ("Piklopedia")
 
 		PSSystem::spSysIF->playSystemSe(PSSE_SY_PLAYER_CHANGE, 0);
 		isStateChange = true;
 		mCurrentState = WMAP_GoToZukanEnemy;
 
-	} else if (mInitArg.mController->isButtonDown(Controller::PRESS_R)) {
+	} else if (mInitArg.mController->isButtonDown(Controller::PRESS_R) || pcTapR) {
 		// Go to item piklopedia ("Treasures")
 
 		PSSystem::spSysIF->playSystemSe(PSSE_SY_PLAYER_CHANGE, 0);
@@ -1472,6 +1508,13 @@ bool WorldMap::newMapOpen()
  */
 int WorldMap::getTarget()
 {
+#if PIKI_PC_TOUCH
+	if (sPcTouchTarget >= 0) {
+		const int target = sPcTouchTarget;
+		sPcTouchTarget   = -1;
+		return target;
+	}
+#endif
 	int newMap = COURSE_NULL;
 	switch (mCurrentCourseIndex) {
 	case COURSE_Tutorial: // currently selected valley of repose

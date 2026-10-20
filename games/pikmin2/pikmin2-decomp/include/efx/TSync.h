@@ -36,6 +36,15 @@ struct TSync : public TBase, public JPAEmitterCallBack {
 	virtual void startDemoDrawOff() { mFlags |= TSYNCFLAG_DemoDrawOff; } // _40 (weak)
 	virtual void endDemoDrawOn() { mFlags &= ~TSYNCFLAG_DemoDrawOff; }   // _44 (weak)
 	virtual ~TSync() { }                                                 // _48 (weak; thunk at _1C)
+#ifdef PIKI_PC_PORT
+	// Las operaciones de emisor de efx solo copian posicion/matriz del objeto.
+	virtual void pcSubframeSync(JPABaseEmitter* emitter)
+	{
+		if (!emitter->isFinished()) {
+			doExecuteEmitterOperation(emitter);
+		}
+	}
+#endif
 
 	inline JPABaseEmitter* getEmitter() const { return mEmitter; }
 

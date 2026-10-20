@@ -350,6 +350,22 @@ static inline u32 pc_promote_j2d_material_block(J2DMaterialBlock* block, u16 mat
 		}
 	}
 
+	// IndInit: un J2DIndInitData (0x128 bytes) por material. Todo son u8 salvo
+	// las tres matrices indirectas (6 floats + escala s8 cada 0x1C desde
+	// 0x0C). Sin esto llegaban del reves y el desplazamiento indirecto se iba
+	// a valores enormes: la reverberacion del titulo de zona caia fuera.
+	if (block->mIndInitDataOffset && block->mIndInitDataOffset < blockSize) {
+		u32 end = next_off(block->mIndInitDataOffset);
+		for (u32 e = block->mIndInitDataOffset; e + 0x128 <= end; e += 0x128) {
+			for (u32 m = 0; m < 3; m++) {
+				for (u32 k = 0; k < 6; k++) {
+					u32* v = (u32*)(base + e + 0x0C + m * 0x1C + k * 4);
+					*v     = pc_j2d_bswap32(*v);
+				}
+			}
+		}
+	}
+
 	return block->_14;
 }
 

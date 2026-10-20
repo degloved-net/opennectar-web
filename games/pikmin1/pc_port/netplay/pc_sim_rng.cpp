@@ -56,6 +56,7 @@ void pc_sim_srand(unsigned value) { seed(false, value); }
 void pc_cosmetic_srand(unsigned value) { seed(true, value); }
 void pc_sim_rng_set_state(unsigned value) { seed(false, value); }
 void pc_cosmetic_rng_set_state(unsigned value) { seed(true, value); }
+int pc_sim_rand_max(void) { return pc_netplay_deterministic() ? 0x7fff : RAND_MAX; }
 
 unsigned pc_sim_rng_state(void)
 {

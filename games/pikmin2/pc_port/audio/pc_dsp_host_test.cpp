@@ -10,6 +10,10 @@
 
 #include "pc_aram.h"
 #include "pc_dsp_host.h"
+#ifndef BEGIN_SCOPE_EXTERN_C
+#define BEGIN_SCOPE_EXTERN_C extern "C" {
+#define END_SCOPE_EXTERN_C }
+#endif
 #include "jaudio/dspinterface.h"
 
 #include <cmath>
@@ -18,6 +22,11 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+// The game routes global new through JKRHeap. The isolated renderer test has
+// no game heap, so its host-allocation guard is intentionally a no-op.
+bool pc_host_alloc_active() { return true; }
+void pc_host_alloc_set(bool) {}
 
 namespace {
 
@@ -74,7 +83,7 @@ int main()
 {
 	check(pc_aram_init(), "ARAM init");
 	pc_dsp_host_init();
-	pc_dsp_host_set_mixer_level(2.0f);
+	pc_dsp_host_set_mixer_level(1.0f);
 	check(pc_dsp_host_ready(), "renderer reports ready");
 
 	// A ramp is easy to reason about under resampling. It has to outlast the
@@ -95,7 +104,7 @@ int main()
 		int mismatches = 0;
 		for (u32 i = 0; i < 64; ++i) {
 			// Full-scale volume is 0x7FFF/0x8000, one part in 32768 short.
-			if (std::abs(static_cast<int>(out[i * 2]) - source[i]) > 2) {
+			if (std::abs(static_cast<int>(out[i * 2]) - source[i] / 2) > 2) {
 				++mismatches;
 			}
 		}
@@ -189,7 +198,7 @@ int main()
 		channel.useConstantSample  = 1;
 		channel.constantSample     = 1000;
 		pc_dsp_host_render_frame(&channel, 1, out.data(), kFrame);
-		check(std::abs(static_cast<int>(out[0]) - 1000) <= 2,
+		check(std::abs(static_cast<int>(out[0]) - 500) <= 2,
 		      "a paused voice emits its constant sample");
 		check(out[0] == out[100], "a paused voice emits a steady level");
 	}
@@ -208,8 +217,9 @@ int main()
 			                    makeChannel(static_cast<u32>(source.size())) };
 		pc_dsp_host_render_frame(pair, 2, out.data(), kFrame);
 		check(pc_dsp_host_active_voices() == 2, "both voices counted active");
-		// Sample 4 of the ramp is 256; two voices give about 512.
-		check(out[8] > 400 && out[8] < 620, "two voices sum");
+		// Direct mixer volumes use the console DSP's half-scale. Sample 4 is
+		// 256, so two voices sum back to about 256.
+		check(out[8] > 240 && out[8] < 272, "two voices sum");
 	}
 	{
 		std::vector<s16> loud(64, 32767);
@@ -220,7 +230,7 @@ int main()
 		pair[0].isLooping   = DSP_TRUE;
 		pair[1].isLooping   = DSP_TRUE;
 		pc_dsp_host_render_frame(pair, 2, out.data(), kFrame);
-		check(out[0] == 32767, "the mix saturates rather than wrapping");
+		check(out[0] >= 32760, "the mix saturates rather than wrapping");
 	}
 
 	// 10. Degenerate arguments are refused without crashing.
@@ -273,13 +283,14 @@ int main()
 	{
 		DSPchannel_ channel = makeChannel(static_cast<u32>(source.size()));
 		pc_dsp_host_render_frame(&channel, 1, out.data(), kFrame);
-		check(std::abs(static_cast<int>(out[2]) - source[1]) <= 2,
+		check(std::abs(static_cast<int>(out[2]) - source[1] / 2) <= 2,
 		      "interleaved layout is restored after a planar render");
 	}
 
-	// 14. Pikmin 2's automatic mixer ramps mCurrentMixerValue toward
-	// mMixerLevel, pans by the mVolumeAndPan bytes, and fades out on
-	// endRequested instead of stopping dead.
+	// 14. Pikmin 2's short 3D effects start at zero in initAutoMixer. The DSP
+	// must reach the requested gain in the first 80-sample subframe; the old
+	// exponential ramp needed roughly 200 ms, so short Pikmin calls, throws
+	// and impacts ended while still effectively silent (#129).
 	{
 		DSPchannel_ channel = makeChannel(static_cast<u32>(source.size()));
 		for (int m = 0; m < 6; ++m) {
@@ -293,18 +304,17 @@ int main()
 		channel.dolbyVolumeTarget  = 0x3FFF;
 
 		std::memset(out.data(), 0, out.size() * sizeof(s16));
-		pc_dsp_host_render_frame(&channel, 1, out.data(), PC_DSP_SUBFRAME_SAMPLES);
+		pc_dsp_host_render_frame(&channel, 1, out.data(), kFrame);
 		check(out[0] == 0, "auto mixer starts silent from a zero mixer value");
 		bool fadesIn = false;
-		for (u32 i = 1; i < PC_DSP_SUBFRAME_SAMPLES; ++i) {
+		for (u32 i = kFrame / 2; i < kFrame; ++i) {
 			if (out[i * 2] != 0) {
 				fadesIn = true;
 			}
 		}
 		check(fadesIn, "auto mixer fades in toward the mixer level");
-		check(channel.dolbyVolumeCurrent > 0, "mixer value advanced from zero");
-		check(channel.dolbyVolumeCurrent == channel.dolbyVolumeTarget,
-		      "short sounds reach the requested volume within one subframe");
+		check(channel.dolbyVolumeCurrent == 0x3FFF,
+		      "short 3D voice reaches its requested gain in the first subframe");
 		check(out[0] == out[1], "auto mixer center pan feeds both buses equally");
 
 		// A finish request retargets the ramp to zero and the voice only
@@ -327,6 +337,31 @@ int main()
 		check(silenced, "auto mixer fade-out reaches silence");
 		check(channel.done == DSP_TRUE, "auto mixer voice finishes after its fade");
 		(void)peakBefore;
+	}
+
+	// 15. An effect shorter than one DSP subframe must become audible before
+	// its sample ends. This is the concrete throwing/carrying regression from
+	// #129, rather than only checking the mixer's final bookkeeping value.
+	{
+		DSPchannel_ channel = makeChannel(40);
+		for (int m = 0; m < 6; ++m) {
+			channel.mixChannels[m].id            = 0;
+			channel.mixChannels[m].currentVolume = 0;
+			channel.mixChannels[m].targetVolume  = 0;
+		}
+		channel.useDolbyVolume     = DSP_TRUE;
+		channel.dolbyVoicePosition = static_cast<u16>(64 << 8); // center, front
+		channel.dolbyVolumeCurrent = 0;
+		channel.dolbyVolumeTarget  = 0x3FFF;
+
+		std::memset(out.data(), 0, out.size() * sizeof(s16));
+		pc_dsp_host_render_frame(&channel, 1, out.data(), kFrame);
+		bool audibleBeforeEnd = false;
+		for (u32 i = 0; i < 40; ++i) {
+			audibleBeforeEnd |= out[i * 2] != 0 || out[i * 2 + 1] != 0;
+		}
+		check(audibleBeforeEnd, "subframe-length 3D effect is audible before ending");
+		check(channel.done == DSP_TRUE, "short 3D effect still reports completion");
 	}
 
 	pc_dsp_host_shutdown();

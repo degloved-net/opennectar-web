@@ -93,6 +93,28 @@ int main()
 	pc_cosmetic_srand(0xAAAAAAAAu);
 	check(pc_sim_rand() == pc_cosmetic_rand(), "same seed must give the same first draw on both streams");
 
+	// Float shapers span [0, max] in deterministic mode. Draws are 15-bit, so
+	// dividing by a host RAND_MAX of 0x7fffffff would pin every roll near 0.
+	check(pc_sim_rand_max() == 0x7fff, "deterministic draw range must be 0x7fff");
+	pc_sim_srand(1);
+	pc_cosmetic_srand(1);
+	float simMax = 0.0f, cosMax = 0.0f, simSum = 0.0f, cosSum = 0.0f;
+	const int kRolls = 4096;
+	for (int i = 0; i < kRolls; ++i) {
+		const float s = pc_sim_randf(1.0f);
+		const float c = pc_cosmetic_randf(1.0f);
+		check(s >= 0.0f && s <= 1.0f, "sim roll must stay in [0, 1]");
+		check(c >= 0.0f && c <= 1.0f, "cosmetic roll must stay in [0, 1]");
+		simMax = s > simMax ? s : simMax;
+		cosMax = c > cosMax ? c : cosMax;
+		simSum += s;
+		cosSum += c;
+	}
+	check(simMax > 0.99f, "sim rolls must reach the top of the range");
+	check(cosMax > 0.99f, "cosmetic rolls must reach the top of the range");
+	check(simSum / kRolls > 0.45f && simSum / kRolls < 0.55f, "sim roll mean must be near 0.5");
+	check(cosSum / kRolls > 0.45f && cosSum / kRolls < 0.55f, "cosmetic roll mean must be near 0.5");
+
 	// Passthrough phase: with the switch off both streams return rand().
 	setEnv("PIKMIN_NETPLAY_DETERMINISTIC", nullptr);
 	pc_netplay_det_init(0, emptyArgv);
@@ -104,6 +126,15 @@ int main()
 	std::srand(424242);
 	check(pc_sim_rand() == simExpected, "sim stream must passthrough to rand() when off");
 	check(pc_cosmetic_rand() == cosExpected, "cosmetic stream must passthrough to rand() when off");
+
+	// Off mode keeps the original rand() / RAND_MAX float bit for bit.
+	check(pc_sim_rand_max() == RAND_MAX, "off-mode draw range must be the host RAND_MAX");
+	std::srand(777);
+	const float simRollExpected = 3.0f * (std::rand() / float(RAND_MAX));
+	const float cosRollExpected = 3.0f * (std::rand() / float(RAND_MAX));
+	std::srand(777);
+	check(pc_sim_randf(3.0f) == simRollExpected, "off-mode sim roll must match rand() / RAND_MAX");
+	check(pc_cosmetic_randf(3.0f) == cosRollExpected, "off-mode cosmetic roll must match rand() / RAND_MAX");
 
 	std::printf("PcSimRng: %s\n", failures ? "FAILED" : "all tests passed");
 	return failures ? 1 : 0;

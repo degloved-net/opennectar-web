@@ -31,6 +31,7 @@ if [[ ! -f "${out}/sdl2/lib/libSDL2.a" ]]; then
     cmake -S "${out}/SDL2-${sdl_version}" -B "${out}/sdl2-build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_STATIC_PIC=ON -DSDL_TEST=OFF \
+        -DSDL_HIDAPI=ON -DSDL_HIDAPI_JOYSTICK=ON -DSDL_HIDAPI_LIBUSB=ON \
         -DCMAKE_INSTALL_PREFIX="${out}/sdl2"
     cmake --build "${out}/sdl2-build" -j"${jobs}"
     cmake --install "${out}/sdl2-build"

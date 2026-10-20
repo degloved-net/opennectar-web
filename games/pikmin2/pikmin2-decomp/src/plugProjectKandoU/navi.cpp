@@ -331,9 +331,7 @@ static void pcUpdateLockOn(Navi* navi)
 		}
 		if (!stillValid) {
 			lock.mTarget = nullptr;
-			if (mode == 2) {
-				cursor = lock.mAim; // el cursor vuelve a donde apuntaba el jugador
-			}
+			cursor       = lock.mAim; // el cursor vuelve a donde apuntaba el jugador
 		}
 	}
 
@@ -374,6 +372,8 @@ static void pcUpdateLockOn(Navi* navi)
 				lock.mIgnore = lock.mTarget;
 			}
 			lock.mTarget = nullptr;
+			// Si no, el cursor se quedaba clavado a la distancia del objetivo.
+			cursor = lock.mAim;
 		} else {
 			acquired = pickNearest();
 		}
@@ -393,6 +393,10 @@ static void pcUpdateLockOn(Navi* navi)
 	// objetivo (lo empuja makeCStick) y cada Pikmin ataca al llegar; al
 	// agotarse el tiempo van los que queden.
 	const bool chargeable = lock.mTarget && pc_settings_get_charge() && lock.mTarget->mObjectTypeID == OBJTYPE_Teki;
+	if (chargePressed) { // TEMP depuracion Charge en Android
+		printf("[Charge] press target=%p type=%d setting=%d chargeable=%d\n", (void*)lock.mTarget,
+		       lock.mTarget ? (int)lock.mTarget->mObjectTypeID : -1, pc_settings_get_charge(), (int)chargeable);
+	}
 	if (!chargeable) {
 		lock.mCharge = 0.0f;
 		return;

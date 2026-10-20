@@ -101,6 +101,9 @@ struct JPABaseParticle {
 	u8 mTexAnmIdx;                     // _94
 	u8 mAnmRandom;                     // _95
 	u8 mPrmColorAlphaAnm;              // _96
+#ifdef PIKI_PC_PORT
+	JGeometry::TVec3f mPcPrevPosition; // mPosition del tick anterior (dibujo entre ticks)
+#endif
 };
 
 struct JPAParticleCallBack {
@@ -404,6 +407,9 @@ struct JPABaseEmitter {
 	u8 mTexAnmIdx;                           // _111
 	u8 mGroupID;                             // _112
 	u8 mResMgrID;                            // _113
+#ifdef PIKI_PC_PORT
+	JGeometry::TVec3f mPcTickGlobalPos; // posicion global del emisor en el ultimo tick
+#endif
 };
 
 struct JPAEmitterCallBack {
@@ -412,6 +418,10 @@ struct JPAEmitterCallBack {
 	virtual void executeAfter(JPABaseEmitter*) { } // _10 (weak)
 	virtual void draw(JPABaseEmitter*) { }         // _14 (weak)
 	virtual void drawAfter(JPABaseEmitter*) { }    // _18 (weak)
+#ifdef PIKI_PC_PORT
+	// Entre ticks de 30 Hz: vuelve a pegar el emisor a su objeto, sin simular.
+	virtual void pcSubframeSync(JPABaseEmitter*) { }
+#endif
 
 	// not sure how this works with the pure virtual dtor
 	// ~JPAEmitterCallBack();
@@ -473,6 +483,11 @@ struct JPAEmitterManager {
 
 	JPABaseEmitter* createSimpleEmitterID(const JGeometry::TVec3f&, u16, u8, u8, JPAEmitterCallBack*, JPAParticleCallBack*);
 	void calc();
+#ifdef PIKI_PC_PORT
+	// FPS Mode: lo llama el dueno en cada frame en vez de calc(); simula solo
+	// en los ticks de 30 Hz y entre ellos resincroniza los emisores.
+	void pcUpdate();
+#endif
 	void draw(const JPADrawInfo*, u8);
 	void forceDeleteAllEmitter();
 	void forceDeleteGroupEmitter(u8);
@@ -499,6 +514,9 @@ struct JPAEmitterManager {
 	uint mPtclMax;                         // _28
 	u8 mGrpMax;                            // _2C
 	u8 mResMax;                            // _2D
+#ifdef PIKI_PC_PORT
+	f32 mPcSub = 0.0f; // fraccion de tick con la que se dibuja (ver pcUpdate)
+#endif
 };
 
 #endif

@@ -4821,29 +4821,101 @@ void ngScreen(int* w, int* h)
     }
 }
 
-// ─── Randomizer: la misma ventana con sus ajustes (docs/PLAN_RANDOMIZER.md §11) ───
+// ─── Randomizer: explicación y ajustes (docs/PLAN_RANDOMIZER.md §11) ───
 //
-// Entrando por la opción Randomizer del título, la ventana añade la semilla
-// (con su código RND2 para compartir: Ctrl+C lo copia, Ctrl+V pega uno) y los
-// ajustes de la partida, en una lista compacta: Arriba/Abajo eligen fila,
-// Izquierda/Derecha cambian el valor y Start empieza (si la semilla da un
-// mundo completable).
+// Misma estructura que en Pikmin 1. Entrando por la opción Randomizer del
+// título, dos páginas: la explicación (A sigue, B vuelve al título) y los
+// ajustes (Arriba/Abajo eligen fila, Izquierda/Derecha cambian el valor, el
+// código de la partida se edita con A, B vuelve a la explicación y Start
+// empieza si la semilla da un mundo completable). El aspecto usa las placas
+// y el texto de los menús de Pikmin 2.
 enum {
-    NGR_Difficulty, NGR_Mode, NGR_Seed, NGR_Treasures, NGR_Enemies, NGR_Bosses, NGR_Mix, NGR_Globes,
-    NGR_Candypops, NGR_Layout, NGR_Plants, NGR_Debt, NGR_Spoiler, NGR_Start, NGR_Count
+    NGR_Difficulty, NGR_Mode, NGR_Treasures, NGR_Enemies, NGR_Bosses, NGR_Mix, NGR_Globes, NGR_Candypops,
+    NGR_Layout, NGR_Plants, NGR_Debt, NGR_Spoiler, NGR_Share, NGR_NewSeed, NGR_Start, NGR_Count
 };
-const char* const kNgrTitles[NGR_Count] = { "Difficulty", "Game mode", "Seed", "Treasures", "Enemies", "Bosses",
+const char* const kNgrTitles[NGR_Count] = { "Difficulty", "Game mode", "Treasures", "Enemies", "Bosses",
                                             "Bosses <-> enemies", "Globes", "Candypops", "Cave layout", "Plants",
-                                            "Debt", "Spoiler log", "Start" };
-int  sNgrRow = 0;
+                                            "Debt", "Spoiler log", "Seed code", "", "" };
+int  sNgrPage = 0; // 0 = explicación, 1 = ajustes
+int  sNgrRow  = 0;
 char sNgrMessage[96] = "";
+
+// Geometría compartida por el dibujo y los toques.
+const int kNgrPanelW = 640;
+const int kNgrPanelH = 500;
+const int kNgrRowH   = 26;
+const int kNgrValueW = 250;
+int ngrRowY(int panelY, int row) { return panelY + 34 + row * kNgrRowH + (row == NGR_Start ? 6 : 0); }
+int ngrValueX(int panelX) { return panelX + kNgrPanelW - 40 - kNgrValueW; }
+
+// Espacio de la ventana del Randomizer: si no cabe con margen (en móvil), se
+// agranda el espacio virtual para que la ortho la reduzca entera.
+void ngrScreen(int* w, int* h)
+{
+    ngScreen(w, h);
+    const float s = std::min(1.0f, std::min((*w - 16) / float(kNgrPanelW), (*h - 16) / float(kNgrPanelH)));
+    if (s > 0.0f && s < 1.0f) {
+        *w = (int)(*w / s);
+        *h = (int)(*h / s);
+    }
+}
+
+// Código compartido (semilla + ajustes): campo de texto libre, como en Pikmin 1.
+bool sNgrShareEditing = false;
+bool sNgrTextWasOn    = false;
+char sNgrShareEdit[32];
+int  sNgrShareLen = 0;
+
+bool ngrApplyShareCode(const char* text)
+{
+    uint64_t seed  = 0;
+    uint32_t flags = 0;
+    if (!text || !pc_randomizer_parse_share_code(text, &seed, &flags)) return false;
+    pc_randomizer_set_pending_seed(seed);
+    pc_randomizer_set_pending_flags(flags);
+    return true;
+}
+
+void ngrShareBegin()
+{
+    sNgrShareLen     = 0;
+    sNgrShareEdit[0] = '\0';
+    sNgrShareEditing = true;
+    sNgrMessage[0]   = '\0';
+    // En Android abre el teclado virtual; se deja como estaba al salir.
+    sNgrTextWasOn = SDL_IsTextInputActive() == SDL_TRUE;
+    if (!sNgrTextWasOn) SDL_StartTextInput();
+}
+
+void ngrShareEnd()
+{
+    sNgrShareEditing = false;
+    if (!sNgrTextWasOn) SDL_StopTextInput();
+}
+
+void ngrShareType(char c)
+{
+    if (c >= 'a' && c <= 'z') c = char(c - 32);
+    const bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '-';
+    if (!ok || sNgrShareLen >= int(sizeof(sNgrShareEdit)) - 1) return;
+    sNgrShareEdit[sNgrShareLen++] = c;
+    sNgrShareEdit[sNgrShareLen]   = '\0';
+}
+
+/// Un código no válido no bloquea: vuelve el que había y se avisa.
+void ngrShareCommit()
+{
+    if (sNgrShareLen > 0 && !ngrApplyShareCode(sNgrShareEdit))
+        std::snprintf(sNgrMessage, sizeof(sNgrMessage), "That code is not valid, so your code was kept.");
+    ngrShareEnd();
+}
 
 int ngrCount(int row)
 {
     switch (row) {
     case NGR_Enemies: case NGR_Bosses: return 3;
     case NGR_Debt: return 4;
-    case NGR_Seed: case NGR_Start: return 0;
+    case NGR_Share: case NGR_NewSeed: case NGR_Start: return 0;
     default: return 2;
     }
 }
@@ -4900,6 +4972,7 @@ const char* ngrValueText(int row, int v)
     case NGR_Treasures:  return v ? "Shuffled" : "Vanilla";
     case NGR_Enemies:
     case NGR_Bosses:     return kModes[v % 3];
+    case NGR_Mix:        return v ? "Yes" : "No";
     case NGR_Globes:
     case NGR_Candypops:
     case NGR_Plants:     return v ? "Shuffled" : "Fixed";
@@ -4914,7 +4987,6 @@ const char* ngrDetail(int row)
     switch (row) {
     case NGR_Difficulty: return "Hard: tougher enemies, 8-minute days, 80 Pikmin.";
     case NGR_Mode:       return "Permadeath: if both captains go down, the file is erased.";
-    case NGR_Seed:       return "A: new seed.  Ctrl+C: copy code.  Ctrl+V: paste a friend's code.";
     case NGR_Treasures:  return "Treasures trade places. Each cave keeps its count. Louie stays put.";
     case NGR_Enemies:    return "Shuffled: same kind of creature. Chaos: any creature that fits the spot.";
     case NGR_Bosses:     return "Bosses trade arenas. The Waterwraith and Titan Dweevil stay put.";
@@ -4925,6 +4997,8 @@ const char* ngrDetail(int row)
     case NGR_Plants:     return "Plants and flora trade places with each other.";
     case NGR_Debt:       return "Pokos the company owes. The world is always payable without Wistful Wild.";
     case NGR_Spoiler:    return "Writes randomizer_spoiler.txt with where everything went.";
+    case NGR_Share:      return "This world and its settings in one code. A: enter a friend's. Ctrl+C: copy.";
+    case NGR_NewSeed:    return "Roll a new random seed.";
     default:             return "Begin the expedition with these settings.";
     }
 }
@@ -4939,158 +5013,263 @@ void ngrStart()
     sNewGamePromptOpen   = false;
 }
 
+void ngrCancel()
+{
+    sNewGamePromptResult = PC_NEWGAME_CANCELLED;
+    sNewGamePromptOpen   = false;
+}
+
+// Edición del código: Enter/A confirma, Esc/B cancela, Ctrl+V pega y aplica.
+void ngrShareInput()
+{
+    bool ok     = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_KP_ENTER);
+    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    if (sTouchTapPending) {
+        sTouchTapPending = false;
+        ok = true;
+    }
+    if (SDL_GameController* ctl = pc_window_get_controller()) {
+        if (promptPadA(ctl)) ok = true;
+        if (promptPadB(ctl)) cancel = true;
+    }
+    if ((sTouchFrameButtons & PAD_BUTTON_A) != 0) ok = true;
+    if ((sTouchFrameButtons & PAD_BUTTON_B) != 0) cancel = true;
+    if ((SDL_GetModState() & KMOD_CTRL) && keyWentDown(SDL_SCANCODE_V)) {
+        char* clip = SDL_GetClipboardText();
+        sNgrShareLen     = 0;
+        sNgrShareEdit[0] = '\0';
+        for (const char* q = clip ? clip : ""; *q; ++q) ngrShareType(*q);
+        SDL_free(clip);
+        ngrShareCommit();
+        return;
+    }
+    if (keyWentDown(SDL_SCANCODE_BACKSPACE) && sNgrShareLen > 0) sNgrShareEdit[--sNgrShareLen] = '\0';
+    if (ok) ngrShareCommit();
+    else if (cancel) ngrShareEnd();
+}
+
 void ngrInput()
 {
-    bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
-    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-    bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
-    bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    if (sNgrPage == 1 && sNgrShareEditing) {
+        ngrShareInput();
+        return;
+    }
     const bool ctrl = (SDL_GetModState() & KMOD_CTRL) != 0;
-    const bool copy  = ctrl && keyWentDown(SDL_SCANCODE_C);
-    const bool paste = ctrl && keyWentDown(SDL_SCANCODE_V);
-    if (ctrl) { left = right = false; } // Ctrl+A/Ctrl+D no mueven
+    bool left   = !ctrl && (keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A)); // Ctrl+A/D no mueven
+    bool right  = !ctrl && (keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D));
+    bool up     = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool back   = keyWentDown(SDL_SCANCODE_ESCAPE);
 
     left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
     up     |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
     down   |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
     accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
-    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
-    // Táctil: el primer toque elige la fila; otro sobre la elegida la usa
-    // (Start empieza, Seed sortea otra, el resto cambia; a la izquierda del
-    // valor retrocede). Fuera de la ventana, atrás. Misma geometría que ngrDraw.
+    back   |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+
     if (sTouchTapPending) {
         sTouchTapPending = false;
-        int sw, sh;
-        ngScreen(&sw, &sh);
-        const float x = sTouchTapX * sw;
-        const float y = sTouchTapY * sh;
-        const int panelW = 600, panelH = 466, rowH = 24;
-        const int panelX = sw / 2 - panelW / 2;
-        const int panelY = sh / 2 - panelH / 2;
-        const int top = panelY + 52;
-        const int valueX = panelX + 290;
-        if (x >= panelX && x <= panelX + panelW && y >= panelY && y <= panelY + panelH) {
-            for (int row = 0; row < NGR_Count; row++) {
-                const int rowY = top + row * rowH + (row == NGR_Start ? 8 : 0);
-                if (y < rowY - 4 || y >= rowY + rowH - 4) continue;
-                if (row != sNgrRow) {
-                    sNgrRow = row;
-                    sNgrMessage[0] = '\0';
-                } else if (row != NGR_Start && row != NGR_Seed && x >= valueX && x < valueX + 24) {
-                    left = true;
-                } else {
-                    accept = true;
-                }
-                break;
-            }
+        if (sNgrPage == 0) {
+            accept = true; // un toque en la explicación sigue adelante
         } else {
-            cancel = true;
+            int sw, sh;
+            ngrScreen(&sw, &sh);
+            const float x = sTouchTapX * sw, y = sTouchTapY * sh;
+            const int panelX = sw / 2 - kNgrPanelW / 2, panelY = sh / 2 - kNgrPanelH / 2;
+            // Solo cuenta dentro de un recuadro: al soltar un botón de la capa
+            // (confirmar, abajo a la derecha) también llega un toque en su
+            // sitio, que no debe pulsar la fila que quede a esa altura.
+            for (int row = 0; row < NGR_Count; row++) {
+                const float ry = float(ngrRowY(panelY, row));
+                if (y < ry || y > ry + kNgrRowH - 4) continue;
+                const float bx = row == NGR_Start ? float(panelX + kNgrPanelW / 2 - 115) : float(ngrValueX(panelX));
+                const float bw = row == NGR_Start ? 230.0f : float(kNgrValueW);
+                if (x < bx || x >= bx + bw) continue;
+                sNgrRow        = row;
+                sNgrMessage[0] = '\0';
+                if (ngrCount(row) == 0) {
+                    accept = true;
+                } else {
+                    // Mitad izquierda del valor: anterior; derecha: siguiente.
+                    if (x < bx + bw / 2) left = true;
+                    else right = true;
+                }
+            }
         }
     }
-
-    SDL_GameController* ctl = pc_window_get_controller();
-    if (ctl) {
+    if (SDL_GameController* ctl = pc_window_get_controller()) {
         if (padNavLeft(ctl))  left   = true;
         if (padNavRight(ctl)) right  = true;
         if (padNavUp(ctl))    up     = true;
         if (padNavDown(ctl))  down   = true;
         if (promptPadA(ctl))  accept = true;
-        if (promptPadB(ctl))  cancel = true;
+        if (promptPadB(ctl))  back   = true;
     }
 
-    if (copy) {
+    if (sNgrPage == 0) {
+        if (accept) {
+            sNgrPage       = 1;
+            sNgrRow        = NGR_Start;
+            sNgrMessage[0] = '\0';
+        } else if (back) {
+            ngrCancel();
+        }
+        return;
+    }
+
+    if (up || down) {
+        sNgrRow        = (sNgrRow + (up ? NGR_Count - 1 : 1)) % NGR_Count;
+        sNgrMessage[0] = '\0';
+    }
+    const int n = ngrCount(sNgrRow);
+    if ((left || right) && n > 0) {
+        ngrSetValue(sNgrRow, (ngrValue(sNgrRow) + (right ? 1 : n - 1)) % n);
+        sNgrMessage[0] = '\0';
+    }
+    // Ctrl+C copia el código de la partida; Ctrl+V pega el de un amigo.
+    if (ctrl && keyWentDown(SDL_SCANCODE_C)) {
         char code[PC_RANDOMIZER_SHARE_CODE_LEN];
         pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), code, sizeof(code));
         SDL_SetClipboardText(code);
         std::snprintf(sNgrMessage, sizeof(sNgrMessage), "Copied %s", code);
     }
-    if (paste) {
-        char* text = SDL_GetClipboardText();
-        uint64_t seed = 0;
-        uint32_t flags = 0;
-        if (text && pc_randomizer_parse_share_code(text, &seed, &flags)) {
-            pc_randomizer_set_pending_seed(seed);
-            pc_randomizer_set_pending_flags(flags);
-            std::snprintf(sNgrMessage, sizeof(sNgrMessage), "Code pasted: same world as your friend.");
-        } else {
-            std::snprintf(sNgrMessage, sizeof(sNgrMessage), "The clipboard has no valid RND2 code.");
+    if (ctrl && keyWentDown(SDL_SCANCODE_V)) {
+        char* clip = SDL_GetClipboardText();
+        if (clip && *clip) {
+            if (ngrApplyShareCode(clip)) std::snprintf(sNgrMessage, sizeof(sNgrMessage), "Code pasted: same world as your friend.");
+            else std::snprintf(sNgrMessage, sizeof(sNgrMessage), "That code is not valid, so your code was kept.");
         }
-        if (text) SDL_free(text);
-    }
-
-    if (up || down) {
-        sNgrRow = (sNgrRow + (up ? NGR_Count - 1 : 1)) % NGR_Count;
-        sNgrMessage[0] = '\0';
-    }
-    const int n = ngrCount(sNgrRow);
-    if ((left || right) && n > 0) {
-        ngrSetValue(sNgrRow, (ngrValue(sNgrRow) + (left ? n - 1 : 1)) % n);
-        sNgrMessage[0] = '\0';
+        SDL_free(clip);
+        return;
     }
     if (accept) {
-        if (sNgrRow == NGR_Start) {
-            ngrStart();
-        } else if (sNgrRow == NGR_Seed) {
+        if (sNgrRow == NGR_Share) {
+            ngrShareBegin();
+        } else if (sNgrRow == NGR_NewSeed) {
             pc_randomizer_reroll_pending_seed();
             sNgrMessage[0] = '\0';
+        } else if (sNgrRow == NGR_Start) {
+            ngrStart();
         } else if (n > 0) {
             ngrSetValue(sNgrRow, (ngrValue(sNgrRow) + 1) % n);
+            sNgrMessage[0] = '\0';
         }
-    } else if (cancel) {
-        sNewGamePromptResult = PC_NEWGAME_CANCELLED;
-        sNewGamePromptOpen   = false;
+    } else if (back) {
+        sNgrPage       = 0;
+        sNgrMessage[0] = '\0';
     }
+}
+
+// Texto que se encoge hasta caber en maxW. center: x es el centro.
+void ngrText(int x, int y, const char* t, Colour c, int fw, int maxW, bool center)
+{
+    while (fw > 9 && f1TextW(t, fw) > maxW) fw--;
+    if (center) x -= f1TextW(t, fw) / 2;
+    f1Text(x, y, t, c, fw, fw * 3 / 2);
+}
+
+// Recuadro de opción con las placas del juego: cristal y, si tiene el
+// cursor, la placa amarilla debajo (como la ventana New Game).
+void ngrOption(DGXGraphics* gfx, int x, int y, int w, int h, const char* text, bool focus, int fw)
+{
+    if (pc_settings_p2d_active()) {
+        if (focus) pc_settings_p2d_plate(x, y, w, h, 2);
+        pc_settings_p2d_plate(x, y, w, h, 1);
+    } else {
+        const Colour fill = focus ? Colour(70, 92, 150, 240) : Colour(26, 30, 48, 220);
+        gfx->setColour(fill, true);
+        gfx->setAuxColour(fill);
+        gfx->fillRectangle(RectArea(x, y, x + w, y + h));
+    }
+    const Colour tc = focus ? Colour(255, 255, 255, 255) : Colour(205, 239, 250, 255);
+    ngrText(x + w / 2, y + (h - fw * 3 / 2) / 2, text, tc, fw, w - 16, true);
+}
+
+void ngrDrawIntro(DGXGraphics* gfx, int screenW, int screenH)
+{
+    const int panelW = 620, panelH = 360;
+    const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2 + 10;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, panelW, "Randomizer");
+
+    const Colour gold(255, 207, 75, 255), pale(205, 239, 250, 255), dim(150, 170, 190, 255);
+    ngrText(panelX + panelW / 2, panelY + 34, "Every run is a brand new expedition.", gold, 15, panelW - 60, true);
+
+    struct Bullet { const char* text; const char* sub; };
+    const Bullet bullets[] = {
+        { "Treasures, enemies and bosses get shuffled.", "Choose how wild it gets on the next page." },
+        { "Same seed and settings, same world.", "Share your code to race a friend." },
+        { "Every world can be finished.", "Seeds are checked, and the debt can always be paid." },
+        { "Hard mode and Permadeath work here too.", "Set them with the other options." },
+    };
+    const int textX = panelX + 64, textW = panelW - 64 - 36;
+    for (int i = 0; i < 4; i++) {
+        const int y = panelY + 82 + i * 58;
+        fillRoundRectGrad(gfx, panelX + 40, y + 5, 10, 10, 5, Colour(255, 236, 140, 255), Colour(220, 160, 40, 255));
+        ngrText(textX, y, bullets[i].text, pale, 13, textW, false);
+        ngrText(textX, y + 23, bullets[i].sub, dim, 11, textW, false);
+    }
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "A / Enter: continue    B / Esc: back", dim, panelW - 40);
+}
+
+void ngrDrawSettings(DGXGraphics* gfx, int screenW, int screenH)
+{
+    const int panelX = screenW / 2 - kNgrPanelW / 2, panelY = screenH / 2 - kNgrPanelH / 2;
+    drawPikminPanel(gfx, panelX, panelY, kNgrPanelW, kNgrPanelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, kNgrPanelW, "Randomizer Settings");
+
+    const Colour gold(255, 207, 75, 255), pale(205, 239, 250, 255), dim(150, 170, 190, 255);
+    const int vx = ngrValueX(panelX);
+    const int bh = kNgrRowH - 4;
+    for (int row = 0; row < NGR_Count; row++) {
+        const bool focus = row == sNgrRow;
+        const int y      = ngrRowY(panelY, row);
+        if (row == NGR_Start) {
+            const int bw = 230, bx = panelX + kNgrPanelW / 2 - bw / 2;
+            if (focus) f1Text(bx - 18, y + 2, ">", gold, 13, 18);
+            ngrOption(gfx, bx, y, bw, bh, "Start", focus, 13);
+            continue;
+        }
+        if (row == NGR_NewSeed) {
+            if (focus) f1Text(vx - 18, y + 2, ">", gold, 13, 18);
+            ngrOption(gfx, vx, y, kNgrValueW, bh, "New random seed", focus, 12);
+            continue;
+        }
+        if (focus) f1Text(panelX + 22, y + 2, ">", gold, 13, 18);
+        ngrText(panelX + 40, y + 2, kNgrTitles[row], focus ? gold : dim, 12, vx - panelX - 50, false);
+        char value[48];
+        if (row == NGR_Share) {
+            if (sNgrShareEditing) {
+                std::snprintf(value, sizeof(value), "%s|", sNgrShareEdit);
+            } else {
+                pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), value,
+                                                sizeof(value));
+            }
+            ngrOption(gfx, vx, y, kNgrValueW, bh, value, focus, 11);
+            continue;
+        }
+        // "< valor >" muestra que se cambia con las flechas.
+        std::snprintf(value, sizeof(value), "<  %s  >", ngrValueText(row, ngrValue(row)));
+        ngrOption(gfx, vx, y, kNgrValueW, bh, value, focus, 12);
+    }
+
+    const char* help = sNgrShareEditing ? "Type or paste (Ctrl+V) a friend's code."
+                     : sNgrMessage[0]   ? sNgrMessage
+                                        : ngrDetail(sNgrRow);
+    ngrText(panelX + kNgrPanelW / 2, panelY + kNgrPanelH - 64, help, sNgrMessage[0] ? gold : pale, 12,
+            kNgrPanelW - 60, true);
+    drawHelpLine(panelX + kNgrPanelW / 2, panelY + kNgrPanelH - 34,
+                 sNgrShareEditing ? "Enter / A: confirm    Esc / B: cancel"
+                                  : "Arrows: change    A / Enter: select    B / Esc: back",
+                 dim, kNgrPanelW - 40);
 }
 
 void ngrDraw(DGXGraphics* gfx, int screenW, int screenH)
 {
-    const int panelW = 600, panelH = 466;
-    const int panelX = screenW / 2 - panelW / 2;
-    const int panelY = screenH / 2 - panelH / 2;
-    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
-    drawPikminHeader(gfx, panelX, panelY, panelW, "Randomizer");
-
-    const Colour gold(255, 207, 75, 255);
-    const Colour pale(205, 239, 250, 255);
-    const Colour dim(150, 170, 190, 255);
-    const int rowH = 24;
-    const int top  = panelY + 52;
-    const int labelX = panelX + 44;
-    const int valueX = panelX + 290;
-    for (int row = 0; row < NGR_Count; row++) {
-        const bool focus = row == sNgrRow;
-        const int y = top + row * rowH + (row == NGR_Start ? 8 : 0);
-        if (focus) f1Text(labelX - 18, y, ">", gold, 13, 18);
-        if (row == NGR_Start) {
-            const char* t = "Start";
-            f1Text(panelX + panelW / 2 - f1TextW(t, 14) / 2, y, t, focus ? Colour(255, 255, 255, 255) : dim, 14, 20);
-            continue;
-        }
-        f1Text(labelX, y, kNgrTitles[row], focus ? gold : dim, 12, 18);
-        char value[48];
-        if (row == NGR_Seed) {
-            pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), value,
-                                            sizeof(value));
-        } else {
-            std::snprintf(value, sizeof(value), "%s%s%s", focus ? "< " : "", ngrValueText(row, ngrValue(row)),
-                          focus ? " >" : "");
-        }
-        f1Text(valueX, y, value, focus ? Colour(255, 255, 255, 255) : pale, 12, 18);
-    }
-
-    const char* detail = sNgrMessage[0] ? sNgrMessage : ngrDetail(sNgrRow);
-    const int detailY = top + NGR_Count * rowH + 16;
-    f1Text(panelX + panelW / 2 - f1TextW(detail, 11) / 2, detailY, detail, sNgrMessage[0] ? gold : pale, 11, 16);
-#ifdef __ANDROID__
-    drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "Tap a row to pick it, tap it again to change it    Tap outside: back",
-                 dim, panelW - 40);
-#else
-    drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "Up/Down: row    Left/Right: change    A: select    B: back",
-                 dim, panelW - 40);
-#endif
+    if (sNgrPage == 0) ngrDrawIntro(gfx, screenW, screenH);
+    else ngrDrawSettings(gfx, screenW, screenH);
 }
 
 void pcNewGamePromptInput()
@@ -5187,6 +5366,12 @@ void pcNewGamePromptInput()
 }
 } // namespace
 
+void pc_settings_text_input(const char* text)
+{
+    if (!text || !sNewGamePromptOpen || !sNgrShareEditing) return;
+    for (const char* p = text; *p; ++p) ngrShareType(*p);
+}
+
 void pc_newgame_prompt_open(void)
 {
     sNewGamePromptOpen   = true;
@@ -5196,7 +5381,9 @@ void pc_newgame_prompt_open(void)
     sNewGamePromptRules  = 0;
     sNewGamePromptResult = PC_NEWGAME_PENDING;
     sNewGamePromptHard   = false;
-    sNgrRow              = NGR_Seed;
+    sNgrPage             = 0;
+    sNgrRow              = 0;
+    if (sNgrShareEditing) ngrShareEnd();
     sNgrMessage[0]       = '\0';
     pc_menu_edge_reset();
 }
@@ -5223,7 +5410,26 @@ void pc_newgame_prompt_draw(void)
     gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
 
     if (pc_randomizer_menu_pending()) {
-        ngrDraw(gfx, screenW, screenH);
+        // Espacio virtual mayor para que la ventana quepa (móvil). El lote de
+        // la interfaz se proyecta con mScreenWidth/Height al vaciarse, así que
+        // se vacía lo anterior a escala real, se dibuja la ventana con el
+        // tamaño virtual y se vacía antes de restaurarlo.
+        int vw, vh;
+        ngrScreen(&vw, &vh);
+#if PIKI_P2_HOST
+        pc_settings_p2_flush();
+        gfx->mScreenWidth  = vw;
+        gfx->mScreenHeight = vh;
+        ngrDraw(gfx, vw, vh);
+        pc_settings_p2_flush();
+        gfx->mScreenWidth  = screenW;
+        gfx->mScreenHeight = screenH;
+#else
+        gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, vw, vh));
+        gfx->setViewport(RectArea(0, 0, screenW, screenH));
+        gfx->setScissor(RectArea(0, 0, screenW, screenH));
+        ngrDraw(gfx, vw, vh);
+#endif
         return;
     }
 

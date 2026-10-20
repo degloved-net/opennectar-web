@@ -35,6 +35,8 @@ void pc_settings_touch_tap(float x, float y);
 /// Arrastre vertical normalizado (fracción de la altura de la ventana) sobre
 /// los menús del port: las listas con scroll lo convierten en filas.
 void pc_settings_touch_drag(float dy);
+/// Texto tecleado (SDL_TEXTINPUT): edición del código del Randomizer.
+void pc_settings_text_input(const char* text);
 
 // Draws the overlay through the game's GX/GL stack. Called from VIWaitForRetrace
 // just before the framebuffer is blitted to the window, so it appears on top.

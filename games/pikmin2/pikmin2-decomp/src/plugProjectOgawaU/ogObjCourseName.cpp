@@ -1,3 +1,5 @@
+#include <cstring>
+#include <cstdlib>
 #include "og/newScreen/CourseName.h"
 #include "P2DScreen.h"
 #include "og/Screen/anime.h"
@@ -84,6 +86,22 @@ void ObjCourseName::doCreate(JKRArchive* arc)
 	J2DBlend info(GX_BM_BLEND, GX_BL_INVDSTALPHA, GX_BL_DSTALPHA, GX_LO_CLEAR);
 	mScreen->setBlendInfo(info, tags);
 
+#ifdef PIKI_PC_PORT
+	// TEMP depuracion: PIKMIN_CN_HIDE=PICT_001,PICT_002 oculta esos paneles.
+	if (const char* hide = getenv("PIKMIN_CN_HIDE")) {
+		char buf[128];
+		strncpy(buf, hide, sizeof(buf) - 1);
+		buf[sizeof(buf) - 1] = '\0';
+		for (char* tok = strtok(buf, ","); tok; tok = strtok(nullptr, ",")) {
+			u64 tag = 0;
+			for (const char* c = tok; *c; c++) tag = (tag << 8) | (u8)*c;
+			if (J2DPane* p = mScreen->search(tag)) {
+				p->hide();
+				printf("[CN] oculto %s\n", tok);
+			}
+		}
+	}
+#endif
 	J2DPane* pane = mScreen->search(MC8("nuki_tex"));
 	if (pane) {
 		J2DPane* pane1 = mScreen->search(MC8("efect_00"));

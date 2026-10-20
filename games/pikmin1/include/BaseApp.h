@@ -37,7 +37,7 @@ public:
 	 * @return Random value between 0 and 1.
 	 */
 #if defined(PIKI_PC_PORT)
-	f32 rnd() { return pc_sim_rand() / f32(RAND_MAX); }
+	f32 rnd() { return pc_sim_randf(1.0f); }
 #else
 	f32 rnd() { return rand() / f32(RAND_MAX); }
 #endif

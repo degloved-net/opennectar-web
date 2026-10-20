@@ -28,11 +28,11 @@
 #else
 #define RESOURCE_MGR2D_HEAP_SIZE       (0xD4800)
 #endif  // A subset of the system heap, contains the active 2d screen
-#ifdef PIKI_PC_PORT
-#define PSM_FACTORY_HEAP_SIZE ((0x900000) * 4)
-#else
-#define PSM_FACTORY_HEAP_SIZE          (0x900000)
-#endif // Used for some global sound effect data
+// This value is passed to JASKernel::setupAramHeap: it describes offsets in
+// the emulated 16 MiB GameCube ARAM, not host objects whose LP64 size grows.
+// Expanding it on PC let JAS allocate wave banks beyond pc_aram's backing
+// store, leaving the affected effects silent when the renderer read them.
+#define PSM_FACTORY_HEAP_SIZE          (0x900000) // Used for some global sound effect data
 #ifdef PIKI_PC_PORT
 #define SYSFACTORY_HEAP_SIZE ((0x151800) * 4)
 #else

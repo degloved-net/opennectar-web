@@ -305,12 +305,12 @@ struct MenuDrag {
 	bool moved = false;
 } sMenuDrag;
 
-// Con un menú reclamando la capa: B/atrás, A/confirmar del menú F1 y los
-// botones cuyo icono está en pantalla.
+// Con un menú reclamando la capa: B/atrás (abajo a la izquierda), A/confirmar
+// (abajo a la derecha) y los botones cuyo icono está en pantalla. Ambos salen
+// en todos los menús por si tocar la opción no responde (diálogo del mapa).
 bool menu_button_allowed(int i)
 {
-	if (i == BTN_BACK) return true;
-	if (i == BTN_MENU_CONFIRM) return sPortMenuClaimFrames > 0;
+	if (i == BTN_BACK || i == BTN_MENU_CONFIRM) return true;
 	return (sMenuWantedButtons >> i) & 1u;
 }
 bool sGameMenuTapPending = false;

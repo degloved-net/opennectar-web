@@ -10,6 +10,7 @@
 #include "Game/PlatInstance.h"
 #include "CollInfo.h"
 #include "JSystem/JMath.h"
+#include "JSystem/JKernel/JKRHeap.h"
 #include "Dolphin/rand.h"
 #include "trig.h"
 #include "nans.h"
@@ -203,6 +204,15 @@ void FakePiki::clearDoAnimCallback()
  */
 #ifdef PIKI_PC_PORT
 namespace {
+// The history outlives the section heap (saving rebuilds the section): with
+// the global new its nodes went to that heap and were left dangling, so the
+// first walk after a save crashed. They go to the system heap instead.
+struct PcHostAlloc {
+	bool mPrev = pc_host_alloc_active();
+	PcHostAlloc() { pc_host_alloc_set(true); }
+	~PcHostAlloc() { pc_host_alloc_set(mPrev); }
+};
+
 // The walk/run cycle's playback speed follows how far the character moved. At
 // 30 Hz that is one tick of travel; at 60/120 Hz a single tick is so short
 // that physics and collision noise make the speed, and with it the cycle,
@@ -218,6 +228,7 @@ struct PcWalkHistory {
 
 f32 pcWalkSpeed(const void* owner, const Vector3f& prev, const Vector3f& pos, f32 dt)
 {
+	PcHostAlloc hostAlloc;
 	static std::unordered_map<const void*, PcWalkHistory> sHistory;
 	PcWalkHistory& h = sHistory[owner];
 	// A teleport, or a new owner at a recycled address: start over.

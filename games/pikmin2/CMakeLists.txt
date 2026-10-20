@@ -509,6 +509,7 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             add_executable(${target} ${ARGN})
             target_compile_options(${target} PRIVATE ${NATIVE_COMPILE_OPTIONS} -Wno-unused-parameter)
             target_include_directories(${target} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include
                 ${PC_PORT_DIR}
                 ${PC_PORT_DIR}/audio
                 ${PC_PORT_DIR}/gl
@@ -535,6 +536,12 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         pikmin2_add_host_test(p2_aram_test
             ${PC_PORT_DIR}/audio/pc_aram_test.cpp
             ${PC_PORT_DIR}/audio/pc_aram.cpp
+        )
+        pikmin2_add_host_test(p2_dsp_host_test
+            ${PC_PORT_DIR}/audio/pc_dsp_host_test.cpp
+            ${PC_PORT_DIR}/audio/pc_dsp_host.cpp
+            ${PC_PORT_DIR}/audio/pc_aram.cpp
+            ${PC_PORT_DIR}/audio/pc_audio_drops.cpp
         )
         pikmin2_add_host_test(p2_envelope_test
             ${PC_PORT_DIR}/audio/pc_envelope_test.cpp

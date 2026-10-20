@@ -14,6 +14,7 @@
 #include <stddef.h>
 #if defined(PIKI_PC_PORT)
 #include "gl/pc_gfx.h"
+#include "pc_bundle_compat.h"
 #endif
 
 /**
@@ -651,6 +652,12 @@ void StdSystem::loadBundle(immut char* pPath, bool loadWithCache)
 		}
 		case 3: // DCK Animation
 		{
+#if defined(PIKI_PC_PORT)
+			// logo.bin asks for "logoMotion", while the retail bundle stores
+			// the key as "logoMotioe". Without this alias the engine falls back
+			// to a standalone logo.dck that does not exist on the disc.
+			pcCanonicalizeBundleAnimationPath(path.mString);
+#endif
 			AnimData* dck = mCurrentShape->loadDck(path.mString, *fs);
 			addAnimation(dck, path.mString);
 			break;

@@ -43,6 +43,7 @@ RenderModeInfo gPcRenderInfoStore = {};
 #include <dlfcn.h>
 #else
 #include <emscripten/emscripten.h>
+#include "JSystem/JFramework/JFWDisplay.h"
 #include "web/pc_web_runtime.h"
 #ifndef __EMSCRIPTEN_PTHREADS__
 #include "web/pc_web_threads.h"
@@ -610,6 +611,13 @@ void OSInitCond(OSCond* cond)
 	if (cond && !pc_native_cond(cond, true))
 		OSPanic(__FILE__, __LINE__, "host condition registry exhausted");
 }
+// pthread_cond_wait vuelve a tomar el mutex al cancelarse el hilo y quien
+// esperaba ya no sigue para soltarlo: el siguiente que lo use se colgaba.
+static void pc_cancel_unlock_mutex(void* mutex)
+{
+	pthread_mutex_unlock(static_cast<pthread_mutex_t*>(mutex));
+}
+
 void OSWaitCond(OSCond* cond, OSMutex* mutex)
 {
 	pthread_cond_t* nativeCond = pc_native_cond(cond, true);
@@ -625,7 +633,9 @@ void OSWaitCond(OSCond* cond, OSMutex* mutex)
 	// trylock para no bloquearse con otro hilo que lo tenga y quiera este mutex.
 	const bool irqHeld = tIrqHeld;
 	if (irqHeld) pcIrqUnlock();
+	pthread_cleanup_push(pc_cancel_unlock_mutex, nativeMutex);
 	pthread_cond_wait(nativeCond, nativeMutex);
+	pthread_cleanup_pop(0);
 	if (irqHeld) {
 		while (!sIrqMutex.try_lock()) {
 			pthread_mutex_unlock(nativeMutex);
@@ -814,8 +824,10 @@ s32 OSSuspendThread(OSThread* thread)
 	thread->suspend = 1;
 	if (thread == OSGetCurrentThread()) {
 		thread->state = OS_THREAD_STATE_WAITING;
+		pthread_cleanup_push(pc_cancel_unlock_mutex, &arg->mutex);
 		while (arg->suspended)
 			pthread_cond_wait(&arg->cond, &arg->mutex);
+		pthread_cleanup_pop(0);
 		thread->state = OS_THREAD_STATE_RUNNING;
 	}
 	pthread_mutex_unlock(&arg->mutex);
@@ -836,8 +848,10 @@ void OSSleepThread(OSThreadQueue* queue)
 	const bool irqHeld   = tIrqHeld;
 	if (irqHeld)
 		pcIrqUnlock();
+	pthread_cleanup_push(pc_cancel_unlock_mutex, &value->mutex);
 	while (generation == value->generation)
 		pthread_cond_wait(&value->cond, &value->mutex);
+	pthread_cleanup_pop(0);
 	pthread_mutex_unlock(&value->mutex);
 	if (irqHeld)
 		pcIrqLock();
@@ -1180,7 +1194,10 @@ void VIWaitForRetrace()
 #endif
 	static double nextFrame = 0.0;
 	const double now = emscripten_get_now();
-	const double period = 1000.0 / pc_p2_retrace_hz();
+	const JFWDisplay* display = sys ? sys->mDisplay : nullptr;
+	const double period = display && display->mTickRate
+	    ? 1000.0 * display->mTickRate / OS_TIMER_CLOCK
+	    : 1000.0 / pc_p2_retrace_hz();
 	if (!nextFrame || now - nextFrame > 100.0) nextFrame = now;
 	nextFrame += period;
 	emscripten_sleep(static_cast<unsigned>(std::max(0.0, nextFrame - now)));

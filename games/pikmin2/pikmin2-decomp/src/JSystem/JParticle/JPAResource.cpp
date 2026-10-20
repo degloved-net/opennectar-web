@@ -717,6 +717,9 @@ bool JPAResource::calc(JPAEmitterWorkData* work, JPABaseEmitter* emitter)
 		}
 
 		calcWorkData_c(work);
+#ifdef PIKI_PC_PORT
+		emitter->mPcTickGlobalPos = work->mGlobalPos;
+#endif
 
 		for (int i = mCalcEmitterFuncListNum - 1; i >= 0; i--) {
 			(*mCalcEmitterFuncList[i])(work);
@@ -766,8 +769,73 @@ bool JPAResource::calc(JPAEmitterWorkData* work, JPABaseEmitter* emitter)
  * @note Address: 0x800970F8
  * @note Size: 0xF0
  */
+#ifdef PIKI_PC_PORT
+// FPS Mode: JPA simula a 30 Hz (ParticleMgr::update) para conservar tiempos,
+// emision y vida originales; entre ticks las particulas se dibujan adelantadas
+// la fraccion de paso transcurrida (gPcJpaSub), como seguirian moviendose. Las
+// que siguen al emisor (estado 0x20) van con el, ya resincronizado con su
+// objeto. Se dibuja con el estado adelantado y luego se repone.
+extern f32 gPcJpaSub;
+namespace {
+struct PcJpaSaved {
+	JPABaseParticle* ptcl;
+	JGeometry::TVec3f pos;
+	u16 angle;
+};
+static PcJpaSaved* sPcJpaSaved = nullptr;
+static int sPcJpaSavedCap      = 0;
+
+static int pcJpaAdvance(JPABaseEmitter* emtr, JPAList<JPABaseParticle>& list, int n, const JGeometry::TVec3f& follow)
+{
+	for (JPANode<JPABaseParticle>* node = list.getFirst(); node != list.getEnd(); node = node->getNext()) {
+		JPABaseParticle* p = node->getObject();
+		if (n >= sPcJpaSavedCap) {
+			const int cap         = sPcJpaSavedCap ? sPcJpaSavedCap * 2 : 1024;
+			PcJpaSaved* grown     = static_cast<PcJpaSaved*>(realloc(sPcJpaSaved, sizeof(PcJpaSaved) * cap));
+			if (!grown) return n;
+			sPcJpaSaved    = grown;
+			sPcJpaSavedCap = cap;
+		}
+		sPcJpaSaved[n].ptcl  = p;
+		sPcJpaSaved[n].pos   = p->mPosition;
+		sPcJpaSaved[n].angle = p->mRotateAngle;
+		n++;
+		if (p->checkStatus(0x20)) {
+			p->mPosition.add(follow);
+		} else {
+			p->mPosition.x += (p->mPosition.x - p->mPcPrevPosition.x) * gPcJpaSub;
+			p->mPosition.y += (p->mPosition.y - p->mPcPrevPosition.y) * gPcJpaSub;
+			p->mPosition.z += (p->mPosition.z - p->mPcPrevPosition.z) * gPcJpaSub;
+		}
+		p->mRotateAngle = (u16)(p->mRotateAngle + (s32)(p->mRotateSpeed * gPcJpaSub));
+	}
+	return n;
+}
+} // namespace
+#endif
+
 void JPAResource::draw(JPAEmitterWorkData* work, JPABaseEmitter* emtr)
 {
+#ifdef PIKI_PC_PORT
+	int pcSaved = 0;
+	if (gPcJpaSub > 0.0f) {
+		JGeometry::TVec3f now, follow;
+		emtr->calcEmitterGlobalPosition(&now);
+		follow.set(now.x - emtr->mPcTickGlobalPos.x, now.y - emtr->mPcTickGlobalPos.y, now.z - emtr->mPcTickGlobalPos.z);
+		pcSaved = pcJpaAdvance(emtr, emtr->mAlivePtclBase, pcSaved, follow);
+		pcSaved = pcJpaAdvance(emtr, emtr->mAlivePtclChld, pcSaved, follow);
+	}
+	struct PcRestore {
+		int n;
+		~PcRestore()
+		{
+			for (int i = 0; i < n; i++) {
+				sPcJpaSaved[i].ptcl->mPosition    = sPcJpaSaved[i].pos;
+				sPcJpaSaved[i].ptcl->mRotateAngle = sPcJpaSaved[i].angle;
+			}
+		}
+	} pcRestore { pcSaved };
+#endif
 	work->mEmitter   = emtr;
 	work->mResource  = this;
 	work->mDrawCount = 0;

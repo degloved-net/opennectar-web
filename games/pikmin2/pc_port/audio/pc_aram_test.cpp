@@ -4,6 +4,7 @@
  */
 
 #include "pc_aram.h"
+#include "BuildSettings.h"
 
 #include <chrono>
 #include <filesystem>
@@ -12,6 +13,11 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+// ARGetBaseAddress() is 0x4000 on the host. The JAS heap is an ARAM address
+// range, so its configured end must fit in the backing store on every target.
+static_assert(0x4000u + PSM_FACTORY_HEAP_SIZE <= PC_ARAM_SIZE,
+              "JAS wave heap exceeds host ARAM");
 
 namespace {
 

@@ -197,10 +197,9 @@ void ParticleMgr::killAll()
  */
 void ParticleMgr::update()
 {
-	// FPS Mode: JPA avanza un paso por llamada; solo en los ticks originales.
-	if (PC_ORIG_TICK()) {
-		mEmitterManager->calc();
-	}
+	// FPS Mode: JPA avanza un paso por llamada, solo en los ticks originales;
+	// entre ticks se dibuja adelantado (JPAEmitterManager::pcUpdate).
+	mEmitterManager->pcUpdate();
 	pkEffectMgr->resetContextS();
 }
 

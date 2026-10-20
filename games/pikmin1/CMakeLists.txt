@@ -930,7 +930,7 @@ if(ANDROID AND NOT TARGET nectar_launcher)
         "${LAUNCHER_EMBED_DIR}"
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
         ${SDL2_INCLUDE_DIRS})
-    set(OPEN_NECTAR_VERSION "1.0.2" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0.4" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(nectar_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     target_compile_options(nectar_launcher PRIVATE ${NATIVE_COMPILE_OPTIONS})
     target_link_libraries(nectar_launcher PRIVATE launcher_imgui_android pikmin_disc_image ${SDL2_LIBRARIES} GLESv3 EGL log android)
@@ -1001,7 +1001,7 @@ if(PIKMIN_BUILD_LAUNCHER)
     target_link_libraries(pikmin_launcher PRIVATE launcher_imgui)
     # Versión que el launcher compara con el último release de GitHub para
     # avisar y actualizarse. Súbela en cada release (la etiqueta de GitHub).
-    set(OPEN_NECTAR_VERSION "1.0.2" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0.4" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(pikmin_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     if (WIN32)
         target_sources(pikmin_launcher PRIVATE packaging/windows/nectar.rc)
@@ -1077,6 +1077,11 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
 endif()
 
 if(PIKMIN_BUILD_TESTS)
+    add_executable(pc_bundle_compat_test pc_port/pc_bundle_compat_test.cpp)
+    target_include_directories(pc_bundle_compat_test PRIVATE pc_port)
+    target_compile_options(pc_bundle_compat_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_bundle_compat_test COMMAND pc_bundle_compat_test)
+
     add_executable(pc_generator_cache_validation_test
         pc_port/save/pc_generator_cache_validation_test.cpp)
     target_include_directories(pc_generator_cache_validation_test PRIVATE pc_port/save)

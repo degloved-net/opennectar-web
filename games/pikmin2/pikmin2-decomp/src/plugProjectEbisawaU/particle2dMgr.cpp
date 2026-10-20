@@ -200,10 +200,9 @@ void TParticle2dMgr::clearSceneResourceManager()
  */
 void TParticle2dMgr::update()
 {
-	// FPS Mode: JPA avanza un paso por llamada; solo en los ticks originales.
-	if (PC_ORIG_TICK()) {
-		mActiveEmitter->calc();
-	}
+	// FPS Mode: JPA avanza un paso por llamada, solo en los ticks originales;
+	// entre ticks se dibuja adelantado (JPAEmitterManager::pcUpdate).
+	mActiveEmitter->pcUpdate();
 }
 
 /**

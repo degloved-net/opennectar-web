@@ -1,6 +1,76 @@
 #include "Game/GameSystem.h"
 #ifdef PIKI_PC_PORT
-extern "C" void pc_gfx_p2_extend_edge_color(float gxY0, float gxY1, float stripW);
+#include "JSystem/J2D/J2DPicture.h"
+#include "JSystem/JKernel/JKRArchive.h"
+#include "og/newScreen/ogUtil.h"
+extern "C" void pc_gfx_p2_2d_widen_noclip(int on);
+extern f32 gPcHudWideK;
+extern f32 gPcHudWideW;
+extern f32 gPcHudWideH;
+
+// Pantallas anchas: el marco y la foto del mapa solo existen en el 4:3, asi
+// que los laterales llevan la tela de fondo de "Mas cosas" (back_pattern00 de
+// omake.szs, teñida con los colores TEV de su material mat_Pbg_v y repetida
+// a la misma escala: 10x8 losetas en 720x639). La textura se copia al heap
+// del mapa y el archivo se desmonta en seguida.
+static J2DPicture* sPcSidesPic = nullptr;
+
+static void pcSidesLoad()
+{
+	sPcSidesPic = nullptr;
+	char buf[PATH_MAX];
+	og::newScreen::makeLanguageResName(buf, "omake.szs");
+	JKRArchive* arc = JKRMountArchive(buf, JKRArchive::EMM_Mem, nullptr, JKRArchive::EMD_Head);
+	if (!arc) return;
+	void* res = arc->getResource("timg/back_pattern00.bti");
+	const u32 size = res ? arc->getResSize(res) : 0;
+	u8* copy = size ? new (32) u8[size] : nullptr;
+	if (copy) memcpy(copy, res, size);
+	arc->unmount();
+	if (!copy) return;
+	sPcSidesPic = new J2DPicture(reinterpret_cast<ResTIMG*>(copy));
+	// Colores del material al 30 %: en "Mas cosas" la vineta oscurece el borde.
+	sPcSidesPic->setBlack(JUtility::TColor(7, 38, 45, 255));
+	sPcSidesPic->setWhite(JUtility::TColor(0, 9, 32, 255));
+}
+
+// Vineta: cada lateral en dos mitades (arriba/abajo) para que el punto mas
+// claro quede en el centro del borde del 4:3 y se apague hacia el borde de
+// la pantalla y hacia las esquinas. Los colores de esquina modulan la tela.
+static void pcSidesDrawSide(f32 x0, f32 x1, f32 h, bool outerLeft)
+{
+	const JGeometry::TBox2f tile(0.0f, 0.0f, 72.0f, 80.0f);
+	JUtility::TColor edge(0, 0, 0, 255);           // borde de pantalla, arriba/abajo
+	JUtility::TColor edgeMid(90, 90, 90, 255);     // borde de pantalla, centro
+	JUtility::TColor inner(90, 90, 90, 255);       // borde del 4:3, arriba/abajo
+	JUtility::TColor innerMid(255, 255, 255, 255); // borde del 4:3, centro
+	const f32 hm = 0.5f * h;
+	// Esquinas: 0 arriba-izq, 1 arriba-der, 2 abajo-izq, 3 abajo-der.
+	if (outerLeft) {
+		sPcSidesPic->setCornerColorRef(edge, inner, edgeMid, innerMid);
+		sPcSidesPic->drawOut(JGeometry::TBox2f(x0, 0.0f, x1, hm), tile);
+		sPcSidesPic->setCornerColorRef(edgeMid, innerMid, edge, inner);
+	} else {
+		sPcSidesPic->setCornerColorRef(inner, edge, innerMid, edgeMid);
+		sPcSidesPic->drawOut(JGeometry::TBox2f(x0, 0.0f, x1, hm), tile);
+		sPcSidesPic->setCornerColorRef(innerMid, edgeMid, inner, edge);
+	}
+	sPcSidesPic->drawOut(JGeometry::TBox2f(x0, hm, x1, h), tile);
+}
+
+static void pcSidesDraw()
+{
+	if (!sPcSidesPic || gPcHudWideK <= 1.0f) return;
+	const f32 w = gPcHudWideW, h = gPcHudWideH, half = 0.5f * w * gPcHudWideK;
+	const f32 l = 0.5f * w - half, r = 0.5f * w + half;
+	pc_gfx_p2_2d_widen_noclip(1);
+	GXSetScissor(0, 0, (u32)w, (u32)h);
+	GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+	GXSetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+	pcSidesDrawSide(l, 0.0f, h, true);
+	pcSidesDrawSide(w, r, h, false);
+	pc_gfx_p2_2d_widen_noclip(0);
+}
 extern "C" void pc_gfx_set_post_allowed(int allowed);
 #endif
 #include "Game/MoviePlayer.h"
@@ -75,6 +145,9 @@ void SelectState::initNext(SingleGameSection* section)
 	mParentHeap->getTotalFreeSize();
 	mWMapHeap = JKRExpHeap::create(mParentHeap->getFreeSize(), mParentHeap, true);
 	mWMapHeap->becomeCurrentHeap();
+#ifdef PIKI_PC_PORT
+	pcSidesLoad();
+#endif
 
 	if (playData->courseOpen(2) && (playData->isStoryFlag(STORY_DebtPaid)) && !playData->courseOpen(3)) {
 		playData->openCourse(3);
@@ -299,10 +372,10 @@ void SelectState::draw(SingleGameSection* game, Graphics& gfx)
 		particle2dMgr->draw(0, 0);
 #ifdef PIKI_PC_PORT
 		// Pantallas anchas: el marco y la foto del mapa solo existen en el
-		// 4:3 (alargados se estiran en lineas); los laterales toman el color
-		// del borde del marco, fila a fila.
+		// 4:3 (alargados se estiran en lineas): laterales con la tela de
+		// "Mas cosas".
 		gfx.mPerspGraph.setPort();
-		pc_gfx_p2_extend_edge_color(0.0f, 448.0f, 6.0f);
+		pcSidesDraw();
 #endif
 
 		if (sParentHeapFreeSize && sParentHeapFreeSize_Last && (sParentHeapFreeSize != sParentHeapFreeSize_Last)) {
@@ -330,6 +403,10 @@ void SelectState::cleanup(SingleGameSection* game)
 	playData->doneWorldMapEffect();
 	particle2dMgr->killAll();
 	particle2dMgr->clearSceneEmitterAndResourceManager();
+#ifdef PIKI_PC_PORT
+	delete sPcSidesPic; // la textura copiada se va con el heap del mapa
+	sPcSidesPic = nullptr;
+#endif
 	mWMapHeap->freeAll();
 	mWMapHeap->destroy();
 	mWMapHeap = nullptr;

@@ -28,7 +28,12 @@ void pc_cosmetic_rng_set_state(unsigned state);
 // from main()). Deterministic draws from any other thread log once to stderr.
 void pc_sim_rng_note_main_thread(void);
 
+// Largest value pc_sim_rand() and pc_cosmetic_rand() can return: 0x7fff (the
+// MSL range) when deterministic, the host RAND_MAX otherwise. The host value
+// is 0x7fffffff on macOS and Linux, so it cannot scale a deterministic draw.
+int pc_sim_rand_max(void);
+
 // One-draw float shapers mirroring System::getRand: max * (draw / RAND_MAX),
 // so the off-mode values are bit-identical to the original call.
-inline float pc_sim_randf(float max) { return max * (pc_sim_rand() / float(RAND_MAX)); }
-inline float pc_cosmetic_randf(float max) { return max * (pc_cosmetic_rand() / float(RAND_MAX)); }
+inline float pc_sim_randf(float max) { return max * (pc_sim_rand() / float(pc_sim_rand_max())); }
+inline float pc_cosmetic_randf(float max) { return max * (pc_cosmetic_rand() / float(pc_sim_rand_max())); }

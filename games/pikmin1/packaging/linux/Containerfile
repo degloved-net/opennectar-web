@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev \
         libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols \
         libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev libdrm-dev libgbm-dev \
-        libpulse-dev libasound2-dev libdbus-1-dev libudev-dev libsamplerate0-dev \
+        libpulse-dev libasound2-dev libdbus-1-dev libudev-dev libusb-1.0-0-dev libsamplerate0-dev \
     ; rm -rf /var/lib/apt/lists/*
 
 # El online de Pikmin 1 compila con -ftrivial-auto-var-init=zero (GCC 12+).

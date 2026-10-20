@@ -38,6 +38,9 @@ void JPABaseParticle::init_p(JPAEmitterWorkData* workData)
 	mPosition.set(mOffsetPosition.x + mLocalPosition.x * workData->mPublicScale.x,
 	              mOffsetPosition.y + mLocalPosition.y * workData->mPublicScale.y,
 	              mOffsetPosition.z + mLocalPosition.z * workData->mPublicScale.z);
+#ifdef PIKI_PC_PORT
+	mPcPrevPosition = mPosition; // recien nacida: nada que adelantar
+#endif
 
 	JGeometry::TVec3f vec1; // 0x38
 	if (emitter->mAwayFromCenterSpeed) {
@@ -165,6 +168,9 @@ void JPABaseParticle::init_c(JPAEmitterWorkData* workData, JPABaseParticle* part
 
 	_78 = particle->_78;
 	mVelType2.set(mVelType0);
+#ifdef PIKI_PC_PORT
+	mPcPrevPosition = particle->mPosition; // nace donde esta la madre
+#endif
 
 	f32 factor = mMoment * mDrag;
 	mVelocity.set(factor * (mVelType1.x + mVelType2.x), factor * (mVelType1.y + mVelType2.y), factor * (mVelType1.z + mVelType2.z));
@@ -212,6 +218,9 @@ void JPABaseParticle::init_c(JPAEmitterWorkData* workData, JPABaseParticle* part
  */
 bool JPABaseParticle::calc_p(JPAEmitterWorkData* workData)
 {
+#ifdef PIKI_PC_PORT
+	mPcPrevPosition = mPosition;
+#endif
 	if (++mAge >= (s16)mLifeTime) {
 		return true;
 	}
@@ -458,6 +467,9 @@ lbl_80095268:
  */
 bool JPABaseParticle::calc_c(JPAEmitterWorkData* workData)
 {
+#ifdef PIKI_PC_PORT
+	mPcPrevPosition = mPosition;
+#endif
 	if (++mAge >= (s16)mLifeTime) {
 		return true;
 	}

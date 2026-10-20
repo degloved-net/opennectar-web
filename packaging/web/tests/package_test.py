@@ -66,6 +66,18 @@ with tempfile.TemporaryDirectory(prefix='nectar-package-test-') as temporary:
     second = package_jsdelivr(build, root / 'second', url.replace('@v1.0.0', '@v1.0.1'))
     assert json.loads((second / 'cdn/nectar-jsdelivr.json').read_text())['storage'] == manifest['storage']
     assert json.loads((second / 'cdn/nectar-jsdelivr.json').read_text())['rom'] is None
+    shard_root = url.replace('@v1.0.0', '@rom-bundle')
+    sharded = package_jsdelivr(build, root / 'sharded', url, rom, part_bytes=32,
+                               resource_roots={'rom/part-00001.bin': shard_root})
+    sharded_info = json.loads((sharded / 'cdn/nectar-jsdelivr.json').read_text())
+    assert sharded_info['files']['rom/part-00001.bin']['root'] == shard_root
+    assert 'root' not in sharded_info['files']['nectar.js']
+    for roots in ({'missing.bin': shard_root}, {'nectar.js': 'https://invalid.example/runtime'}):
+        try:
+            package_jsdelivr(build, root / 'invalid-shard', url, rom, resource_roots=roots)
+            raise AssertionError('invalid resource root accepted')
+        except ValueError: pass
+        assert not (root / 'invalid-shard').exists()
     previous = (cdn / 'index.html').read_bytes()
     info['threaded'] = True
     (build / 'nectar-build.json').write_text(json.dumps(info))

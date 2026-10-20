@@ -30,6 +30,7 @@ em++ -std=c++17 -O2 -DPIKI_USE_GLES=1 -DPIKI_PC_PORT=1 -sUSE_SDL=2 \
     -sEXPORTED_RUNTIME_METHODS=FS,ccall -lidbfs.js --pre-js packaging/web/pre.js \
     -o "$output/textures.js"
 node packaging/web/tests/loader.cjs
+node packaging/web/tests/cdn-mirrors.cjs
 python3 packaging/web/tests/serve_test.py
 python3 packaging/web/tests/package_test.py
 

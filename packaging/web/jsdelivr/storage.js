@@ -69,6 +69,7 @@
     }
     const storage = new Storage();
     const files = config.files;
+    let mirrorAt = 0;
     const digest = async blob => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())),
         byte => byte.toString(16).padStart(2, '0')).join('');
 
@@ -78,20 +79,57 @@
         signal?.throwIfAborted();
         const cached = await storage.get('resources', file.sha256);
         if (cached instanceof Blob && cached.size === file.bytes && await digest(cached) === file.sha256) return cached;
-        for (let attempt = 0; attempt < 3; ++attempt) {
+        const root = file.root || config.root;
+        const mirrors = [root];
+        if (root.startsWith('https://cdn.jsdelivr.net/gh/')) {
+            mirrors.push(root.replace('cdn.jsdelivr.net', 'fastly.jsdelivr.net'),
+                root.replace('cdn.jsdelivr.net', 'gcore.jsdelivr.net'));
+        }
+        const attempts = Math.max(3, mirrors.length * 2);
+        const firstMirror = mirrorAt;
+        for (let attempt = 0; attempt < attempts; ++attempt) {
             signal?.throwIfAborted();
+            const mirror = (firstMirror + attempt) % mirrors.length;
+            const controller = new AbortController();
+            const abort = () => controller.abort(signal.reason);
+            signal?.addEventListener('abort', abort, {once: true});
+            let timer;
+            const watchdog = milliseconds => {
+                clearTimeout(timer);
+                timer = setTimeout(() => controller.abort(new Error('the download stalled')), milliseconds);
+            };
             try {
-                const response = await fetch(config.root + '/' + name, {credentials: 'omit', signal});
+                watchdog(30000);
+                const response = await fetch(mirrors[mirror] + '/' + name,
+                    {credentials: 'omit', redirect: 'error', signal: controller.signal});
                 if (!response.ok) throw new Error('could not download ' + name + ' (http ' + response.status + ')');
-                const blob = await response.blob();
+                const chunks = [];
+                let bytes = 0;
+                const reader = response.body.getReader();
+                for (;;) {
+                    watchdog(30000);
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    bytes += value.byteLength;
+                    if (bytes > file.bytes) throw new Error('the download exceeds the expected size');
+                    chunks.push(value);
+                }
+                clearTimeout(timer);
+                const blob = new Blob(chunks);
                 if (blob.size !== file.bytes || await digest(blob) !== file.sha256)
                     throw new Error('the download does not match this launcher: ' + name);
                 signal?.throwIfAborted();
                 await storage.put('resources', file.sha256, blob);
+                mirrorAt = mirror;
                 return blob;
             } catch (error) {
-                if (signal?.aborted || error.name === 'QuotaExceededError' || attempt === 2) throw error;
+                controller.abort();
+                if (signal?.aborted || error.name === 'QuotaExceededError' || attempt === attempts - 1) throw error;
                 await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)));
+            } finally {
+                clearTimeout(timer);
+                signal?.removeEventListener('abort', abort);
+                controller.abort();
             }
         }
     }

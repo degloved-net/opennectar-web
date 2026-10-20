@@ -31,14 +31,19 @@ def publish(stage, destination):
         raise
 
 
-def package_jsdelivr(build, destination, root, rom=None, part_bytes=19_000_000, replace=False):
-    build, destination = Path(build).resolve(), Path(destination).resolve()
-    if build.is_relative_to(destination) or (rom is not None and Path(rom).resolve().is_relative_to(destination)):
-        raise ValueError('the output folder must not contain the build or source rom')
+def cdn_root(root):
     url = urlsplit(root)
     if url.scheme != 'https' or url.netloc != 'cdn.jsdelivr.net' or url.query or url.fragment \
             or not re.fullmatch(r'/gh/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*', url.path):
         raise ValueError('provide a versioned https://cdn.jsdelivr.net/gh/owner/repo@commit/path URL')
+    return root.rstrip('/')
+
+
+def package_jsdelivr(build, destination, root, rom=None, part_bytes=19_000_000, replace=False, resource_roots=None):
+    build, destination = Path(build).resolve(), Path(destination).resolve()
+    if build.is_relative_to(destination) or (rom is not None and Path(rom).resolve().is_relative_to(destination)):
+        raise ValueError('the output folder must not contain the build or source rom')
+    root = cdn_root(root)
     if not 1 <= part_bytes <= 20_000_000:
         raise ValueError('rom parts must contain between 1 and 20000000 bytes')
     info = json.loads((build / 'nectar-build.json').read_text())
@@ -80,6 +85,10 @@ def package_jsdelivr(build, destination, root, rom=None, part_bytes=19_000_000, 
             config['rom'] = {**split, 'parts': [part['path'] for part in split['parts']]}
             config['files'].update({part['path']: {'bytes': part['bytes'], 'sha256': part['sha256']}
                                     for part in split['parts']})
+        for name, resource_root in (resource_roots or {}).items():
+            if name not in config['files']:
+                raise ValueError('the cdn resource is missing: ' + name)
+            config['files'][name]['root'] = cdn_root(resource_root)
         loader = (TOOLS / 'loader.js').read_text()
         loader = replace_once(loader, 'this.module = globalThis.Module = this.createRuntime();',
                               'this.module = globalThis.Module = Nectar.Cdn.configureRuntime(this.createRuntime());')
